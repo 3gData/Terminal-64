@@ -1,9 +1,10 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, CanvasTerminal } from "../../stores/canvasStore";
-import { closeTerminal } from "../../lib/tauriApi";
+import { closeTerminal, writeTerminal } from "../../lib/tauriApi";
 import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
 import XTerminal from "../terminal/XTerminal";
+import TextEditor from "./TextEditor";
 import "./FloatingTerminal.css";
 
 interface FloatingTerminalProps {
@@ -23,6 +24,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   const isActive = term.terminalId === activeTerminalId;
   const [showColors, setShowColors] = useState(false);
   const [isWorking, setIsWorking] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const workTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef({ startX: 0, startY: 0, origX: 0, origY: 0 });
 
@@ -235,6 +237,26 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
             }
             onExit={() => handleClose()}
           />
+          {/* Text editor overlay — sits on top of terminal at the bottom */}
+          {editorOpen && (
+            <TextEditor
+              onSend={(text) => {
+                writeTerminal(term.terminalId, text).catch(() => {});
+              }}
+              onClose={() => setEditorOpen(false)}
+            />
+          )}
+          {/* Editor toggle button */}
+          <button
+            className="ft-editor-toggle"
+            onClick={() => setEditorOpen((v) => !v)}
+            title="Text Editor (compose & paste)"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M2 10L1 11L1.5 11.5L11 2L9.5 0.5L0 10L2 10Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round"/>
+              <path d="M8.5 1.5L10 3" stroke="currentColor" strokeWidth="1"/>
+            </svg>
+          </button>
         </div>
       )}
 

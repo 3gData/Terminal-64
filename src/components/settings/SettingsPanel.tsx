@@ -1,4 +1,5 @@
 import { useThemeStore } from "../../stores/themeStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import "./SettingsPanel.css";
 
 interface SettingsPanelProps {
@@ -12,6 +13,10 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const setTheme = useThemeStore((s) => s.setTheme);
   const bgAlpha = useThemeStore((s) => s.bgAlpha);
   const setBgAlpha = useThemeStore((s) => s.setBgAlpha);
+
+  const apiKey = useSettingsStore((s) => s.openaiApiKey);
+  const model = useSettingsStore((s) => s.openaiModel);
+  const setSetting = useSettingsStore((s) => s.set);
 
   if (!isOpen) return null;
 
@@ -35,7 +40,10 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             <select
               className="settings-select"
               value={currentThemeName}
-              onChange={(e) => setTheme(e.target.value)}
+              onChange={(e) => {
+                setTheme(e.target.value);
+                setSetting({ theme: e.target.value });
+              }}
             >
               {themes.map((t) => (
                 <option key={t.name} value={t.name}>{t.name}</option>
@@ -54,26 +62,53 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               min={20}
               max={100}
               value={opacityPercent}
-              onChange={(e) => setBgAlpha(Number(e.target.value) / 100)}
+              onChange={(e) => {
+                const a = Number(e.target.value) / 100;
+                setBgAlpha(a);
+                setSetting({ bgAlpha: a });
+              }}
             />
+          </div>
+
+          <div className="settings-divider" />
+
+          <div className="settings-group">
+            <label className="settings-label">OpenAI API Key</label>
+            <input
+              type="password"
+              className="settings-input"
+              placeholder="sk-..."
+              value={apiKey}
+              onChange={(e) => setSetting({ openaiApiKey: e.target.value })}
+            />
+            <span className="settings-hint">For prompt rewriting in the text editor. Stored locally only.</span>
+          </div>
+
+          <div className="settings-group">
+            <label className="settings-label">AI Model</label>
+            <select
+              className="settings-select"
+              value={model}
+              onChange={(e) => setSetting({ openaiModel: e.target.value })}
+            >
+              <option value="gpt-5.4-mini">gpt-5.4-mini (default, fast)</option>
+              <option value="gpt-5.4">gpt-5.4 (frontier)</option>
+              <option value="gpt-4o-mini">gpt-4o-mini (cheap)</option>
+              <option value="gpt-4o">gpt-4o</option>
+            </select>
           </div>
         </div>
 
         <div className="settings-shortcuts">
           <div className="settings-shortcuts-title">Keyboard Shortcuts</div>
           <div className="shortcut-grid">
-            <div className="shortcut-row"><kbd>Ctrl+Shift+T</kbd><span>New Tab</span></div>
-            <div className="shortcut-row"><kbd>Ctrl+Shift+W</kbd><span>Close Tab</span></div>
-            <div className="shortcut-row"><kbd>Ctrl+Shift+D</kbd><span>Split Right</span></div>
-            <div className="shortcut-row"><kbd>Ctrl+Shift+E</kbd><span>Split Down</span></div>
-            <div className="shortcut-row"><kbd>Ctrl+Shift+G</kbd><span>2x2 Grid</span></div>
             <div className="shortcut-row"><kbd>Ctrl+Shift+P</kbd><span>Command Palette</span></div>
-            <div className="shortcut-row"><kbd>Ctrl+Tab</kbd><span>Next Tab</span></div>
             <div className="shortcut-row"><kbd>Ctrl+C</kbd><span>Copy / Interrupt</span></div>
             <div className="shortcut-row"><kbd>Ctrl+V</kbd><span>Paste</span></div>
             <div className="shortcut-row"><kbd>Ctrl+A</kbd><span>Select All</span></div>
-            <div className="shortcut-row"><kbd>Tab</kbd><span>Shell Autocomplete</span></div>
-            <div className="shortcut-row"><kbd>Up/Down</kbd><span>Command History</span></div>
+            <div className="shortcut-row"><kbd>Ctrl+Scroll</kbd><span>Zoom Canvas</span></div>
+            <div className="shortcut-row"><kbd>Double-click</kbd><span>New Terminal</span></div>
+            <div className="shortcut-row"><kbd>Ctrl+Enter</kbd><span>Send (in editor)</span></div>
           </div>
         </div>
       </div>

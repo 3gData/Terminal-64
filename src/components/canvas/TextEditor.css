@@ -1,0 +1,150 @@
+.text-editor {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-tertiary, #11111b);
+  border-top: 1px solid var(--accent, #89b4fa);
+  max-height: 100%;
+  z-index: 10;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.text-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border, #313244);
+  flex-shrink: 0;
+}
+
+.text-editor-hint {
+  flex: 1;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  letter-spacing: 0.3px;
+}
+
+.text-editor-lines {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+}
+
+.text-editor-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted, #6c7086);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10.5px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.text-editor-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg, #cdd6f4);
+}
+
+.text-editor-btn--send {
+  background: var(--accent, #89b4fa);
+  color: var(--bg-tertiary, #11111b);
+  font-weight: 600;
+  padding: 0 12px;
+}
+
+.text-editor-btn--send:hover {
+  opacity: 0.85;
+  color: var(--bg-tertiary, #11111b);
+}
+
+.text-editor-versions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border, #313244);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.text-editor-version-label {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  min-width: 36px;
+  text-align: center;
+}
+
+.text-editor-btn--sm {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 11px;
+}
+
+.text-editor-btn--sm:disabled {
+  opacity: 0.2;
+  cursor: default;
+}
+
+.text-editor-btn--rewrite {
+  border: 1px solid var(--border, #313244);
+}
+
+.text-editor-btn--rewrite:hover {
+  border-color: var(--fg-muted, #6c7086);
+}
+
+.text-editor-btn--rewrite:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.text-editor-error {
+  padding: 4px 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: #f38ba8;
+  background: rgba(243, 139, 168, 0.08);
+}
+
+.text-editor-area {
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: var(--fg, #cdd6f4);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+  overflow-y: auto;
+}
+
+.text-editor-area::placeholder {
+  color: var(--fg-muted, #6c7086);
+  opacity: 0.5;
+}
+
+.text-editor-area::-webkit-scrollbar {
+  width: 6px;
+}
+
+.text-editor-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.text-editor-area::-webkit-scrollbar-thumb {
+  background: var(--scrollbar, #585b70);
+  border-radius: 3px;
+}

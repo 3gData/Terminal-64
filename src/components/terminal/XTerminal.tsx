@@ -197,24 +197,27 @@ export default function XTerminal({
     };
     xtermTA?.addEventListener("paste", killPaste, true);
 
+    const isMac = navigator.platform.includes("Mac");
+    const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+
     term.attachCustomKeyEventHandler((event) => {
-      // Ctrl+Shift combos → bubble up for app keybindings
-      if (event.ctrlKey && event.shiftKey) return false;
-      // Ctrl+Tab → bubble up
-      if (event.ctrlKey && event.key === "Tab") return false;
+      // Ctrl/Cmd+Shift combos → bubble up for app keybindings
+      if (mod(event) && event.shiftKey) return false;
+      // Ctrl/Cmd+Tab → bubble up
+      if (mod(event) && event.key === "Tab") return false;
 
       if (event.type !== "keydown") return true;
 
-      // Ctrl+V: our own paste — read clipboard, write to PTY
-      if (event.ctrlKey && event.key === "v") {
+      // Ctrl/Cmd+V: paste from clipboard
+      if (mod(event) && event.key === "v") {
         navigator.clipboard.readText().then((text) => {
           if (text) writeTerminal(terminalId, text).catch(() => {});
         });
         return false;
       }
 
-      // Ctrl+C: copy selection OR let xterm send interrupt
-      if (event.ctrlKey && event.key === "c") {
+      // Ctrl/Cmd+C: copy selection OR send interrupt
+      if (mod(event) && event.key === "c") {
         if (term.hasSelection()) {
           navigator.clipboard.writeText(term.getSelection());
           term.clearSelection();
@@ -223,17 +226,21 @@ export default function XTerminal({
         return true;
       }
 
-      // Ctrl+A: select all
-      if (event.ctrlKey && event.key === "a") {
+      // Ctrl/Cmd+A: select all
+      if (mod(event) && event.key === "a") {
         term.selectAll();
         return false;
       }
 
-      // Ctrl+Backspace: send \x08 (^H) — ConPTY translates this to
-      // Ctrl+Backspace INPUT_RECORD which PSReadLine maps to BackwardKillWord
-      // See: https://github.com/microsoft/terminal/pull/3935
-      if (event.ctrlKey && event.key === "Backspace") {
-        writeTerminal(terminalId, "\x08").catch(() => {});
+      // Ctrl+Backspace (Windows) / Option+Backspace (Mac): delete word
+      if (
+        (event.ctrlKey && event.key === "Backspace") ||
+        (isMac && event.altKey && event.key === "Backspace")
+      ) {
+        writeTerminal(
+          terminalId,
+          isMac ? "\x17" : "\x08" // Mac shells use \x17 (Ctrl+W), Windows ConPTY uses \x08
+        ).catch(() => {});
         return false;
       }
 

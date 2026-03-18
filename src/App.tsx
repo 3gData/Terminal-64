@@ -10,6 +10,7 @@ import { useTheme } from "./hooks/useTheme";
 import { useKeybindings } from "./hooks/useKeybindings";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
+import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
 import { closeTerminal } from "./lib/tauriApi";
 import "./App.css";
@@ -25,6 +26,13 @@ function App() {
 
   useTheme();
   useKeybindings();
+
+  // Restore saved settings (theme, opacity) on startup
+  useEffect(() => {
+    const saved = useSettingsStore.getState();
+    if (saved.theme) useThemeStore.getState().setTheme(saved.theme);
+    if (saved.bgAlpha < 1) useThemeStore.getState().setBgAlpha(saved.bgAlpha);
+  }, []);
 
   // Save session on window close (backup — store also auto-saves every 5s)
   useEffect(() => {

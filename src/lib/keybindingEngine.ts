@@ -35,12 +35,15 @@ export function matchesKeyCombo(
 ): boolean {
   const key = event.key.toLowerCase();
   const comboKey = combo.key.toLowerCase();
+  const isMac = navigator.platform.includes("Mac");
 
   if (key !== comboKey) return false;
-  if (!!combo.ctrl !== event.ctrlKey) return false;
+  // On Mac, treat Cmd as Ctrl for keybinding matching
+  const ctrlPressed = isMac ? (event.metaKey || event.ctrlKey) : event.ctrlKey;
+  if (!!combo.ctrl !== ctrlPressed) return false;
   if (!!combo.shift !== event.shiftKey) return false;
   if (!!combo.alt !== event.altKey) return false;
-  if (!!combo.meta !== event.metaKey) return false;
+  if (!isMac && !!combo.meta !== event.metaKey) return false;
 
   return true;
 }

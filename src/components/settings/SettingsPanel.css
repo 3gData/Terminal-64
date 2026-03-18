@@ -112,6 +112,34 @@
   border-color: var(--accent, #89b4fa);
 }
 
+.settings-input {
+  padding: 8px 12px;
+  background: var(--bg-tertiary, #11111b);
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+  color: var(--fg, #cdd6f4);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.settings-input:focus {
+  border-color: var(--accent, #89b4fa);
+}
+
+.settings-hint {
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  line-height: 1.4;
+}
+
+.settings-divider {
+  height: 1px;
+  background: var(--border, #313244);
+  margin: 4px 0;
+}
+
 .settings-select option {
   background: var(--bg-tertiary, #11111b);
   color: var(--fg, #cdd6f4);

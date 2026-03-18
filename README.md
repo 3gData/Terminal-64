@@ -13,7 +13,10 @@ A modern, canvas-based terminal emulator built with **Tauri v2** + **React** + *
 - **Activity indicator** — terminal border lights up when a process is producing output
 - **Theming** — 6 built-in themes (Black, Catppuccin Mocha, Dracula, Monokai, Default Dark, Tokyo Night)
 - **Command palette** — Ctrl+Shift+P to search and execute commands
-- **Native performance** — Rust backend with ConPTY, WebGL-accelerated rendering
+- **Native performance** — Rust backend with ConPTY/PTY, WebGL-accelerated rendering
+- **Cross-platform** — Windows and macOS support
+- **AI prompt rewriting** — compose in the text editor, hit ✨ Rewrite to improve your prompt with GPT
+- **Text editor** — built-in editor overlay on each terminal for composing multi-line text
 
 ## Keyboard Shortcuts
 
@@ -36,9 +39,10 @@ A modern, canvas-based terminal emulator built with **Tauri v2** + **React** + *
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) (stable, MSVC target on Windows)
+- [Rust](https://rustup.rs/) (stable)
 - [Node.js](https://nodejs.org/) v18+
-- Windows 10/11 with [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload)
+- **Windows**: Visual Studio Build Tools with C++ workload
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 
 ## Development
 

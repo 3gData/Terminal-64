@@ -57,7 +57,13 @@ impl PtyManager {
                 e.to_string()
             })?;
 
-        let shell = req.shell.unwrap_or_else(|| "powershell.exe".to_string());
+        let shell = req.shell.unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                "powershell.exe".to_string()
+            } else {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+            }
+        });
         eprintln!("[pty] Spawning shell: {}", shell);
 
         let mut cmd = CommandBuilder::new(&shell);
