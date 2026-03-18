@@ -1,0 +1,151 @@
+.app {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg, #1e1e2e);
+  color: var(--fg, #cdd6f4);
+  overflow: hidden;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+}
+
+/* ---- Header ---- */
+
+.header {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  background: var(--bg-tertiary, #11111b);
+  border-bottom: 1px solid var(--border, #313244);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  height: 100%;
+  cursor: default;
+}
+
+.brand-64 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent, #89b4fa);
+  letter-spacing: 1px;
+}
+
+.header-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 28px;
+  border: 1px solid var(--border, #313244);
+  background: transparent;
+  color: var(--fg-muted, #6c7086);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.header-action:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg, #cdd6f4);
+  border-color: var(--fg-muted, #6c7086);
+}
+
+.header-drag {
+  flex: 1;
+  height: 100%;
+  min-width: 40px;
+}
+
+.header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted, #6c7086);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.header-btn:hover {
+  color: var(--fg, #cdd6f4);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ---- Window controls ---- */
+
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.window-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted, #6c7086);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.window-btn:hover {
+  color: var(--fg, #cdd6f4);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.window-btn--close:hover {
+  background: #c53b53;
+  color: #fff;
+}
+
+/* ---- Resize handles (kept for compatibility) ---- */
+
+.resize-handle {
+  background: transparent;
+  transition: background 0.2s;
+  position: relative;
+}
+
+/* ---- Selection ---- */
+
+::selection {
+  background: var(--accent, #89b4fa);
+  color: var(--bg, #1e1e2e);
+}
+
+/* ---- Scrollbar global ---- */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar, #585b70);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover, #6c7086);
+}

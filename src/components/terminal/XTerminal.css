@@ -1,0 +1,38 @@
+.xterminal {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.xterminal .xterm {
+  width: 100%;
+  height: 100%;
+}
+
+*:focus,
+*:focus-visible {
+  outline: none !important;
+}
+
+.xterminal .xterm-viewport {
+  background-color: transparent !important;
+}
+
+.xterminal .xterm-viewport::-webkit-scrollbar {
+  width: 6px;
+}
+
+.xterminal .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.xterminal .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--scrollbar, #585b70);
+  border-radius: 3px;
+}
+
+.xterminal .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover, #6c7086);
+}

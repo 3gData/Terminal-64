@@ -1,0 +1,337 @@
+import { useEffect, useRef, useCallback } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+import {
+  createTerminal,
+  writeTerminal,
+  resizeTerminal,
+  onTerminalOutput,
+  onTerminalExit,
+} from "../../lib/tauriApi";
+import { useThemeStore } from "../../stores/themeStore";
+import { hexToRgba } from "../../lib/themeEngine";
+import "@xterm/xterm/css/xterm.css";
+import "./XTerminal.css";
+
+interface XTerminalProps {
+  terminalId: string;
+  isActive?: boolean;
+  cwd?: string; // start shell in this directory (session restore)
+  onExit?: (id: string) => void;
+  onFocus?: (id: string) => void;
+  onTitleChange?: (id: string, title: string) => void;
+  onActivity?: (id: string) => void;
+  onCwdChange?: (id: string, cwd: string) => void;
+}
+
+export default function XTerminal({
+  terminalId,
+  isActive,
+  onExit,
+  cwd,
+  onFocus,
+  onTitleChange,
+  onActivity,
+  onCwdChange,
+}: XTerminalProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const initializedRef = useRef(false);
+  const lastSizeRef = useRef({ cols: 0, rows: 0 });
+  const webglRef = useRef<WebglAddon | null>(null);
+  const theme = useThemeStore((s) => s.currentTheme);
+  const bgAlpha = useThemeStore((s) => s.bgAlpha);
+
+  const focus = useCallback(() => {
+    termRef.current?.focus();
+    onFocus?.(terminalId);
+  }, [terminalId, onFocus]);
+
+  // Apply theme + alpha changes to xterm
+  useEffect(() => {
+    if (!termRef.current || !theme) return;
+    const term = termRef.current;
+    const container = containerRef.current;
+
+    // Dispose WebGL when transparent (it can't render alpha)
+    if (bgAlpha < 1 && webglRef.current) {
+      webglRef.current.dispose();
+      webglRef.current = null;
+    }
+
+    if (bgAlpha < 1) {
+      // Make xterm canvas fully transparent — container provides the real bg
+      term.options.theme = { ...theme.terminal, background: "#00000000" };
+      if (container) {
+        container.style.backgroundColor = hexToRgba(
+          theme.terminal.background,
+          bgAlpha
+        );
+      }
+    } else {
+      // Fully opaque — normal rendering
+      term.options.theme = theme.terminal;
+      if (container) {
+        container.style.backgroundColor = "";
+      }
+    }
+
+    term.refresh(0, term.rows - 1);
+
+    // Re-enable WebGL when fully opaque
+    if (bgAlpha >= 1 && !webglRef.current) {
+      try {
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => addon.dispose());
+        term.loadAddon(addon);
+        webglRef.current = addon;
+      } catch {}
+    }
+  }, [theme, bgAlpha]);
+
+  useEffect(() => {
+    if (isActive && termRef.current) {
+      termRef.current.focus();
+    }
+  }, [isActive]);
+
+  useEffect(() => {
+    if (!containerRef.current || initializedRef.current) return;
+    initializedRef.current = true;
+
+    // Use current alpha for initial theme so new splits are transparent
+    const currentAlpha = useThemeStore.getState().bgAlpha;
+    const baseTheme = theme?.terminal ?? {
+      background: "#1e1e2e",
+      foreground: "#cdd6f4",
+      cursor: "#f5e0dc",
+      selectionBackground: "#585b70",
+      black: "#45475a",
+      red: "#f38ba8",
+      green: "#a6e3a1",
+      yellow: "#f9e2af",
+      blue: "#89b4fa",
+      magenta: "#f5c2e7",
+      cyan: "#94e2d5",
+      white: "#bac2de",
+      brightBlack: "#585b70",
+      brightRed: "#f38ba8",
+      brightGreen: "#a6e3a1",
+      brightYellow: "#f9e2af",
+      brightBlue: "#89b4fa",
+      brightMagenta: "#f5c2e7",
+      brightCyan: "#94e2d5",
+      brightWhite: "#a6adc8",
+    };
+    const initialTheme =
+      currentAlpha < 1
+        ? { ...baseTheme, background: "#00000000" }
+        : baseTheme;
+
+    // Set container bg for transparency
+    if (currentAlpha < 1 && containerRef.current) {
+      containerRef.current.style.backgroundColor = hexToRgba(
+        baseTheme.background,
+        currentAlpha
+      );
+    }
+
+    const term = new Terminal({
+      cursorBlink: false,
+      cursorStyle: "underline",
+      cursorWidth: 1,
+      cursorInactiveStyle: "none",
+      fontSize: 14,
+      fontFamily: "'Cascadia Code', 'Fira Code', Consolas, monospace",
+      fontWeight: "400",
+      letterSpacing: 0,
+      lineHeight: 1.2,
+      theme: initialTheme,
+      allowProposedApi: true,
+      scrollback: 10000,
+      rightClickSelectsWord: true,
+    });
+
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(containerRef.current);
+
+    // Only use WebGL when fully opaque (it doesn't support transparency)
+    if (currentAlpha >= 1) {
+      try {
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => addon.dispose());
+        term.loadAddon(addon);
+        webglRef.current = addon;
+      } catch {}
+    }
+
+    fitAddon.fit();
+    lastSizeRef.current = { cols: term.cols, rows: term.rows };
+    termRef.current = term;
+    fitAddonRef.current = fitAddon;
+
+    // Send keystrokes to PTY
+    term.onData((data) => {
+      writeTerminal(terminalId, data).catch(() => {});
+    });
+
+    term.onBinary((data) => {
+      writeTerminal(terminalId, data).catch(() => {});
+    });
+
+    term.onTitleChange((title) => {
+      onTitleChange?.(terminalId, title);
+    });
+
+    // Kill xterm's native paste on its hidden textarea.
+    // stopImmediatePropagation prevents xterm's own paste listener from firing.
+    const xtermTA = containerRef.current.querySelector(
+      "textarea.xterm-helper-textarea"
+    ) as HTMLTextAreaElement | null;
+    const killPaste = (e: Event) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    xtermTA?.addEventListener("paste", killPaste, true);
+
+    term.attachCustomKeyEventHandler((event) => {
+      // Ctrl+Shift combos → bubble up for app keybindings
+      if (event.ctrlKey && event.shiftKey) return false;
+      // Ctrl+Tab → bubble up
+      if (event.ctrlKey && event.key === "Tab") return false;
+
+      if (event.type !== "keydown") return true;
+
+      // Ctrl+V: our own paste — read clipboard, write to PTY
+      if (event.ctrlKey && event.key === "v") {
+        navigator.clipboard.readText().then((text) => {
+          if (text) writeTerminal(terminalId, text).catch(() => {});
+        });
+        return false;
+      }
+
+      // Ctrl+C: copy selection OR let xterm send interrupt
+      if (event.ctrlKey && event.key === "c") {
+        if (term.hasSelection()) {
+          navigator.clipboard.writeText(term.getSelection());
+          term.clearSelection();
+          return false;
+        }
+        return true;
+      }
+
+      // Ctrl+A: select all
+      if (event.ctrlKey && event.key === "a") {
+        term.selectAll();
+        return false;
+      }
+
+      // Ctrl+Backspace: send \x08 (^H) — ConPTY translates this to
+      // Ctrl+Backspace INPUT_RECORD which PSReadLine maps to BackwardKillWord
+      // See: https://github.com/microsoft/terminal/pull/3935
+      if (event.ctrlKey && event.key === "Backspace") {
+        writeTerminal(terminalId, "\x08").catch(() => {});
+        return false;
+      }
+
+      return true;
+    });
+
+    // Register listeners then create PTY
+    let unlistenOutput: (() => void) | null = null;
+    let unlistenExit: (() => void) | null = null;
+    let disposed = false;
+
+    (async () => {
+      unlistenOutput = await onTerminalOutput((payload) => {
+        if (payload.id === terminalId) {
+          term.write(payload.data);
+          onActivity?.(terminalId);
+          // Parse CWD from PowerShell prompt "PS C:\path>" or OSC 7
+          const psMatch = payload.data.match(/PS ([A-Z]:\\[^>]*?)>/);
+          if (psMatch) onCwdChange?.(terminalId, psMatch[1]);
+          const oscMatch = payload.data.match(/\x1b\]7;file:\/\/[^/]*\/(.*?)(?:\x07|\x1b\\)/);
+          if (oscMatch) onCwdChange?.(terminalId, decodeURIComponent(oscMatch[1]));
+        }
+      });
+
+      unlistenExit = await onTerminalExit((payload) => {
+        if (payload.id === terminalId) {
+          term.write("\r\n\x1b[38;5;242m[Process exited]\x1b[0m\r\n");
+          onExit?.(terminalId);
+        }
+      });
+
+      if (disposed) return;
+
+      try {
+        const cols = term.cols;
+        const rows = term.rows;
+        lastSizeRef.current = { cols, rows };
+        await createTerminal({ id: terminalId, cols, rows, cwd: cwd || undefined });
+        // Force the shell to redraw by sending a resize
+        // This fixes state when reconnecting to an existing PTY (pop-out)
+        await resizeTerminal(terminalId, cols, rows);
+      } catch (err) {
+        term.write(`\r\n\x1b[31mFailed to start shell: ${err}\x1b[0m\r\n`);
+      }
+    })();
+
+    // Resize only when container actually changes
+    let resizeTimeout: ReturnType<typeof setTimeout>;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (!rect || rect.width === 0 || rect.height === 0) return;
+
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        if (!fitAddonRef.current || !termRef.current) return;
+        const proposed = fitAddonRef.current.proposeDimensions();
+        if (
+          !proposed ||
+          (proposed.cols === lastSizeRef.current.cols &&
+            proposed.rows === lastSizeRef.current.rows)
+        ) {
+          return;
+        }
+        fitAddonRef.current.fit();
+        lastSizeRef.current = {
+          cols: termRef.current.cols,
+          rows: termRef.current.rows,
+        };
+        resizeTerminal(
+          terminalId,
+          termRef.current.cols,
+          termRef.current.rows
+        ).catch(() => {});
+      }, 50);
+    });
+    observer.observe(containerRef.current);
+
+    setTimeout(() => term.focus(), 50);
+
+    return () => {
+      disposed = true;
+      initializedRef.current = false;
+      observer.disconnect();
+      clearTimeout(resizeTimeout);
+      unlistenOutput?.();
+      unlistenExit?.();
+      xtermTA?.removeEventListener("paste", killPaste, true);
+      term.dispose();
+      termRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, [terminalId]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={`xterminal ${isActive ? "xterminal--active" : ""}`}
+      onMouseDown={focus}
+    />
+  );
+}

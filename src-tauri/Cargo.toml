@@ -1,0 +1,24 @@
+[package]
+name = "terminal-64"
+version = "0.1.0"
+description = "A modern terminal emulator"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = ["devtools"] }
+portable-pty = "0.8"
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
