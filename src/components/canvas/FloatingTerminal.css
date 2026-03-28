@@ -46,6 +46,35 @@
   color: var(--fg-secondary, #bac2de);
 }
 
+input.ft-title--editing {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid color-mix(in srgb, var(--ft-border, #cba6f7) 40%, transparent);
+  border-radius: 3px;
+  padding: 1px 6px;
+  outline: none;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg, #cdd6f4);
+  min-width: 0;
+}
+
+.ft-btn--edit {
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.ft-header:hover .ft-btn--edit {
+  opacity: 0.6;
+}
+
+.ft-btn--edit:hover {
+  opacity: 1 !important;
+}
+
+.ft-btn--accept:hover { color: #a6e3a1; }
+.ft-btn--cancel:hover { color: #f38ba8; }
+
 .ft-btn {
   display: flex;
   align-items: center;
@@ -119,6 +148,10 @@
   min-height: 0;
   background: var(--bg, #1e1e2e);
   position: relative;
+}
+
+.ft-body--claude {
+  overflow: visible;
 }
 
 /* ---- Editor toggle button ---- */

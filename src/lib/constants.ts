@@ -1,10 +1,10 @@
 export const BORDER_COLORS = [
-  "#89b4fa", "#f38ba8", "#a6e3a1", "#f9e2af",
-  "#f5c2e7", "#94e2d5", "#fab387", "#cba6f7",
-  "#74c7ec", "#b4befe", "#ffffff", "#6c7086",
+  "#3b82f6", "#ef4444", "#22c55e", "#eab308",
+  "#ec4899", "#06b6d4", "#f97316", "#a855f7",
+  "#14b8a6", "#6366f1", "#ffffff", "#6c7086",
 ];
 
-export const DEFAULT_BORDER_COLOR = "#89b4fa";
+export const DEFAULT_BORDER_COLOR = "#3b82f6";
 export const DEFAULT_TERMINAL_WIDTH = 700;
 export const DEFAULT_TERMINAL_HEIGHT = 450;
 export const MIN_TERMINAL_WIDTH = 300;

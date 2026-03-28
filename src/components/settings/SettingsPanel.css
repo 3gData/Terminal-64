@@ -6,7 +6,7 @@
   display: flex;
   justify-content: flex-end;
   z-index: 900;
-  animation: settings-fade-in 0.1s ease-out;
+  animation: settings-fade-in 0.2s ease-out;
 }
 
 @keyframes settings-fade-in {
@@ -19,10 +19,10 @@
   height: 100%;
   background: var(--bg-secondary, #181825);
   border-left: 1px solid var(--border, #313244);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
   display: flex;
   flex-direction: column;
-  animation: settings-slide-in 0.15s ease-out;
+  animation: settings-slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   overflow-y: auto;
 }
 
@@ -79,11 +79,11 @@
 }
 
 .settings-label {
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 11.5px;
+  font-family: var(--claude-font, 'Segoe UI', system-ui, sans-serif);
+  font-size: 12px;
+  font-weight: 600;
   color: var(--fg-secondary, #bac2de);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.2px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -300,4 +300,52 @@
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: 11.5px;
   color: var(--fg-muted, #6c7086);
+}
+
+/* Discord bot */
+.settings-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f38ba8;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.settings-dot--on {
+  background: #a6e3a1;
+}
+
+.settings-discord-btn {
+  margin-top: 4px;
+  padding: 6px 16px;
+  border: 1px solid rgba(137, 180, 250, 0.3);
+  background: rgba(137, 180, 250, 0.08);
+  color: #89b4fa;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+
+.settings-discord-btn:hover {
+  background: rgba(137, 180, 250, 0.15);
+}
+
+.settings-discord-btn--stop {
+  border-color: rgba(243, 139, 168, 0.3);
+  background: rgba(243, 139, 168, 0.08);
+  color: #f38ba8;
+}
+
+.settings-discord-btn--stop:hover {
+  background: rgba(243, 139, 168, 0.15);
+}
+
+.settings-discord-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }

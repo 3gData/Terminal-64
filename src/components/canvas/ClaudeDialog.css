@@ -10,11 +10,14 @@
 }
 
 .claude-dialog {
-  width: 440px;
+  width: 460px;
+  max-height: 80vh;
   background: var(--bg-secondary, #181825);
   border: 1px solid var(--border, #313244);
-  border-radius: 10px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
@@ -30,7 +33,7 @@
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: 13px;
   font-weight: 600;
-  color: #cba6f7;
+  color: var(--ft-border, #cba6f7);
 }
 
 .claude-dialog-close {
@@ -52,67 +55,37 @@
 }
 
 .claude-dialog-body {
-  padding: 18px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.claude-dialog-recent {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 4px;
-}
-
-.claude-dialog-recent-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--bg-tertiary, #11111b);
-  border: 1px solid var(--border, #313244);
-  border-radius: 6px;
-  color: var(--fg-secondary, #bac2de);
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.1s, border-color 0.1s;
-}
-
-.claude-dialog-recent-item:hover {
-  background: rgba(203, 166, 247, 0.06);
-  border-color: rgba(203, 166, 247, 0.3);
-}
-
-.claude-dialog-recent-item span:first-of-type {
+  overflow-y: auto;
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.claude-dialog-recent-full {
-  font-size: 9px;
-  color: var(--fg-muted, #6c7086);
-  display: none;
-}
-
-.claude-dialog-recent-item:hover .claude-dialog-recent-full {
-  display: block;
-}
-
-.claude-dialog-recent-item:hover span:first-of-type {
-  display: none;
+.claude-dialog-body::-webkit-scrollbar { width: 4px; }
+.claude-dialog-body::-webkit-scrollbar-thumb {
+  background: var(--scrollbar, rgba(255, 255, 255, 0.08));
+  border-radius: 2px;
 }
 
 .claude-dialog-label {
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--claude-font, 'Segoe UI', system-ui, sans-serif);
   font-size: 11px;
-  color: var(--fg-secondary, #bac2de);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
+  font-weight: 600;
+  color: var(--fg-muted, #6c7086);
+  letter-spacing: 0.3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.claude-dialog-count {
+  font-size: 10px;
+  padding: 0 5px;
+  background: var(--bg-tertiary, #11111b);
+  border-radius: 8px;
+  color: var(--fg-muted, #6c7086);
 }
 
 .claude-dialog-dir-row {
@@ -130,10 +103,11 @@
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: 12px;
   outline: none;
+  transition: border-color 0.15s;
 }
 
 .claude-dialog-input:focus {
-  border-color: #cba6f7;
+  border-color: color-mix(in srgb, var(--ft-border, #cba6f7) 50%, transparent);
 }
 
 .claude-dialog-browse {
@@ -142,7 +116,7 @@
   border: 1px solid var(--border, #313244);
   border-radius: 6px;
   color: var(--fg-secondary, #bac2de);
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--claude-font, 'Segoe UI', system-ui, sans-serif);
   font-size: 11px;
   cursor: pointer;
   transition: background 0.1s, border-color 0.1s;
@@ -153,37 +127,150 @@
   border-color: var(--fg-muted, #6c7086);
 }
 
-.claude-dialog-checkbox {
+/* Directory chips */
+.claude-dialog-chips {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  cursor: pointer;
-  user-select: none;
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 12px;
-  color: var(--fg-secondary, #bac2de);
-  padding: 4px 0;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.claude-dialog-check {
-  width: 18px;
-  height: 18px;
-  border: 1px solid var(--border, #313244);
-  border-radius: 4px;
+.claude-dialog-chip {
+  padding: 5px 10px;
   background: var(--bg-tertiary, #11111b);
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+  color: var(--fg-secondary, #bac2de);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.claude-dialog-chip:hover {
+  background: color-mix(in srgb, var(--ft-border, #cba6f7) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ft-border, #cba6f7) 30%, transparent);
+  color: var(--fg, #cdd6f4);
+}
+
+/* Sections */
+.claude-dialog-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Session rows */
+.claude-dialog-session {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-tertiary, #11111b);
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+  color: var(--fg-secondary, #bac2de);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
   transition: background 0.1s, border-color 0.1s;
+  width: 100%;
+}
+
+.claude-dialog-session:hover {
+  background: color-mix(in srgb, var(--ft-border, #cba6f7) 6%, transparent);
+  border-color: color-mix(in srgb, var(--ft-border, #cba6f7) 25%, transparent);
+}
+
+.claude-dialog-session-pin {
+  color: #eab308;
+  font-size: 10px;
   flex-shrink: 0;
 }
 
-.claude-dialog-check.checked {
-  background: #cba6f7;
-  border-color: #cba6f7;
-  color: #11111b;
+.claude-dialog-session-name {
+  color: var(--ft-border, #cba6f7);
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.claude-dialog-session-id {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  flex-shrink: 0;
+}
+
+.claude-dialog-session-meta {
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  flex-shrink: 0;
+}
+
+.claude-dialog-session-size {
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  opacity: 0.6;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.claude-dialog-session-row {
+  display: flex;
+  gap: 0;
+}
+
+.claude-dialog-session-row .claude-dialog-session {
+  flex: 1;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.claude-dialog-session-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  flex-shrink: 0;
+  background: var(--bg-tertiary, #11111b);
+  border: 1px solid var(--border, #313244);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  color: var(--fg-muted, #6c7086);
+  cursor: pointer;
+  transition: color 0.1s, background 0.1s;
+}
+
+.claude-dialog-session-delete:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.claude-dialog-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.claude-dialog-session-list::-webkit-scrollbar { width: 3px; }
+.claude-dialog-session-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar, rgba(255, 255, 255, 0.08));
+  border-radius: 2px;
+}
+
+.claude-dialog-loading {
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  padding: 8px 0;
+  text-align: center;
+}
+
+/* Footer */
 .claude-dialog-footer {
   display: flex;
   justify-content: flex-end;
@@ -198,7 +285,7 @@
   border: 1px solid var(--border, #313244);
   border-radius: 6px;
   color: var(--fg-muted, #6c7086);
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--claude-font, 'Segoe UI', system-ui, sans-serif);
   font-size: 11px;
   cursor: pointer;
   transition: background 0.1s;
@@ -210,11 +297,11 @@
 
 .claude-dialog-confirm {
   padding: 8px 18px;
-  background: #cba6f7;
+  background: var(--ft-border, #cba6f7);
   border: none;
   border-radius: 6px;
   color: #11111b;
-  font-family: 'Cascadia Code', Consolas, monospace;
+  font-family: var(--claude-font, 'Segoe UI', system-ui, sans-serif);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;

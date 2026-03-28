@@ -1,22 +1,13 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, CanvasTerminal } from "../../stores/canvasStore";
-import { closeTerminal, writeTerminal, getClaudeSessionId } from "../../lib/tauriApi";
+import { useClaudeStore } from "../../stores/claudeStore";
+import { closeTerminal, writeTerminal, closeClaudeSession, renameDiscordSession } from "../../lib/tauriApi";
 import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
 import XTerminal from "../terminal/XTerminal";
+import ClaudeChat from "../claude/ClaudeChat";
 import TextEditor from "./TextEditor";
 import "./FloatingTerminal.css";
-
-function buildClaudeCommand(term: CanvasTerminal): string {
-  let cmd = "claude";
-  if (term.claudeSessionId && term.claudeSessionId !== "active") {
-    cmd += ` --resume ${term.claudeSessionId}`;
-  }
-  if (term.claudeSkipPermissions) {
-    cmd += " --dangerously-skip-permissions";
-  }
-  return cmd;
-}
 
 interface FloatingTerminalProps {
   term: CanvasTerminal;
@@ -54,6 +45,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   const handleHeaderMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if ((e.target as HTMLElement).closest(".ft-btn")) return;
+      if ((e.target as HTMLElement).closest(".ft-title--editing")) return;
       e.preventDefault();
       e.stopPropagation();
       bringToFront(term.id);
@@ -124,9 +116,13 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   );
 
   const handleClose = useCallback(() => {
-    closeTerminal(term.terminalId).catch(() => {});
+    if (term.panelType === "claude") {
+      closeClaudeSession(term.terminalId).catch(() => {});
+    } else {
+      closeTerminal(term.terminalId).catch(() => {});
+    }
     removeTerminal(term.id);
-  }, [term.id, term.terminalId, removeTerminal]);
+  }, [term.id, term.terminalId, term.panelType, removeTerminal]);
 
   const popOut = useCanvasStore((s) => s.popOut);
 
@@ -158,6 +154,12 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
     setActive(term.terminalId);
   }, [term.id, term.terminalId, bringToFront, setActive]);
 
+  const isClaude = term.panelType === "claude";
+  const claudeSessionName = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.name : undefined);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
   return (
     <div
       className={`floating-terminal ${isWorking ? "floating-terminal--working" : ""}`}
@@ -173,18 +175,74 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
     >
       {/* Header */}
       <div className="ft-header" onMouseDown={handleHeaderMouseDown}>
-        <span className="ft-title">{term.title}</span>
-        <button
-          className="ft-btn"
-          onClick={(e) => { e.stopPropagation(); handlePopOut(); }}
-          title="Pop out to new window"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path d="M4 1H1V9H9V6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M6 1H9V4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M9 1L5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
-          </svg>
-        </button>
+        {isClaude ? (
+          editingName ? (
+            <>
+              <input
+                ref={nameInputRef}
+                className="ft-title ft-title--editing"
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const name = nameDraft.trim();
+                    useClaudeStore.getState().setName(term.terminalId, name);
+                    setEditingName(false);
+                    const cwd = useClaudeStore.getState().sessions[term.terminalId]?.cwd || "";
+                    renameDiscordSession(term.terminalId, name, cwd).catch(() => {});
+                  } else if (e.key === "Escape") {
+                    setEditingName(false);
+                  }
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                spellCheck={false}
+                autoFocus
+              />
+              <button className="ft-btn ft-btn--accept" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => {
+                e.stopPropagation();
+                const name = nameDraft.trim();
+                useClaudeStore.getState().setName(term.terminalId, name);
+                setEditingName(false);
+                const cwd = useClaudeStore.getState().sessions[term.terminalId]?.cwd || "";
+                renameDiscordSession(term.terminalId, name, cwd).catch(() => {});
+              }} title="Save">
+                <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </button>
+              <button className="ft-btn ft-btn--cancel" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => {
+                e.stopPropagation();
+                setEditingName(false);
+              }} title="Cancel">
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M1 1L7 7M7 1L1 7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="ft-title">{claudeSessionName || "Unnamed Session"}</span>
+              <button className="ft-btn ft-btn--edit" onClick={(e) => {
+                e.stopPropagation();
+                setNameDraft(claudeSessionName || "");
+                setEditingName(true);
+              }} title="Rename">
+                <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M5.5 1.5L7.5 3.5M1 8L1.5 6L6.5 1L8 2.5L3 7.5L1 8Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round"/></svg>
+              </button>
+            </>
+          )
+        ) : (
+          <span className="ft-title">{term.title}</span>
+        )}
+        {!isClaude && (
+          <button
+            className="ft-btn"
+            onClick={(e) => { e.stopPropagation(); handlePopOut(); }}
+            title="Pop out to new window"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path d="M4 1H1V9H9V6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M6 1H9V4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M9 1L5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+            </svg>
+          </button>
+        )}
         <button
           className="ft-btn ft-btn--settings"
           onClick={(e) => {
@@ -222,7 +280,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
         </div>
       )}
 
-      {/* Terminal body or ghost */}
+      {/* Body */}
       {term.poppedOut ? (
         <div className="ft-ghost">
           <svg width="20" height="20" viewBox="0 0 10 10" fill="none" opacity="0.3">
@@ -232,29 +290,23 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
           </svg>
           <span>POPPED OUT</span>
         </div>
+      ) : isClaude ? (
+        <div className="ft-body ft-body--claude">
+          <ClaudeChat
+            sessionId={term.terminalId}
+            cwd={term.cwd}
+            skipPermissions={term.claudeSkipPermissions}
+            isActive={isActive}
+          />
+        </div>
       ) : (
         <div className="ft-body">
           <XTerminal
             terminalId={term.terminalId}
             isActive={isActive}
             cwd={term.cwd || undefined}
-            autoCommand={
-              term.isClaudeSession
-                ? buildClaudeCommand(term)
-                : undefined
-            }
             onFocus={() => handleFocus()}
-            onActivity={() => {
-              handleActivity();
-              // Fetch real session ID from Claude's local files
-              if (term.isClaudeSession && !term.claudeSessionId && term.cwd) {
-                getClaudeSessionId(term.cwd)
-                  .then((sid) => {
-                    if (sid) useCanvasStore.getState().setClaudeSessionId(term.id, sid);
-                  })
-                  .catch(() => {});
-              }
-            }}
+            onActivity={() => handleActivity()}
             onTitleChange={(_, title) => {
               useCanvasStore.getState().setTitle(term.id, title);
               if (/^[A-Z]:\\/.test(title)) {
@@ -264,12 +316,9 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
             onCwdChange={(_, dir) =>
               useCanvasStore.getState().setCwd(term.id, dir)
             }
-            onSessionId={(_, sid) =>
-              useCanvasStore.getState().setClaudeSessionId(term.id, sid)
-            }
             onExit={() => handleClose()}
           />
-          {/* Text editor overlay — sits on top of terminal at the bottom */}
+          {/* Text editor overlay */}
           {editorOpen && (
             <TextEditor
               onSend={(text) => {
@@ -292,7 +341,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
         </div>
       )}
 
-      {/* Resize handles — all edges and corners */}
+      {/* Resize handles */}
       <div className="ft-resize ft-resize--n" onMouseDown={(e) => startEdgeResize(e, "n")} />
       <div className="ft-resize ft-resize--s" onMouseDown={(e) => startEdgeResize(e, "s")} />
       <div className="ft-resize ft-resize--w" onMouseDown={(e) => startEdgeResize(e, "w")} />

@@ -30,11 +30,10 @@
   cursor: default;
 }
 
-.brand-64 {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--accent, #89b4fa);
-  letter-spacing: 1px;
+.brand-icon {
+  width: 18px;
+  height: 18px;
+  opacity: 0.85;
 }
 
 .header-action {

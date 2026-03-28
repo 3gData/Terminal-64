@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useThemeStore } from "../../stores/themeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { startDiscordBot, stopDiscordBot, discordBotStatus } from "../../lib/tauriApi";
 import "./SettingsPanel.css";
+
+import { FONT_OPTIONS, fontStack } from "../../lib/fonts";
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -15,14 +18,22 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const bgAlpha = useThemeStore((s) => s.bgAlpha);
   const setBgAlpha = useThemeStore((s) => s.setBgAlpha);
 
-  const apiKey = useSettingsStore((s) => s.openaiApiKey);
-  const model = useSettingsStore((s) => s.openaiModel);
   const quickPastes = useSettingsStore((s) => s.quickPastes);
   const setSetting = useSettingsStore((s) => s.set);
   const addQuickPaste = useSettingsStore((s) => s.addQuickPaste);
   const removeQuickPaste = useSettingsStore((s) => s.removeQuickPaste);
 
   const [newCommand, setNewCommand] = useState("");
+  const discordToken = useSettingsStore((s) => s.discordBotToken);
+  const discordServerId = useSettingsStore((s) => s.discordServerId);
+  const [botConnected, setBotConnected] = useState(false);
+  const [botLoading, setBotLoading] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      discordBotStatus().then(setBotConnected).catch(() => {});
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -59,6 +70,22 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             >
               {themes.map((t) => (
                 <option key={t.name} value={t.name}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="settings-group">
+            <label className="settings-label">Claude Chat Font</label>
+            <select
+              className="settings-select"
+              value={useSettingsStore.getState().claudeFont || "system"}
+              onChange={(e) => {
+                setSetting({ claudeFont: e.target.value });
+                document.documentElement.style.setProperty("--claude-font", fontStack(e.target.value));
+              }}
+            >
+              {FONT_OPTIONS.map((f) => (
+                <option key={f.id} value={f.id}>{f.label}</option>
               ))}
             </select>
           </div>
@@ -127,30 +154,50 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
           <div className="settings-divider" />
 
+          <div className="settings-divider" />
+
+          {/* Discord Bot */}
           <div className="settings-group">
-            <label className="settings-label">OpenAI API Key</label>
+            <label className="settings-label">
+              Discord Bot
+              <span className={`settings-dot ${botConnected ? "settings-dot--on" : ""}`} />
+            </label>
             <input
               type="password"
               className="settings-input"
-              placeholder="sk-..."
-              value={apiKey}
-              onChange={(e) => setSetting({ openaiApiKey: e.target.value })}
+              placeholder="Bot token"
+              value={discordToken}
+              onChange={(e) => setSetting({ discordBotToken: e.target.value })}
             />
-            <span className="settings-hint">For prompt rewriting in the text editor. Stored locally only.</span>
-          </div>
-
-          <div className="settings-group">
-            <label className="settings-label">AI Model</label>
-            <select
-              className="settings-select"
-              value={model}
-              onChange={(e) => setSetting({ openaiModel: e.target.value })}
+            <input
+              className="settings-input"
+              placeholder="Server ID"
+              value={discordServerId}
+              onChange={(e) => setSetting({ discordServerId: e.target.value })}
+            />
+            <span className="settings-hint">Named sessions get a Discord channel for remote interaction.</span>
+            <button
+              className={`settings-discord-btn ${botConnected ? "settings-discord-btn--stop" : ""}`}
+              disabled={botLoading || (!botConnected && (!discordToken || !discordServerId))}
+              onClick={async () => {
+                setBotLoading(true);
+                try {
+                  if (botConnected) {
+                    await stopDiscordBot();
+                    setBotConnected(false);
+                  } else {
+                    await startDiscordBot(discordToken, discordServerId);
+                    setBotConnected(true);
+                  }
+                } catch (err) {
+                  alert(String(err));
+                } finally {
+                  setBotLoading(false);
+                }
+              }}
             >
-              <option value="gpt-5.4-mini">gpt-5.4-mini (default, fast)</option>
-              <option value="gpt-5.4">gpt-5.4 (frontier)</option>
-              <option value="gpt-4o-mini">gpt-4o-mini (cheap)</option>
-              <option value="gpt-4o">gpt-4o</option>
-            </select>
+              {botLoading ? "..." : botConnected ? "Disconnect" : "Connect"}
+            </button>
           </div>
         </div>
       </div>

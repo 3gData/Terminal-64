@@ -1,0 +1,227 @@
+use crate::types::*;
+use std::collections::HashMap;
+use std::io::BufRead;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter};
+
+struct ClaudeInstance {
+    child: Child,
+    generation: u64,
+}
+
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+use std::sync::Arc;
+
+pub struct ClaudeManager {
+    instances: Arc<Mutex<HashMap<String, ClaudeInstance>>>,
+}
+
+fn build_command(
+    session_flag: &str,
+    session_value: &str,
+    prompt: &str,
+    permission_mode: &str,
+    model: &Option<String>,
+    effort: &Option<String>,
+    cwd: &str,
+    disallowed_tools: &Option<String>,
+    settings_path: &Option<String>,
+) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.arg("-p")
+        .arg(prompt)
+        .arg("--output-format").arg("stream-json")
+        .arg("--verbose")
+        .arg("--include-partial-messages")
+        .arg(session_flag).arg(session_value);
+
+    // Safe tools that should never require permission
+    const SAFE_TOOLS: &str = "Read,Glob,Grep,LS,WebSearch,WebFetch,TodoRead,TodoWrite,Agent,EnterPlanMode,ExitPlanMode,TaskCreate,TaskUpdate,TaskGet,TaskList,TaskStop,ToolSearch";
+
+    match permission_mode {
+        "bypass_all" => { cmd.arg("--permission-mode").arg("bypassPermissions"); }
+        "accept_edits" => {
+            cmd.arg("--permission-mode").arg("acceptEdits");
+            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
+        }
+        "plan" => {
+            // Plan mode: allow reads + plan tools + Write/Edit for plan files
+            cmd.arg("--permission-mode").arg("default");
+            cmd.arg("--allowedTools").arg(format!("{},Write,Edit", SAFE_TOOLS));
+        }
+        "auto" => {
+            cmd.arg("--permission-mode").arg("auto");
+            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
+        }
+        _ => {
+            // Default mode: ask for writes/bash, but reads are always free
+            cmd.arg("--permission-mode").arg("default");
+            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
+        }
+    }
+
+    if let Some(m) = model {
+        if !m.is_empty() { cmd.arg("--model").arg(m); }
+    }
+    if let Some(e) = effort {
+        if !e.is_empty() { cmd.arg("--effort").arg(e); }
+    }
+    if let Some(dt) = disallowed_tools {
+        if !dt.is_empty() { cmd.arg("--disallowed-tools").arg(dt); }
+    }
+    if let Some(sp) = settings_path {
+        if !sp.is_empty() { cmd.arg("--settings").arg(sp); }
+    }
+    if !cwd.is_empty() && cwd != "." { cmd.current_dir(cwd); }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    cmd
+}
+
+fn spawn_and_stream(
+    instances: &Arc<Mutex<HashMap<String, ClaudeInstance>>>,
+    app_handle: &AppHandle,
+    session_id: String,
+    mut cmd: Command,
+) -> Result<(), String> {
+    {
+        let mut inst = instances.lock().map_err(|e| e.to_string())?;
+        if let Some(mut old) = inst.remove(&session_id) {
+            let _ = old.child.kill();
+            let _ = old.child.wait();
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+
+    // Capture stderr into a shared buffer so the stdout reader can surface errors
+    let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let sid_for_stderr = session_id.clone();
+        let buf = stderr_buf.clone();
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                eprintln!("[claude:stderr:{}] {}", &sid_for_stderr[..8.min(sid_for_stderr.len())], line);
+                if let Ok(mut b) = buf.lock() {
+                    if b.len() < 4000 {
+                        if !b.is_empty() { b.push('\n'); }
+                        b.push_str(&line);
+                    }
+                }
+            }
+        });
+    }
+
+    let gen = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let sid = session_id.clone();
+    let handle = app_handle.clone();
+    let instances_clone = instances.clone();
+
+    std::thread::spawn(move || {
+        eprintln!("[claude] Reader thread started for {} (gen {})", sid, gen);
+        let reader = std::io::BufReader::new(stdout);
+        let mut had_output = false;
+        for line in reader.lines() {
+            match line {
+                Ok(line) if line.trim().is_empty() => continue,
+                Ok(line) => {
+                    had_output = true;
+                    let _ = handle.emit("claude-event", ClaudeEvent {
+                        session_id: sid.clone(),
+                        data: line,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[claude] Reader error: {} for {}", e, sid);
+                    break;
+                }
+            }
+        }
+        // If process produced no stdout, it likely failed — surface stderr as an error
+        if !had_output {
+            // Brief wait for stderr thread to finish capturing
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let stderr_msg = stderr_buf.lock().map(|s| s.clone()).unwrap_or_default();
+            let error_msg = if stderr_msg.is_empty() {
+                "Claude process exited without output. The session may not exist or the CLI may not be installed.".to_string()
+            } else {
+                stderr_msg
+            };
+            eprintln!("[claude] No stdout output for {} — emitting error: {}", sid, &error_msg[..error_msg.len().min(200)]);
+            let _ = handle.emit("claude-event", ClaudeEvent {
+                session_id: sid.clone(),
+                data: serde_json::json!({
+                    "type": "result",
+                    "subtype": "error",
+                    "is_error": true,
+                    "result": error_msg
+                }).to_string(),
+            });
+        }
+        eprintln!("[claude] Reader thread ended for {} (gen {})", sid, gen);
+        // Only clean up if this is still the current generation (prevent race with new spawn)
+        if let Ok(mut inst) = instances_clone.lock() {
+            if let Some(instance) = inst.get(&sid) {
+                if instance.generation == gen {
+                    inst.remove(&sid);
+                }
+            }
+        }
+        let _ = handle.emit("claude-done", ClaudeDone { session_id: sid });
+    });
+
+    instances.lock().map_err(|e| e.to_string())?
+        .insert(session_id, ClaudeInstance { child, generation: gen });
+
+    Ok(())
+}
+
+impl ClaudeManager {
+    pub fn new() -> Self {
+        Self { instances: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+
+    pub fn create_session(&self, app_handle: &AppHandle, req: CreateClaudeRequest, settings_path: Option<String>) -> Result<(), String> {
+        eprintln!("[claude] Creating session id={} cwd={}", req.session_id, req.cwd);
+        let cmd = build_command(
+            "--session-id", &req.session_id, &req.prompt,
+            &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path,
+        );
+        spawn_and_stream(&self.instances, app_handle, req.session_id, cmd)
+    }
+
+    pub fn send_prompt(&self, app_handle: &AppHandle, req: SendClaudePromptRequest, settings_path: Option<String>) -> Result<(), String> {
+        eprintln!("[claude] Sending prompt to session {} (cwd: {})", req.session_id, req.cwd);
+        let cmd = build_command(
+            "--resume", &req.session_id, &req.prompt,
+            &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path,
+        );
+        spawn_and_stream(&self.instances, app_handle, req.session_id, cmd)
+    }
+
+    pub fn cancel(&self, session_id: &str) -> Result<(), String> {
+        let mut instances = self.instances.lock().map_err(|e| e.to_string())?;
+        if let Some(mut instance) = instances.remove(session_id) {
+            let _ = instance.child.kill();
+            let _ = instance.child.wait();
+            eprintln!("[claude] Cancelled session {}", session_id);
+        }
+        Ok(())
+    }
+
+    pub fn close(&self, session_id: &str) -> Result<(), String> {
+        self.cancel(session_id)
+    }
+}

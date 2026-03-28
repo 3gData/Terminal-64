@@ -24,7 +24,6 @@ interface XTerminalProps {
   onTitleChange?: (id: string, title: string) => void;
   onActivity?: (id: string) => void;
   onCwdChange?: (id: string, cwd: string) => void;
-  onSessionId?: (id: string, sessionId: string) => void;
 }
 
 export default function XTerminal({
@@ -37,7 +36,6 @@ export default function XTerminal({
   onTitleChange,
   onActivity,
   onCwdChange,
-  onSessionId,
 }: XTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -267,9 +265,6 @@ export default function XTerminal({
           if (psMatch) onCwdChange?.(terminalId, psMatch[1]);
           const oscMatch = payload.data.match(/\x1b\]7;file:\/\/[^/]*\/(.*?)(?:\x07|\x1b\\)/);
           if (oscMatch) onCwdChange?.(terminalId, decodeURIComponent(oscMatch[1]));
-          // Detect Claude session ID from output
-          const sessionMatch = payload.data.match(/Session:\s*([a-f0-9-]{36})/i);
-          if (sessionMatch) onSessionId?.(terminalId, sessionMatch[1]);
         }
       });
 

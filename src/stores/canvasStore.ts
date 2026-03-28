@@ -9,6 +9,8 @@ import {
   AUTO_SAVE_INTERVAL_MS,
 } from "../lib/constants";
 
+export type PanelType = "terminal" | "claude";
+
 export interface CanvasTerminal {
   id: string;
   terminalId: string;
@@ -21,8 +23,7 @@ export interface CanvasTerminal {
   borderColor: string;
   poppedOut: boolean;
   cwd: string;
-  claudeSessionId: string;
-  isClaudeSession: boolean;
+  panelType: PanelType;
   claudeSkipPermissions: boolean;
 }
 
@@ -35,8 +36,7 @@ interface CanvasState {
   activeTerminalId: string | null;
 
   addTerminal: (x?: number, y?: number) => void;
-  addClaudeTerminal: (cwd: string, skipPermissions: boolean) => void;
-  setClaudeSessionId: (id: string, sessionId: string) => void;
+  addClaudeTerminal: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string) => void;
   removeTerminal: (id: string) => void;
   moveTerminal: (id: string, x: number, y: number) => void;
   resizeTerminal: (id: string, width: number, height: number) => void;
@@ -66,22 +66,28 @@ interface SerializedTerminal {
 }
 
 function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
-  return items.map((t, i) => ({
-    id: uuidv4(),
-    terminalId: uuidv4(),
-    x: t.x ?? 60,
-    y: t.y ?? 60,
-    width: t.width ?? DEFAULT_TERMINAL_WIDTH,
-    height: t.height ?? DEFAULT_TERMINAL_HEIGHT,
-    zIndex: i + 1,
-    title: t.title ?? "Terminal",
-    borderColor: t.borderColor ?? DEFAULT_BORDER_COLOR,
-    poppedOut: false,
-    cwd: t.cwd ?? "",
-    claudeSessionId: (t as any).claudeSessionId ?? "",
-    isClaudeSession: (t as any).isClaudeSession ?? false,
-    claudeSkipPermissions: (t as any).claudeSkipPermissions ?? false,
-  }));
+  return items.map((t, i) => {
+    const raw = t as any;
+    // Migrate legacy isClaudeSession to panelType
+    const panelType: PanelType = raw.panelType ?? (raw.isClaudeSession ? "claude" : "terminal");
+    // Preserve terminalId for claude panels (needed for session/chat persistence)
+    const terminalId = (panelType === "claude" && raw.terminalId) ? raw.terminalId : uuidv4();
+    return {
+      id: uuidv4(),
+      terminalId,
+      x: t.x ?? 60,
+      y: t.y ?? 60,
+      width: t.width ?? DEFAULT_TERMINAL_WIDTH,
+      height: t.height ?? DEFAULT_TERMINAL_HEIGHT,
+      zIndex: i + 1,
+      title: t.title ?? "Terminal",
+      borderColor: t.borderColor ?? DEFAULT_BORDER_COLOR,
+      poppedOut: false,
+      cwd: t.cwd ?? "",
+      panelType,
+      claudeSkipPermissions: raw.claudeSkipPermissions ?? false,
+    };
+  });
 }
 
 function makeTerminal(zIndex: number, overrides: Partial<CanvasTerminal> = {}): CanvasTerminal {
@@ -97,8 +103,7 @@ function makeTerminal(zIndex: number, overrides: Partial<CanvasTerminal> = {}): 
     borderColor: DEFAULT_BORDER_COLOR,
     poppedOut: false,
     cwd: "",
-    claudeSessionId: "",
-    isClaudeSession: false,
+    panelType: "terminal",
     claudeSkipPermissions: false,
     ...overrides,
   };
@@ -117,8 +122,7 @@ function createDefaultTerminal(): CanvasTerminal {
     borderColor: DEFAULT_BORDER_COLOR,
     poppedOut: false,
     cwd: "",
-    claudeSessionId: "",
-    isClaudeSession: false,
+    panelType: "terminal",
     claudeSkipPermissions: false,
   };
 }
@@ -189,32 +193,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       markDirty();
     },
 
-    addClaudeTerminal: (cwd: string, skipPermissions: boolean) => {
+    addClaudeTerminal: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string) => {
       const state = get();
       const count = state.terminals.length;
       const newTerm = makeTerminal(state.nextZ, {
         x: 80 + (count % 5) * 30,
         y: 80 + (count % 5) * 30,
-        title: "Claude",
+        title: sessionName || "Claude",
         borderColor: "#cba6f7",
         cwd,
-        isClaudeSession: true,
+        panelType: "claude",
         claudeSkipPermissions: skipPermissions,
+        ...(existingSessionId ? { terminalId: existingSessionId } : {}),
       });
       set({
         terminals: [...state.terminals, newTerm],
         nextZ: state.nextZ + 1,
         activeTerminalId: newTerm.terminalId,
       });
-      markDirty();
-    },
-
-    setClaudeSessionId: (id: string, sessionId: string) => {
-      set((s) => ({
-        terminals: s.terminals.map((t) =>
-          t.id === id ? { ...t, claudeSessionId: sessionId } : t
-        ),
-      }));
       markDirty();
     },
 
@@ -343,9 +339,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
             title: t.title,
             borderColor: t.borderColor,
             cwd: t.cwd,
-            claudeSessionId: t.claudeSessionId,
-            isClaudeSession: t.isClaudeSession,
+            panelType: t.panelType,
             claudeSkipPermissions: t.claudeSkipPermissions,
+            // Persist terminalId for claude panels (session key for chat history)
+            ...(t.panelType === "claude" ? { terminalId: t.terminalId } : {}),
           })),
         panX: s.panX,
         panY: s.panY,

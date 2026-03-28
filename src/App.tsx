@@ -9,11 +9,13 @@ import PopOutTerminal from "./components/canvas/PopOutTerminal";
 import ClaudeDialog from "./components/canvas/ClaudeDialog";
 import { useTheme } from "./hooks/useTheme";
 import { useKeybindings } from "./hooks/useKeybindings";
+import { useClaudeEvents } from "./hooks/useClaudeEvents";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
-import { closeTerminal } from "./lib/tauriApi";
+import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot } from "./lib/tauriApi";
+import { useClaudeStore } from "./stores/claudeStore";
 import { checkForUpdate, UpdateInfo } from "./lib/updater";
 import "./App.css";
 
@@ -30,6 +32,7 @@ function App() {
 
   useTheme();
   useKeybindings();
+  useClaudeEvents();
 
   // Check for updates on startup
   useEffect(() => {
@@ -41,6 +44,29 @@ function App() {
     const saved = useSettingsStore.getState();
     if (saved.theme) useThemeStore.getState().setTheme(saved.theme);
     if (saved.bgAlpha < 1) useThemeStore.getState().setBgAlpha(saved.bgAlpha);
+    // Auto-connect Discord bot if credentials are saved, then link open sessions
+    if (saved.discordBotToken && saved.discordServerId) {
+      startDiscordBot(saved.discordBotToken, saved.discordServerId).then(() => {
+        // Wait a moment for bot to be ready, then link all open Claude panels
+        setTimeout(() => {
+          const terminals = useCanvasStore.getState().terminals;
+          for (const t of terminals) {
+            if (t.panelType === "claude") {
+              const title = t.title;
+              if (title && title !== "Claude") {
+                // Try to get CWD from stored session
+                let cwd = t.cwd || "";
+                try {
+                  const raw = localStorage.getItem("terminal64-claude-sessions");
+                  if (raw) { const d = JSON.parse(raw); cwd = d[t.terminalId]?.cwd || cwd; }
+                } catch {}
+                linkSessionToDiscord(t.terminalId, title, cwd).catch(() => {});
+              }
+            }
+          }
+        }, 2000);
+      }).catch(() => {});
+    }
   }, []);
 
   // Save session on window close (backup — store also auto-saves every 5s)
@@ -96,7 +122,13 @@ function App() {
       const currentIds = new Set(state.terminals.map((t) => t.terminalId));
       for (const t of prev.terminals) {
         if (!currentIds.has(t.terminalId) && !t.poppedOut) {
-          closeTerminal(t.terminalId).catch(() => {});
+          if (t.panelType === "claude") {
+            closeClaudeSession(t.terminalId).catch(() => {});
+            unlinkSessionFromDiscord(t.terminalId).catch(() => {});
+            useClaudeStore.getState().removeSession(t.terminalId);
+          } else {
+            closeTerminal(t.terminalId).catch(() => {});
+          }
         }
       }
     });
@@ -126,7 +158,7 @@ function App() {
       {/* Header */}
       <div className="header">
         <div className="header-brand" data-tauri-drag-region>
-          <span className="brand-64">64</span>
+          <img src="/icons/32x32.png" alt="64" className="brand-icon" />
         </div>
 
         <button
@@ -209,9 +241,30 @@ function App() {
       <ClaudeDialog
         isOpen={claudeDialogOpen}
         onClose={() => setClaudeDialogOpen(false)}
-        onConfirm={(cwd, skip) =>
-          useCanvasStore.getState().addClaudeTerminal(cwd, skip)
-        }
+        onConfirm={(cwd, _skip, sessionName) => {
+          useCanvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
+          {
+            const terminals = useCanvasStore.getState().terminals;
+            const newest = terminals[terminals.length - 1];
+            if (newest?.panelType === "claude") {
+              if (sessionName) {
+                useClaudeStore.getState().createSession(newest.terminalId, sessionName);
+                // Auto-link to Discord (silently fails if bot not running)
+                linkSessionToDiscord(newest.terminalId, sessionName, cwd).catch(() => {});
+              }
+            }
+          }
+        }}
+        onReopen={(sessionId) => {
+          let name: string | undefined;
+          let savedCwd = "";
+          try {
+            const raw = localStorage.getItem("terminal64-claude-sessions");
+            if (raw) { const d = JSON.parse(raw); name = d[sessionId]?.name; savedCwd = d[sessionId]?.cwd || ""; }
+          } catch {}
+          useCanvasStore.getState().addClaudeTerminal(savedCwd || ".", false, name || undefined, sessionId);
+          if (name) linkSessionToDiscord(sessionId, name, savedCwd).catch(() => {});
+        }}
       />
     </div>
   );

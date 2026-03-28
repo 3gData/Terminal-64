@@ -86,6 +86,10 @@ export default function Canvas() {
       className="canvas"
       onMouseDown={handleMouseDown}
       onDoubleClick={handleDoubleClick}
+      style={{
+        backgroundSize: "24px 24px",
+        backgroundPosition: `${panX % 24}px ${panY % 24}px`,
+      }}
     >
       <div
         className="canvas-content"

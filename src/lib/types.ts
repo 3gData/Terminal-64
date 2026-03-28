@@ -143,3 +143,58 @@ export interface SessionData {
   layout: unknown;
   createdAt: string;
 }
+
+// Claude session types
+
+export type PermissionMode = "default" | "accept_edits" | "bypass_all" | "plan" | "auto";
+
+export interface CreateClaudeRequest {
+  session_id: string;
+  cwd: string;
+  prompt: string;
+  permission_mode: PermissionMode;
+  model?: string;
+  effort?: string;
+}
+
+export interface SendClaudePromptRequest {
+  session_id: string;
+  cwd: string;
+  prompt: string;
+  permission_mode: PermissionMode;
+  model?: string;
+  effort?: string;
+  disallowed_tools?: string;
+}
+
+export interface ClaudeEvent {
+  session_id: string;
+  data: string;
+}
+
+export interface ClaudeDone {
+  session_id: string;
+}
+
+export interface SlashCommand {
+  name: string;
+  description: string;
+  source: string;
+  usage?: string;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  result?: string;
+  isError?: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  toolCalls?: ToolCall[];
+}

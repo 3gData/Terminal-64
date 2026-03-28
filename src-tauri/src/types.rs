@@ -20,3 +20,47 @@ pub struct TerminalExit {
     pub id: String,
     pub code: Option<u32>,
 }
+
+// Claude session types
+
+// "default" | "accept_edits" | "bypass_all" | "plan"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateClaudeRequest {
+    pub session_id: String,
+    pub cwd: String,
+    pub prompt: String,
+    pub permission_mode: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendClaudePromptRequest {
+    pub session_id: String,
+    pub cwd: String,
+    pub prompt: String,
+    pub permission_mode: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub disallowed_tools: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeEvent {
+    pub session_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeDone {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<String>,
+}

@@ -8,23 +8,31 @@ export interface QuickPaste {
 }
 
 export interface Settings {
-  openaiApiKey: string;
-  openaiModel: string;
+  claudeModel: string;
+  claudeEffort: string;
+  claudePermMode: string;
+  claudeFont: string;
   theme: string;
   bgAlpha: number;
   quickPastes: QuickPaste[];
   recentDirs: string[];
+  discordBotToken: string;
+  discordServerId: string;
 }
 
 const STORAGE_KEY = "terminal64-settings";
 
 const defaultSettings: Settings = {
-  openaiApiKey: "",
-  openaiModel: "gpt-5.4-mini",
+  claudeModel: "sonnet",
+  claudeEffort: "high",
+  claudePermMode: "",
+  claudeFont: "system",
   theme: "Catppuccin Mocha",
   bgAlpha: 1,
   quickPastes: [],
   recentDirs: [],
+  discordBotToken: "",
+  discordServerId: "",
 };
 
 function loadSettings(): Settings {

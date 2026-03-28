@@ -21,5 +21,9 @@ serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["devtools"] }
 portable-pty = "0.8"
 uuid = { version = "1", features = ["v4"] }
-dirs = "6"
 tauri-plugin-dialog = "2.6.0"
+dirs = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+reqwest = { version = "0.12", features = ["json", "native-tls"], default-features = false }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
