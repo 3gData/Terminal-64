@@ -44,6 +44,19 @@ function renderInline(text: string, keyPrefix: string = ""): React.ReactNode[] {
   return result;
 }
 
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="cc-copy-btn"
+      onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+      title="Copy"
+    >
+      {copied ? "✓" : "⎘"}
+    </button>
+  );
+}
+
 // Render a full markdown block: headings, code blocks, lists, blockquotes, hrs, paragraphs
 export function renderContent(text: string) {
   if (!text) return null;
@@ -61,6 +74,7 @@ export function renderContent(text: string) {
       const lang = nl >= 0 ? inner.slice(0, nl).trim() : "";
       elements.push(
         <pre key={key++} className="cc-code-block">
+          <CopyBtn text={code} />
           {lang && <span className="cc-code-lang">{lang}</span>}
           <code>{code}</code>
         </pre>
@@ -222,7 +236,7 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     const preview = content.length > 500 ? content.slice(0, 500) + "\n..." : content;
     return (
       <div className="cc-tc-body">
-        <pre className="cc-tc-output">{preview}</pre>
+        <pre className="cc-tc-output"><CopyBtn text={content} />{preview}</pre>
         {result && <pre className="cc-tc-result-text">{result}</pre>}
       </div>
     );
@@ -233,8 +247,8 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     const cmd = i.command ? String(i.command) : "";
     return (
       <div className="cc-tc-body">
-        {cmd && <pre className="cc-tc-command">$ {cmd}</pre>}
-        {result && <pre className="cc-tc-output">{result}</pre>}
+        {cmd && <pre className="cc-tc-command"><CopyBtn text={cmd} />$ {cmd}</pre>}
+        {result && <pre className="cc-tc-output"><CopyBtn text={result} />{result}</pre>}
       </div>
     );
   }
@@ -300,19 +314,38 @@ export function ReadGroupCard({ tcs }: { tcs: ToolCall[] }) {
   );
 }
 
-function ChatMessageInner({ message, onRewind, onEditClick }: { message: ChatMessageType; onRewind?: (messageId: string, content: string) => void; onEditClick?: (tcId: string, filePath: string, oldStr: string, newStr: string) => void }) {
+function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
+  message: ChatMessageType;
+  onRewind?: (messageId: string, content: string) => void;
+  onFork?: (messageId: string) => void;
+  onEditClick?: (tcId: string, filePath: string, oldStr: string, newStr: string) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const menuEl = menuOpen && (
+    <div className="cc-ctx-menu" onMouseLeave={() => setMenuOpen(false)}>
+      <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onRewind?.(message.id, message.role === "user" ? message.content : ""); }}>
+        <span className="cc-ctx-icon">↩</span> Rewind
+      </button>
+      <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onFork?.(message.id); }}>
+        <span className="cc-ctx-icon">⑂</span> Fork
+      </button>
+    </div>
+  );
+
+  const menuBtn = (
+    <div className="cc-msg-actions">
+      <button className="cc-msg-menu-btn" onClick={() => setMenuOpen((v) => !v)} title="Message options">⋯</button>
+      {menuEl}
+    </div>
+  );
+
   if (message.role === "user") {
     return (
       <div className="cc-message cc-message--user">
+        {menuBtn}
         <div className="cc-bubble cc-bubble--user">
           {message.content}
-          <button
-            className="cc-rewind-btn"
-            onClick={() => onRewind?.(message.id, message.content)}
-            title="Rewind to this message (edit and resend)"
-          >
-            ↩
-          </button>
         </div>
       </div>
     );
@@ -320,6 +353,7 @@ function ChatMessageInner({ message, onRewind, onEditClick }: { message: ChatMes
 
   return (
     <div className="cc-message cc-message--assistant">
+      {menuBtn}
       {message.content && (
         <div className="cc-bubble cc-bubble--assistant">
           {renderContent(message.content)}

@@ -19,12 +19,22 @@ fn random_token() -> String {
     format!("{:x}{:x}", t.as_nanos(), t.as_secs().wrapping_mul(2654435761))
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct DelegationMessage {
+    pub group_id: String,
+    pub agent: String,
+    pub message: String,
+    pub timestamp: u64,
+    pub msg_type: String, // "chat" | "complete"
+}
+
 pub struct PermissionServer {
     port: u16,
     secret: String,
     pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>,
     pub(crate) session_map: Arc<Mutex<HashMap<String, String>>>, // run_token → session_id
     settings_files: Arc<Mutex<HashMap<String, PathBuf>>>, // run_token → temp file path
+    pub(crate) delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>, // group_id → messages
 }
 
 impl PermissionServer {
@@ -39,10 +49,13 @@ impl PermissionServer {
             Arc::new(Mutex::new(HashMap::new()));
         let session_map: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let s = secret.clone();
         let p = pending.clone();
         let sm = session_map.clone();
+        let dm = delegation_messages.clone();
 
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -54,8 +67,9 @@ impl PermissionServer {
                 let pending = p.clone();
                 let sessions = sm.clone();
                 let app = app_handle.clone();
+                let deleg = dm.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, &secret, &pending, &sessions, &app) {
+                    if let Err(e) = handle_connection(stream, &secret, &pending, &sessions, &app, &deleg) {
                         eprintln!("[perm-server] Connection error: {}", e);
                     }
                 });
@@ -68,17 +82,28 @@ impl PermissionServer {
             pending,
             session_map,
             settings_files: Arc::new(Mutex::new(HashMap::new())),
+            delegation_messages,
         })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn cleanup_delegation_group(&self, group_id: &str) {
+        if let Ok(mut store) = self.delegation_messages.lock() {
+            store.remove(group_id);
+        }
     }
 
     /// Get or create a settings file for a session. Reuses existing registration.
     pub fn register_session(&self, session_id: &str) -> Result<(String, PathBuf), String> {
         // Reuse existing token if session is already registered
         {
-            let map = self.session_map.lock().unwrap();
+            let map = self.session_map.lock().map_err(|e| e.to_string())?;
             for (token, sid) in map.iter() {
                 if sid == session_id {
-                    if let Some(path) = self.settings_files.lock().unwrap().get(token) {
+                    if let Some(path) = self.settings_files.lock().map_err(|e| e.to_string())?.get(token) {
                         return Ok((token.clone(), path.clone()));
                     }
                 }
@@ -100,37 +125,37 @@ impl PermissionServer {
             }
         });
 
-        let path = std::env::temp_dir().join(format!("t64-hook-{}.json", &run_token[..12]));
+        let path = std::env::temp_dir().join(format!("t64-hook-{}.json", &run_token[..run_token.len().min(12)]));
         std::fs::write(&path, settings.to_string()).map_err(|e| format!("write settings: {}", e))?;
 
         self.session_map
             .lock()
-            .unwrap()
+            .map_err(|e| e.to_string())?
             .insert(run_token.clone(), session_id.to_string());
         self.settings_files
             .lock()
-            .unwrap()
+            .map_err(|e| e.to_string())?
             .insert(run_token.clone(), path.clone());
 
         eprintln!(
             "[perm-server] Registered session {} with token {}",
             session_id,
-            &run_token[..12]
+            &run_token[..run_token.len().min(12)]
         );
         Ok((run_token, path))
     }
 
     /// Unregister a session: remove mapping, delete temp file, deny pending requests.
     pub fn unregister_session(&self, run_token: &str) {
-        self.session_map.lock().unwrap().remove(run_token);
-        if let Some(path) = self.settings_files.lock().unwrap().remove(run_token) {
+        self.session_map.lock().unwrap_or_else(|e| e.into_inner()).remove(run_token);
+        if let Some(path) = self.settings_files.lock().unwrap_or_else(|e| e.into_inner()).remove(run_token) {
             let _ = std::fs::remove_file(path);
         }
     }
 
     /// Resolve a pending permission request.
     pub fn resolve(&self, request_id: &str, allow: bool, reason: &str) {
-        if let Some(tx) = self.pending.lock().unwrap().remove(request_id) {
+        if let Some(tx) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(request_id) {
             let _ = tx.send((allow, reason.to_string()));
         }
     }
@@ -142,6 +167,7 @@ fn handle_connection(
     pending: &Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>,
     sessions: &Arc<Mutex<HashMap<String, String>>>,
     app_handle: &AppHandle,
+    delegation_messages: &Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -166,12 +192,93 @@ fn handle_connection(
 
     // Parse first line
     let first_line = headers.lines().next().unwrap_or("");
-    if !first_line.starts_with("POST ") {
-        send_http(&mut stream, 405, r#"{"error":"method not allowed"}"#);
+    let method = first_line.split_whitespace().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+
+    // --- Delegation routes (no auth needed, only local) ---
+    if path.starts_with("/delegation/") {
+        // Parse Content-Length
+        let content_length: usize = headers
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+
+        if method == "POST" && (path == "/delegation/message" || path == "/delegation/complete") {
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                reader.read_exact(&mut body).map_err(|e| format!("body: {}", e))?;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&body)).unwrap_or_default();
+            let group_id = parsed["group_id"].as_str().unwrap_or("").to_string();
+            let agent = parsed["agent"].as_str().unwrap_or("Agent").to_string();
+            let message = if path == "/delegation/complete" {
+                parsed["summary"].as_str().unwrap_or("").to_string()
+            } else {
+                parsed["message"].as_str().unwrap_or("").to_string()
+            };
+            let msg_type = if path == "/delegation/complete" { "complete" } else { "chat" };
+
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let del_msg = DelegationMessage {
+                group_id: group_id.clone(),
+                agent: agent.clone(),
+                message: message.clone(),
+                timestamp: ts,
+                msg_type: msg_type.to_string(),
+            };
+
+            // Store message
+            if let Ok(mut store) = delegation_messages.lock() {
+                store.entry(group_id.clone()).or_default().push(del_msg.clone());
+            }
+
+            // Emit to frontend
+            let _ = app_handle.emit("delegation-message", &del_msg);
+
+            eprintln!("[delegation] {} from {} in group {}: {}", msg_type, agent, &group_id[..group_id.len().min(8)], &message[..message.len().min(80)]);
+
+            send_http(&mut stream, 200, r#"{"ok":true}"#);
+            return Ok(());
+        }
+
+        if method == "GET" && path.starts_with("/delegation/messages") {
+            // Parse query params: ?group=X&last=N
+            let query = path.split('?').nth(1).unwrap_or("");
+            let params: HashMap<&str, &str> = query.split('&')
+                .filter_map(|p| p.split_once('='))
+                .collect();
+            let group_id = params.get("group").unwrap_or(&"");
+            let last_n: usize = params.get("last").and_then(|v| v.parse().ok()).unwrap_or(20);
+
+            let recent: Vec<DelegationMessage> = if let Ok(store) = delegation_messages.lock() {
+                if let Some(msgs) = store.get(*group_id) {
+                    let start = msgs.len().saturating_sub(last_n);
+                    msgs[start..].to_vec()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+            let body = serde_json::to_string(&recent).unwrap_or("[]".to_string());
+            send_http(&mut stream, 200, &body);
+            return Ok(());
+        }
+
+        send_http(&mut stream, 404, r#"{"error":"not found"}"#);
         return Ok(());
     }
 
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+    if method != "POST" {
+        send_http(&mut stream, 405, r#"{"error":"method not allowed"}"#);
+        return Ok(());
+    }
 
     // Parse path: /hook/{secret}/{run_token}
     let parts: Vec<&str> = path.split('/').collect();
@@ -231,18 +338,18 @@ fn handle_connection(
     // Look up session
     let session_id = sessions
         .lock()
-        .unwrap()
+        .map_err(|e| e.to_string())?
         .get(&run_token)
         .cloned()
         .unwrap_or_default();
 
     if session_id.is_empty() {
-        // Unknown token — allow by default (fail-open)
+        // Unknown token — deny by default (fail-closed)
         let resp = serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": "Unknown session"
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Unknown session — denied for safety"
             }
         });
         send_http(&mut stream, 200, &resp.to_string());
@@ -252,12 +359,12 @@ fn handle_connection(
     let request_id = next_id();
     eprintln!(
         "[perm-server] Permission request {} for {} in session {}: {}",
-        request_id, tool_name, &session_id[..8.min(session_id.len())], tool_name
+        request_id, tool_name, &session_id[..session_id.len().min(8)], tool_name
     );
 
     // Create channel and store sender
     let (tx, rx) = mpsc::sync_channel(1);
-    pending.lock().unwrap().insert(request_id.clone(), tx);
+    pending.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), tx);
 
     // Emit to frontend
     let _ = app_handle.emit(
@@ -277,7 +384,7 @@ fn handle_connection(
     let (allow, reason) = match rx.recv_timeout(Duration::from_secs(300)) {
         Ok(decision) => decision,
         Err(_) => {
-            pending.lock().unwrap().remove(&request_id);
+            pending.lock().map_err(|e| e.to_string())?.remove(&request_id);
             eprintln!("[perm-server] Timeout for request {}", request_id);
             (false, "Permission request timed out".to_string())
         }

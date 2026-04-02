@@ -117,7 +117,7 @@ impl PtyManager {
                 }
                 Ok(n) => {
                     total_bytes += n;
-                    if total_bytes <= n {
+                    if total_bytes == n {
                         eprintln!("[pty] First read: {} bytes for {}", n, terminal_id);
                     }
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -176,6 +176,7 @@ impl PtyManager {
         let mut instances = self.instances.lock().map_err(|e| e.to_string())?;
         if let Some(mut instance) = instances.remove(id) {
             let _ = instance.child.kill();
+            let _ = instance.child.wait();
         }
         Ok(())
     }

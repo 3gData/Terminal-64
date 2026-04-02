@@ -10,12 +10,15 @@ import ClaudeDialog from "./components/canvas/ClaudeDialog";
 import { useTheme } from "./hooks/useTheme";
 import { useKeybindings } from "./hooks/useKeybindings";
 import { useClaudeEvents } from "./hooks/useClaudeEvents";
+import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
-import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned } from "./lib/tauriApi";
-import { useClaudeStore } from "./stores/claudeStore";
+import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages } from "./lib/tauriApi";
+import { useDelegationStore } from "./stores/delegationStore";
+import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
+import { usePanelStore } from "./stores/panelStore";
 import { checkForUpdate, UpdateInfo } from "./lib/updater";
 import "./App.css";
 
@@ -33,6 +36,7 @@ function App() {
   useTheme();
   useKeybindings();
   useClaudeEvents();
+  useDelegationOrchestrator();
 
   // Check for updates on startup
   useEffect(() => {
@@ -47,34 +51,43 @@ function App() {
     // Auto-connect Discord bot if credentials are saved, then link open sessions
     if (saved.discordBotToken && saved.discordServerId) {
       startDiscordBot(saved.discordBotToken, saved.discordServerId).then(async () => {
-        // Wait for gateway to be ready, then link all open Claude panels
+        // Wait for gateway to be ready, then link all open Claude panels sequentially
         await new Promise((r) => setTimeout(r, 2000));
         const terminals = useCanvasStore.getState().terminals;
-        const linkPromises: Promise<void>[] = [];
         for (const t of terminals) {
           if (t.panelType === "claude") {
             const title = t.title;
             if (title && title !== "Claude") {
               let cwd = t.cwd || "";
               try {
-                const raw = localStorage.getItem("terminal64-claude-sessions");
+                const raw = localStorage.getItem(STORAGE_KEY);
                 if (raw) { const d = JSON.parse(raw); cwd = d[t.terminalId]?.cwd || cwd; }
               } catch {}
-              linkPromises.push(linkSessionToDiscord(t.terminalId, title, cwd).catch(() => {}));
+              try {
+                await linkSessionToDiscord(t.terminalId, title, cwd);
+              } catch (err) {
+                console.warn("[discord] Failed to link session:", t.terminalId, err);
+                // Retry once after a delay
+                await new Promise((r) => setTimeout(r, 1500));
+                await linkSessionToDiscord(t.terminalId, title, cwd).catch(() => {});
+              }
+              // Small delay between links to avoid Discord rate limits
+              await new Promise((r) => setTimeout(r, 500));
             }
           }
         }
-        await Promise.all(linkPromises);
         // Clean up Discord channels that no longer match any linked session
         discordCleanupOrphaned().catch(() => {});
       }).catch(() => {});
     }
   }, []);
 
-  // Save session on window close (backup — store also auto-saves every 5s)
+  // Save ALL state on window close — critical for persistence
   useEffect(() => {
     const unlisten = appWindow.onCloseRequested(() => {
       useCanvasStore.getState().saveSession();
+      usePanelStore.getState().saveSession();
+      flushClaudeSave();
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -92,6 +105,13 @@ function App() {
       label: "New Terminal",
       category: "Terminal",
       execute: () => useCanvasStore.getState().addTerminal(),
+    });
+
+    registerCommand({
+      id: "panel.new",
+      label: "New Panel",
+      category: "Panels",
+      execute: () => usePanelStore.getState().addPanel(),
     });
 
     registerCommand({
@@ -128,6 +148,15 @@ function App() {
             closeClaudeSession(t.terminalId).catch(() => {});
             unlinkSessionFromDiscord(t.terminalId).catch(() => {});
             useClaudeStore.getState().removeSession(t.terminalId);
+            // Cancel delegation task if this was a child session
+            const delStore = useDelegationStore.getState();
+            const group = delStore.getGroupForSession(t.terminalId);
+            if (group) {
+              const task = group.tasks.find((tk) => tk.sessionId === t.terminalId);
+              if (task && task.status === "running") {
+                delStore.updateTaskStatus(group.id, task.id, "cancelled");
+              }
+            }
           } else {
             closeTerminal(t.terminalId).catch(() => {});
           }
@@ -183,6 +212,18 @@ function App() {
             <path d="M2 9L5 3L8 7L10 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           <span>&gt;_ Code</span>
+        </button>
+
+        <button
+          className="header-action header-action--panel"
+          onClick={() => usePanelStore.getState().addPanel()}
+          title="New Panel"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.2"/>
+            <path d="M6 4V8M4 6H8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+          </svg>
+          <span>Panel</span>
         </button>
 
         <div className="header-drag" data-tauri-drag-region />
@@ -257,15 +298,31 @@ function App() {
             }
           }
         }}
-        onReopen={(sessionId) => {
+        onReopen={(sessionId, dialogCwd) => {
           let name: string | undefined;
           let savedCwd = "";
+          let hasMessages = false;
           try {
-            const raw = localStorage.getItem("terminal64-claude-sessions");
-            if (raw) { const d = JSON.parse(raw); name = d[sessionId]?.name; savedCwd = d[sessionId]?.cwd || ""; }
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (raw) {
+              const d = JSON.parse(raw);
+              name = d[sessionId]?.name;
+              savedCwd = d[sessionId]?.cwd || "";
+              hasMessages = (d[sessionId]?.messages?.length || 0) > 0;
+            }
           } catch {}
-          useCanvasStore.getState().addClaudeTerminal(savedCwd || ".", false, name || undefined, sessionId);
-          if (name) linkSessionToDiscord(sessionId, name, savedCwd).catch(() => {});
+          const effectiveCwd = savedCwd || dialogCwd || ".";
+          useCanvasStore.getState().addClaudeTerminal(effectiveCwd, false, name || undefined, sessionId);
+          if (name) linkSessionToDiscord(sessionId, name, effectiveCwd).catch(() => {});
+
+          // Load message history from disk JSONL if localStorage doesn't have it
+          if (!hasMessages) {
+            loadSessionHistory(sessionId, effectiveCwd).then((history) => {
+              if (history.length > 0) {
+                useClaudeStore.getState().loadFromDisk(sessionId, mapHistoryMessages(history));
+              }
+            }).catch((err) => console.warn("[session] Failed to load history from disk:", err));
+          }
         }}
       />
     </div>

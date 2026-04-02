@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { listDirectory, readFile } from "../../lib/tauriApi";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { listDirectory, searchFiles } from "../../lib/tauriApi";
 import type { DirEntry } from "../../lib/types";
 
 const CODE_EXTS = new Set([
@@ -70,16 +70,16 @@ function TreeNode({ name, fullPath, isDir, onFileClick, depth }: TreeNodeProps) 
   return (
     <div>
       <div
-        className={`ft-node ${isDir ? "ft-node--dir" : code ? "ft-node--file" : "ft-node--dim"}`}
+        className={`cft-node ${isDir ? "cft-node--dir" : code ? "cft-node--file" : "cft-node--dim"}`}
         style={{ paddingLeft: depth * 14 + 8 }}
         onClick={toggle}
       >
         {isDir && (
-          <span className={`ft-arrow ${expanded ? "ft-arrow--open" : ""}`}>▸</span>
+          <span className={`cft-arrow ${expanded ? "cft-arrow--open" : ""}`}>▸</span>
         )}
-        <span className="ft-icon">{fileIcon(name, isDir)}</span>
-        <span className="ft-name">{name}</span>
-        {loading && <span className="ft-loading">…</span>}
+        <span className="cft-icon">{fileIcon(name, isDir)}</span>
+        <span className="cft-name">{name}</span>
+        {loading && <span className="cft-loading">…</span>}
       </div>
       {expanded && children && children.map((child) => (
         <TreeNode
@@ -104,34 +104,91 @@ interface FileTreeProps {
 export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState(false);
+  const [query, setQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<string[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load root on first render
-  if (entries === null && !error) {
+  // Load root directory on mount
+  useEffect(() => {
     listDirectory(cwd).then(setEntries).catch(() => setError(true));
-  }
+  }, [cwd]);
+
+  const handleSearch = useCallback((value: string) => {
+    setQuery(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!value.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    setSearching(true);
+    searchTimer.current = setTimeout(() => {
+      searchFiles(cwd, value.trim()).then((results) => {
+        setSearchResults(results);
+        setSearching(false);
+      }).catch(() => {
+        setSearchResults([]);
+        setSearching(false);
+      });
+    }, 200);
+  }, [cwd]);
 
   const dirName = cwd.replace(/\\/g, "/").split("/").pop() || cwd;
 
   return (
-    <div className="ft-sidebar" onClick={(e) => e.stopPropagation()}>
-      <div className="ft-header">
-        <span className="ft-title">{dirName}</span>
-        <button className="ft-close" onClick={onClose}>×</button>
+    <div className="cft-sidebar" onClick={(e) => e.stopPropagation()}>
+      <div className="cft-header">
+        <span className="cft-title">{dirName}</span>
+        <button className="cft-close" onClick={onClose}>×</button>
       </div>
-      <div className="ft-tree">
-        {error && <div className="ft-empty">Failed to load directory</div>}
-        {!entries && !error && <div className="ft-empty">Loading…</div>}
-        {entries && entries.length === 0 && <div className="ft-empty">Empty directory</div>}
-        {entries && entries.map((entry) => (
-          <TreeNode
-            key={entry.name}
-            name={entry.name}
-            fullPath={`${cwd}/${entry.name}`}
-            isDir={entry.is_dir}
-            onFileClick={onFileClick}
-            depth={0}
-          />
-        ))}
+      <div className="cft-search">
+        <input
+          className="cft-search-input"
+          placeholder="Search files…"
+          value={query}
+          onChange={(e) => handleSearch(e.target.value)}
+          autoFocus
+        />
+      </div>
+      <div className="cft-tree">
+        {searchResults !== null ? (
+          <>
+            {searching && <div className="cft-empty">Searching…</div>}
+            {!searching && searchResults.length === 0 && <div className="cft-empty">No results</div>}
+            {searchResults.map((rel) => {
+              const fullPath = `${cwd}/${rel}`;
+              const name = rel.split("/").pop() || rel;
+              const code = isCodeFile(name);
+              return (
+                <div
+                  key={rel}
+                  className={`cft-node cft-search-result ${code ? "cft-node--file" : "cft-node--dim"}`}
+                  style={{ paddingLeft: 8 }}
+                  onClick={() => code && onFileClick(fullPath)}
+                >
+                  <span className="cft-icon">{fileIcon(name, false)}</span>
+                  <span className="cft-name cft-search-path">{rel}</span>
+                </div>
+              );
+            })}
+          </>
+        ) : (
+          <>
+            {error && <div className="cft-empty">Failed to load directory</div>}
+            {!entries && !error && <div className="cft-empty">Loading…</div>}
+            {entries && entries.length === 0 && <div className="cft-empty">Empty directory</div>}
+            {entries && entries.map((entry) => (
+              <TreeNode
+                key={entry.name}
+                name={entry.name}
+                fullPath={`${cwd}/${entry.name}`}
+                isDir={entry.is_dir}
+                onFileClick={onFileClick}
+                depth={0}
+              />
+            ))}
+          </>
+        )}
       </div>
     </div>
   );

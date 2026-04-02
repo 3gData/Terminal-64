@@ -1,12 +1,12 @@
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(2px);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
   display: flex;
   justify-content: flex-end;
   z-index: 900;
-  animation: settings-fade-in 0.2s ease-out;
+  animation: settings-fade-in 0.15s ease-out;
 }
 
 @keyframes settings-fade-in {
@@ -15,7 +15,7 @@
 }
 
 .settings-panel {
-  width: 320px;
+  width: clamp(280px, 85vw, 320px);
   height: 100%;
   background: var(--bg-secondary, #181825);
   border-left: 1px solid var(--border, #313244);

@@ -9,7 +9,7 @@ import {
   AUTO_SAVE_INTERVAL_MS,
 } from "../lib/constants";
 
-export type PanelType = "terminal" | "claude";
+export type PanelType = "terminal" | "claude" | "shared-chat";
 
 export interface CanvasTerminal {
   id: string;
@@ -37,6 +37,8 @@ interface CanvasState {
 
   addTerminal: (x?: number, y?: number) => void;
   addClaudeTerminal: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string) => void;
+  addClaudeTerminalAt: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string, x?: number, y?: number, width?: number, height?: number) => CanvasTerminal;
+  addSharedChatPanel: (groupId: string, x: number, y: number, width: number, height: number) => CanvasTerminal;
   removeTerminal: (id: string) => void;
   moveTerminal: (id: string, x: number, y: number) => void;
   resizeTerminal: (id: string, width: number, height: number) => void;
@@ -194,11 +196,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     },
 
     addClaudeTerminal: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string) => {
+      get().addClaudeTerminalAt(cwd, skipPermissions, sessionName, existingSessionId);
+    },
+
+    addClaudeTerminalAt: (cwd, skipPermissions, sessionName, existingSessionId, x, y, width, height) => {
       const state = get();
-      const count = state.terminals.length;
       const newTerm = makeTerminal(state.nextZ, {
-        x: 80 + (count % 5) * 30,
-        y: 80 + (count % 5) * 30,
+        x: x ?? 80 + (state.terminals.length % 5) * 30,
+        y: y ?? 80 + (state.terminals.length % 5) * 30,
+        ...(width ? { width } : {}),
+        ...(height ? { height } : {}),
         title: sessionName || "Claude",
         borderColor: "#cba6f7",
         cwd,
@@ -212,6 +219,28 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         activeTerminalId: newTerm.terminalId,
       });
       markDirty();
+      return newTerm;
+    },
+
+    addSharedChatPanel: (groupId, x, y, width, height) => {
+      const state = get();
+      const newTerm = makeTerminal(state.nextZ, {
+        x,
+        y,
+        width,
+        height,
+        title: "Team Chat",
+        borderColor: "#94e2d5",
+        cwd: "",
+        panelType: "shared-chat",
+        terminalId: `shared-chat-${groupId}`,
+      });
+      set({
+        terminals: [...state.terminals, newTerm],
+        nextZ: state.nextZ + 1,
+      });
+      markDirty();
+      return newTerm;
     },
 
     removeTerminal: (id: string) => {

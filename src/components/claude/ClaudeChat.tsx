@@ -1,20 +1,26 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useThemeStore } from "../../stores/themeStore";
-import { createClaudeSession, sendClaudePrompt, cancelClaude, listSlashCommands, resolvePermission, readFile, writeFile, listMcpServers } from "../../lib/tauriApi";
-import type { McpServer } from "../../lib/types";
-import { SlashCommand, PermissionMode } from "../../lib/types";
+import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, writeFile, loadSessionHistory, mapHistoryMessages, truncateSessionJsonl, forkSessionJsonl, listMcpServers } from "../../lib/tauriApi";
+import { SlashCommand, PermissionMode, McpServer } from "../../lib/types";
 import { rewritePromptStream } from "../../lib/ai";
 import ChatMessage, { toolHeader, renderContent, ReadGroupCard } from "./ChatMessage";
 import Editor from "@monaco-editor/react";
 import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
 import ChatInput from "./ChatInput";
+import DelegationStatus from "./DelegationStatus";
+import { useDelegationStore } from "../../stores/delegationStore";
+import { useCanvasStore } from "../../stores/canvasStore";
+import { getDelegationPort } from "../../lib/tauriApi";
+import { v4 as uuidv4 } from "uuid";
 import "./ClaudeChat.css";
+
+let monacoThemeForBg = "";
 
 function guessLanguage(filePath: string): string {
   const ext = filePath.split(".").pop()?.toLowerCase() || "";
@@ -62,15 +68,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const createSession = useClaudeStore((s) => s.createSession);
   const addUserMessage = useClaudeStore((s) => s.addUserMessage);
   const incrementPromptCount = useClaudeStore((s) => s.incrementPromptCount);
+  const setDraftPrompt = useClaudeStore((s) => s.setDraftPrompt);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const loopTimerRef = useRef<number | null>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [configMcpServers, setConfigMcpServers] = useState<McpServer[]>([]);
   const [showMcpDrop, setShowMcpDrop] = useState(false);
-  const [showFileTree, setShowFileTree] = useState(false);
   const liveMcp = useClaudeStore((s) => s.sessions[sessionId]?.mcpServers);
-  // Live status from session init takes priority; fall back to config-file list
   const mcpServers = (liveMcp && liveMcp.length > 0) ? liveMcp : configMcpServers;
+  const [showFileTree, setShowFileTree] = useState(false);
   const [selectedModel, setSelectedModel] = useState(
     () => useSettingsStore.getState().claudeModel || "sonnet"
   );
@@ -96,24 +103,30 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const [sidePanelOpen, setSidePanelOpen] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
   const [rewindText, setRewindText] = useState<string | null>(null);
+  const [queueExpanded, setQueueExpanded] = useState(false);
   const [editOverlay, setEditOverlay] = useState<{ tcId: string; filePath: string; fullContent: string; changedLines: Set<number> } | null>(null);
   const editOverrides = useRef<Record<string, string>>({});
   const savedScrollTop = useRef<number>(0);
-  const modifiedEditorRef = useRef<any>(null);
+  const modifiedEditorRef = useRef<import("monaco-editor").editor.IStandaloneCodeEditor | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
-  const editorSavedContent = useRef<string>("");
+  const editorSavedVersionId = useRef<number>(0);
 
   const permMode = PERMISSION_MODES[permModeIdx];
 
   useEffect(() => {
     createSession(sessionId);
-    // Save CWD for session persistence
     if (cwd && cwd !== ".") {
       useClaudeStore.getState().setCwd(sessionId, cwd);
     }
   }, [sessionId, createSession, cwd]);
-  useEffect(() => { listSlashCommands().then(setSlashCommands).catch(() => {}); }, []);
-  useEffect(() => { listMcpServers(cwd).then(setConfigMcpServers).catch(() => {}); }, [cwd]);
+  useEffect(() => {
+    const t64Commands: SlashCommand[] = [
+      { name: "loop", description: "Run a prompt on a loop (e.g. /loop 5m improve the code)", usage: "/loop [interval] <prompt> — default 10m. /loop stop to cancel.", source: "Terminal 64" },
+      { name: "delegate", description: "Split work into parallel sub-sessions", usage: "/delegate <prompt> — Claude plans the task split, spawns agents with MCP team chat.", source: "Terminal 64" },
+    ];
+    listSlashCommands().then((cmds) => setSlashCommands([...t64Commands, ...cmds])).catch(() => setSlashCommands(t64Commands));
+    listMcpServers(cwd).then(setConfigMcpServers).catch(() => {});
+  }, []);
   // Apply persisted font on mount (once per app, harmless if called multiple times)
   useEffect(() => {
     document.documentElement.style.setProperty("--claude-font", fontStack(useSettingsStore.getState().claudeFont || "system"));
@@ -214,25 +227,77 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         const paths: string[] = event.payload.paths || [];
         if (paths.length) setAttachedFiles((prev) => [...prev, ...paths]);
       }
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    }).then((fn) => { unlisten = fn; }).catch((err) => console.warn('[drag-drop]', err));
+    return () => { if (unlisten) unlisten(); };
   }, [isActive]);
 
   // Resolve CWD: use prop, fall back to stored session CWD
   const effectiveCwd = (cwd && cwd !== ".") ? cwd : (session?.cwd || ".");
 
-  const handleSend = useCallback(
-    async (text: string, permissionOverride?: PermissionMode) => {
-      let prompt = text;
-      if (attachedFiles.length > 0) {
-        const fileList = attachedFiles.map((f) => `[Attached file: ${f}]`).join("\n");
-        prompt = fileList + "\n\n" + text;
-        setAttachedFiles([]);
+  // Safety: if streaming has been stuck for >5 min, force-reset it
+  useEffect(() => {
+    if (!session?.isStreaming || !session?.streamingStartedAt) return;
+    const timer = setInterval(() => {
+      const s = useClaudeStore.getState().sessions[sessionId];
+      if (s?.isStreaming && s.streamingStartedAt && Date.now() - s.streamingStartedAt > 5 * 60 * 1000) {
+        console.warn(`[queue-safety] Streaming stuck for ${sessionId}, force-resetting`);
+        useClaudeStore.getState().setStreaming(sessionId, false);
+        useClaudeStore.getState().clearStreamingText(sessionId);
       }
-      addUserMessage(sessionId, prompt);
-      // Forward to Discord so it shows in the channel
-      emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
-      const promptCount = session?.promptCount ?? 0;
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [session?.isStreaming, sessionId]);
+
+  // Auto-drain queue: when streaming stops, send next queued prompt
+  const prevStreaming = useRef(false);
+  useEffect(() => {
+    const wasStreaming = prevStreaming.current;
+    const nowStreaming = session?.isStreaming ?? false;
+    prevStreaming.current = nowStreaming;
+    if (wasStreaming && !nowStreaming) {
+      // Streaming just ended — check queue first
+      const next = useClaudeStore.getState().dequeuePrompt(sessionId);
+      if (next) {
+        addUserMessage(sessionId, next.text);
+        emit("gui-message", { session_id: sessionId, content: next.text }).catch(() => {});
+        setTimeout(() => {
+          actualSend(next.text).catch((err) => useClaudeStore.getState().setError(sessionId, String(err)));
+        }, 500);
+        return;
+      }
+      // No queue — check loop timer
+      const s = useClaudeStore.getState().sessions[sessionId];
+      if (s?.activeLoop) {
+        const { prompt: loopPrompt, intervalMs, lastFiredAt } = s.activeLoop;
+        const elapsed = lastFiredAt ? Date.now() - lastFiredAt : Infinity;
+        const delay = Math.max(0, intervalMs - elapsed);
+        loopTimerRef.current = window.setTimeout(() => {
+          const curr = useClaudeStore.getState().sessions[sessionId];
+          if (!curr?.activeLoop || curr.isStreaming) return; // loop cancelled or session busy
+          addUserMessage(sessionId, loopPrompt);
+          emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
+          useClaudeStore.getState().tickLoop(sessionId);
+          actualSend(loopPrompt).catch((err) => useClaudeStore.getState().setError(sessionId, String(err)));
+        }, delay);
+      }
+    }
+  }, [session?.isStreaming]);
+
+  // Clear loop timer when loop is cancelled or component unmounts
+  useEffect(() => {
+    if (!session?.activeLoop && loopTimerRef.current) {
+      clearTimeout(loopTimerRef.current);
+      loopTimerRef.current = null;
+    }
+    return () => {
+      if (loopTimerRef.current) { clearTimeout(loopTimerRef.current); loopTimerRef.current = null; }
+    };
+  }, [session?.activeLoop]);
+
+  const actualSend = useCallback(
+    async (prompt: string, permissionOverride?: PermissionMode) => {
+      const sess = useClaudeStore.getState().sessions[sessionId];
+      const started = sess?.hasBeenStarted ?? false;
       try {
         const req = {
           session_id: sessionId, cwd: effectiveCwd, prompt,
@@ -240,18 +305,24 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
           model: selectedModel || undefined,
           effort: selectedEffort || undefined,
         };
-        if (promptCount === 0 && (!effectiveCwd || effectiveCwd === ".")) {
+        if (!started && (!effectiveCwd || effectiveCwd === ".")) {
           useClaudeStore.getState().setError(sessionId, "No working directory set. Create a new session.");
           return;
         }
-        // Try resume first (works if session exists on disk), fall back to create
-        if (promptCount > 0) {
-          await sendClaudePrompt({ ...req, cwd: effectiveCwd });
+        // Use --resume if session was ever started (survives rewind/cancel),
+        // otherwise create new. Falls back to the other on failure.
+        if (started) {
+          try {
+            await sendClaudePrompt({ ...req, cwd: effectiveCwd });
+          } catch {
+            // Session file might not exist yet (edge case) — try create
+            await createClaudeSession(req);
+          }
         } else {
           try {
             await createClaudeSession(req);
           } catch {
-            // Session might already exist from Discord — try resume
+            // Session might already exist from disk — try resume
             await sendClaudePrompt({ ...req, cwd: effectiveCwd });
           }
         }
@@ -260,7 +331,101 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         useClaudeStore.getState().setError(sessionId, String(err));
       }
     },
-    [sessionId, effectiveCwd, permMode, selectedModel, selectedEffort, attachedFiles, session?.promptCount, addUserMessage, incrementPromptCount]
+    [sessionId, effectiveCwd, permMode, selectedModel, selectedEffort, incrementPromptCount]
+  );
+
+  const handleSend = useCallback(
+    async (text: string, permissionOverride?: PermissionMode) => {
+      // Handle /loop command locally
+      const loopMatch = text.match(/^\/loop\s*(.*)/i);
+      if (loopMatch) {
+        const args = loopMatch[1].trim();
+        if (!args || args === "stop" || args === "cancel" || args === "off") {
+          useClaudeStore.getState().setLoop(sessionId, null);
+          return;
+        }
+        // Parse: [interval] <prompt>
+        const parts = args.match(/^(\d+[smhd]?)\s+([\s\S]+)$/);
+        let intervalMs = 10 * 60 * 1000; // default 10m
+        let loopPrompt = args;
+        if (parts) {
+          const raw = parts[1];
+          const num = parseInt(raw);
+          const unit = raw.replace(/\d+/, "") || "m";
+          if (unit === "s") intervalMs = num * 1000;
+          else if (unit === "m") intervalMs = num * 60 * 1000;
+          else if (unit === "h") intervalMs = num * 60 * 60 * 1000;
+          else if (unit === "d") intervalMs = num * 24 * 60 * 60 * 1000;
+          loopPrompt = parts[2];
+        }
+        useClaudeStore.getState().setLoop(sessionId, {
+          prompt: loopPrompt,
+          intervalMs,
+          lastFiredAt: null,
+          iteration: 0,
+        });
+        // Fire the first iteration immediately
+        addUserMessage(sessionId, loopPrompt);
+        emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
+        useClaudeStore.getState().tickLoop(sessionId);
+        await actualSend(loopPrompt, permissionOverride);
+        return;
+      }
+
+      // Handle /delegate command — inject skill context so Claude plans the split
+      const delegateMatch = text.match(/^\/delegate\s+([\s\S]+)/i);
+      if (delegateMatch) {
+        const userGoal = delegateMatch[1].trim();
+        if (!userGoal) return;
+
+        const skillPrompt = `You are orchestrating a delegation. The user wants to split work across multiple parallel Claude agents.
+
+USER'S GOAL: ${userGoal}
+
+Your job: analyze this goal and decide how many parallel agents are needed (minimum 2, maximum 8). Use your judgment — simple tasks may only need 2 agents, complex multi-part tasks may need 5+. Don't over-parallelize; only create agents for truly independent work.
+
+Output ONLY a delegation plan in this EXACT format (no other text before or after):
+
+[DELEGATION_START]
+[CONTEXT] <one paragraph of shared context all agents need>
+[TASK] <concise description of task 1>
+[TASK] <concise description of task 2>
+...as many [TASK] lines as needed...
+[DELEGATION_END]
+
+Rules:
+- Each [TASK] must be independently completable — no task should depend on another's output
+- Keep task descriptions specific and actionable
+- The [CONTEXT] should include project info, constraints, and the overall goal
+- Fewer focused agents > many tiny agents. If two things are tightly coupled, keep them in one task
+- Output the delegation block IMMEDIATELY, nothing else`;
+
+        delegateRequested.current = true;
+        addUserMessage(sessionId, `/delegate ${userGoal}`);
+        await actualSend(skillPrompt, permissionOverride);
+        return;
+      }
+
+      let prompt = text;
+      if (attachedFiles.length > 0) {
+        const fileList = attachedFiles.map((f) => `[Attached file: ${f}]`).join("\n");
+        prompt = fileList + "\n\n" + text;
+        setAttachedFiles([]);
+      }
+
+      const isCurrentlyStreaming = useClaudeStore.getState().sessions[sessionId]?.isStreaming;
+      if (isCurrentlyStreaming) {
+        // Queue the prompt instead of sending mid-thinking
+        useClaudeStore.getState().enqueuePrompt(sessionId, prompt);
+        setQueueExpanded(true);
+        return;
+      }
+
+      addUserMessage(sessionId, prompt);
+      emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
+      await actualSend(prompt, permissionOverride);
+    },
+    [sessionId, attachedFiles, addUserMessage, actualSend]
   );
 
   const handleCancel = useCallback(() => { cancelClaude(sessionId).catch(() => {}); }, [sessionId]);
@@ -280,13 +445,48 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     }
   }, [sessionId]);
   const handleRewind = useCallback((messageId: string, content: string) => {
-    // Cancel any running process
     cancelClaude(sessionId).catch(() => {});
-    // Truncate conversation from this message
     useClaudeStore.getState().truncateFromMessage(sessionId, messageId);
-    // Pre-fill the input with the old message text for editing
+    const sess = useClaudeStore.getState().sessions[sessionId];
+    if (sess) {
+      const keepTurns = sess.messages.filter(m => m.role === "user").length;
+      truncateSessionJsonl(sessionId, effectiveCwd, keepTurns)
+        .catch((err) => console.warn("[rewind] Failed to truncate JSONL:", err));
+    }
     setRewindText(content);
-  }, [sessionId]);
+  }, [sessionId, effectiveCwd]);
+
+  const handleFork = useCallback((messageId: string) => {
+    const store = useClaudeStore.getState();
+    const sess = store.sessions[sessionId];
+    if (!sess) return;
+
+    // Get messages up to (not including) the selected message
+    const msgIdx = sess.messages.findIndex(m => m.id === messageId);
+    if (msgIdx < 0) return;
+    const forkedMessages = sess.messages.slice(0, msgIdx);
+
+    const canvas = useCanvasStore.getState();
+    const parentPanel = canvas.terminals.find(t => t.terminalId === sessionId);
+    const x = parentPanel?.x ?? 80;
+    const y = (parentPanel?.y ?? 80) - (parentPanel?.height ?? 400) - 20;
+    const w = parentPanel?.width;
+    const h = parentPanel?.height;
+
+    const newPanel = canvas.addClaudeTerminalAt(
+      effectiveCwd, false, undefined, undefined, x, y, w, h,
+    );
+
+    store.createSession(newPanel.terminalId);
+    if (forkedMessages.length > 0) {
+      store.loadFromDisk(newPanel.terminalId, forkedMessages);
+      // Copy parent JSONL (truncated to fork point) so --resume works with full context
+      const keepTurns = forkedMessages.filter(m => m.role === "user").length;
+      forkSessionJsonl(sessionId, newPanel.terminalId, effectiveCwd, keepTurns)
+        .catch((err) => console.warn("[fork] Failed to copy JSONL:", err));
+    }
+    store.setCwd(newPanel.terminalId, effectiveCwd);
+  }, [sessionId, effectiveCwd]);
 
   const handleEditClick = useCallback(async (tcId: string, filePath: string, _oldStr: string, newStr: string) => {
     // Save scroll position before opening overlay
@@ -342,7 +542,129 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
 
   const hasPlan = planContent !== null;
   const hasTasks = (session?.tasks.length ?? 0) > 0;
+  const isDelegationParent = !!useDelegationStore((s) => s.getGroupByParent(sessionId));
   const hasSideContent = hasPlan || hasTasks;
+
+  const spawnDelegation = useCallback(
+    async (tasks: { description: string }[], sharedContext: string) => {
+      const delStore = useDelegationStore.getState();
+      const group = delStore.createGroup(sessionId, tasks, "auto", sharedContext || undefined);
+
+      // Spawn shared chat panel below the parent
+      const canvas = useCanvasStore.getState();
+      const parentPanel = canvas.terminals.find((t) => t.terminalId === sessionId);
+      const parentW = parentPanel?.width || 600;
+      const parentH = parentPanel?.height || 400;
+      canvas.addSharedChatPanel(
+        group.id,
+        parentPanel?.x || 80,
+        (parentPanel?.y || 80) + parentH + 20,
+        parentW,
+        Math.min(300, parentH * 0.6),
+      );
+
+      // Get delegation port + write MCP config for channel server
+      let delegationPort = 0;
+      try {
+        delegationPort = await getDelegationPort();
+      } catch (err) {
+        console.warn("[delegation] Could not get port:", err);
+      }
+
+      const appDir = effectiveCwd;
+
+      if (delegationPort > 0) {
+        // Resolve MCP channel server script path
+        const mcpScriptPath = new URL("../../mcp/delegation-server.mjs", window.location.href).pathname.startsWith("/")
+          ? `${appDir.replace(/\/[^/]+\/?$/, "")}/Terminal-64/mcp/delegation-server.mjs`
+          : `${appDir}/mcp/delegation-server.mjs`;
+
+        try {
+          const mcpConfig: Record<string, unknown> = {};
+          try {
+            const existing = await readFile(`${appDir}/.mcp.json`);
+            Object.assign(mcpConfig, JSON.parse(existing));
+          } catch {}
+          if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+          (mcpConfig.mcpServers as Record<string, unknown>)["t64-delegation"] = {
+            command: "node",
+            args: [mcpScriptPath],
+            env: {
+              T64_DELEGATION_PORT: String(delegationPort),
+              T64_GROUP_ID: group.id,
+              T64_AGENT_LABEL: "Agent",
+            },
+          };
+          await writeFile(`${appDir}/.mcp.json`, JSON.stringify(mcpConfig, null, 2));
+        } catch (err) {
+          console.warn("[delegation] Failed to write .mcp.json:", err);
+        }
+      }
+
+      // Spawn headless child sessions — no canvas panels, ephemeral
+      group.tasks.forEach((task, i) => {
+        const childSessionId = uuidv4();
+        const childName = `[D] ${task.description.slice(0, 30)}`;
+
+        delStore.setTaskSessionId(group.id, task.id, childSessionId);
+        delStore.updateTaskStatus(group.id, task.id, "running");
+
+        const channelNote = delegationPort > 0
+          ? `\n\nYou have a team channel (t64-delegation). Messages from other agents appear as <channel> notifications. You can also use:
+- send_to_team: Share progress with the team chat
+- read_team: Read what other agents posted
+- report_done: Signal task completion with a summary
+Use send_to_team to post updates as you work.`
+          : "";
+
+        const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, state your task is complete.`;
+
+        // Create ephemeral session in store (not saved to localStorage)
+        useClaudeStore.getState().createSession(childSessionId, childName, true);
+        addUserMessage(childSessionId, initialPrompt);
+
+        setTimeout(() => {
+          createClaudeSession({
+            session_id: childSessionId,
+            cwd: appDir,
+            prompt: initialPrompt,
+            permission_mode: "bypass_all",
+            channel_server: delegationPort > 0 ? "t64-delegation" : undefined,
+          }).catch((err) => {
+            console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
+            delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
+          });
+        }, i * 500);
+      });
+    },
+    [sessionId, effectiveCwd, addUserMessage],
+  );
+
+  // Detect delegation blocks in assistant messages and auto-spawn (only when /delegate was used)
+  const delegateRequested = useRef(false);
+  const lastDelegationParsed = useRef<string | null>(null);
+  useEffect(() => {
+    if (!session || !delegateRequested.current) return;
+    const msgs = session.messages;
+    const last = [...msgs].reverse().find((m) => m.role === "assistant");
+    if (!last || last.id === lastDelegationParsed.current) return;
+    const text = last.content;
+    const startIdx = text.indexOf("[DELEGATION_START]");
+    const endIdx = text.indexOf("[DELEGATION_END]");
+    if (startIdx === -1 || endIdx === -1) return;
+    lastDelegationParsed.current = last.id;
+    delegateRequested.current = false;
+    const block = text.slice(startIdx, endIdx + "[DELEGATION_END]".length);
+    const contextMatch = block.match(/\[CONTEXT\]\s*(.*)/);
+    const taskMatches = [...block.matchAll(/\[TASK\]\s*(.*)/g)];
+    if (taskMatches.length === 0) return;
+    const context = contextMatch?.[1]?.trim() || "";
+    const tasks = taskMatches.map((m) => ({ description: m[1].trim() }));
+    spawnDelegation(tasks, context);
+  }, [session?.messages, spawnDelegation]);
+
+  const activeTasks = useMemo(() => session?.tasks?.filter(t => t.status !== "deleted") ?? [], [session?.tasks]);
+  const completedTasks = useMemo(() => activeTasks.filter(t => t.status === "completed"), [activeTasks]);
 
   // Auto-open side panel when content appears (must be before any early return)
   useEffect(() => {
@@ -412,7 +734,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
 
           {/* Effort dropdown */}
           <div className="cc-dropdown-wrap" onClick={(e) => e.stopPropagation()}>
-            <button className="cc-dropdown-trigger" onClick={() => { setShowEffortDrop((v) => !v); setShowModelDrop(false); setShowMcpDrop(false); }}>
+            <button className="cc-dropdown-trigger" onClick={() => { setShowEffortDrop((v) => !v); setShowModelDrop(false); }}>
               {currentEffort.label}<span className="cc-chevron">▾</span>
             </button>
             {showEffortDrop && (
@@ -440,6 +762,32 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
               ☰
             </button>
           )}
+          <button
+            className="cc-refresh-btn"
+            onClick={() => {
+              // Cancel running process and reset UI state, keeping conversation history
+              cancelClaude(sessionId).catch(() => {});
+              closeClaudeSession(sessionId).catch(() => {});
+              const store = useClaudeStore.getState();
+              store.setStreaming(sessionId, false);
+              store.setError(sessionId, null);
+              store.clearStreamingText(sessionId);
+              // Reload messages from JSONL to ensure sync with Claude CLI
+              if (effectiveCwd) {
+                loadSessionHistory(sessionId, effectiveCwd).then((history) => {
+                  if (history?.length) {
+                    store.loadFromDisk(sessionId, mapHistoryMessages(history));
+                  }
+                }).catch(() => {});
+              }
+            }}
+            title="Refresh chat (reset state, reload history)"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M1.5 6A4.5 4.5 0 0 1 10 3.5M10.5 6A4.5 4.5 0 0 1 2 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              <path d="M10 1v3h-3M2 11V8h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -464,7 +812,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                       const content = modifiedEditorRef.current.getValue();
                       writeFile(editOverlay.filePath, content).catch(() => {});
                       editOverrides.current[editOverlay.tcId] = content;
-                      editorSavedContent.current = content;
+                      editorSavedVersionId.current = modifiedEditorRef.current.getModel()!.getAlternativeVersionId();
                       setEditorDirty(false);
                     }
                   }}><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M12.5 2H3.5C2.67 2 2 2.67 2 3.5V12.5C2 13.33 2.67 14 3.5 14H12.5C13.33 14 14 13.33 14 12.5V3.5C14 2.67 13.33 2 12.5 2ZM8 12C6.9 12 6 11.1 6 10S6.9 8 8 8S10 8.9 10 10S9.1 12 8 12ZM11 6H4V3H11V6Z" fill="currentColor"/></svg></button>
@@ -487,24 +835,27 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                   theme="terminal64"
                   beforeMount={(monaco) => {
                     const ui = useThemeStore.getState().currentTheme.ui;
-                    monaco.editor.defineTheme("terminal64", {
-                      base: "vs-dark",
-                      inherit: true,
-                      rules: [],
-                      colors: {
-                        "editor.background": ui.bg,
-                        "editor.foreground": ui.fg,
-                        "editorLineNumber.foreground": ui.fgMuted,
-                        "editor.selectionBackground": ui.accent + "44",
-                        "editor.lineHighlightBackground": ui.bgSecondary,
-                        "editorWidget.background": ui.bgSecondary,
-                        "editorWidget.border": ui.border,
-                      },
-                    });
+                    if (monacoThemeForBg !== ui.bg) {
+                      monaco.editor.defineTheme("terminal64", {
+                        base: "vs-dark",
+                        inherit: true,
+                        rules: [],
+                        colors: {
+                          "editor.background": ui.bg,
+                          "editor.foreground": ui.fg,
+                          "editorLineNumber.foreground": ui.fgMuted,
+                          "editor.selectionBackground": ui.accent + "44",
+                          "editor.lineHighlightBackground": ui.bgSecondary,
+                          "editorWidget.background": ui.bgSecondary,
+                          "editorWidget.border": ui.border,
+                        },
+                      });
+                      monacoThemeForBg = ui.bg;
+                    }
                   }}
                   onMount={(editor, monaco) => {
                     modifiedEditorRef.current = editor;
-                    editorSavedContent.current = editOverlay!.fullContent;
+                    editorSavedVersionId.current = editor.getModel()!.getAlternativeVersionId();
                     setEditorDirty(false);
                     const changed = editOverlay!.changedLines;
                     // Green decorations on changed lines
@@ -526,8 +877,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                     }
                     // Track dirty state
                     editor.onDidChangeModelContent(() => {
-                      const current = editor.getValue();
-                      setEditorDirty(current !== editorSavedContent.current);
+                      setEditorDirty(editor.getModel()!.getAlternativeVersionId() !== editorSavedVersionId.current);
                     });
                   }}
                   options={{
@@ -588,7 +938,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                     continue;
                   }
                 }
-                elements.push(<ChatMessage key={msg.id} message={msg} onRewind={handleRewind} onEditClick={handleEditClick} />);
+                elements.push(<ChatMessage key={msg.id} message={msg} onRewind={handleRewind} onFork={handleFork} onEditClick={handleEditClick} />);
                 i++;
               }
               return elements;
@@ -645,7 +995,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                   <div className="cc-question-text">{current.question}</div>
                   <div className="cc-question-options">
                     {current.options.map((opt, i) => (
-                      <button key={i} className="cc-question-btn" onClick={() => submitAnswer(opt.label)}>
+                      <button key={opt.label || i} className="cc-question-btn" onClick={() => submitAnswer(opt.label)}>
                         <span className="cc-question-label">{opt.label}</span>
                         {opt.description && <span className="cc-question-desc">{opt.description}</span>}
                       </button>
@@ -676,6 +1026,27 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
           )}
 
           <div className="cc-footer">
+            {isDelegationParent && <DelegationStatus sessionId={sessionId} />}
+            {/* Prompt queue overlay — absolutely positioned upward from footer */}
+            {session.promptQueue.length > 0 && (
+              <div className={`cc-queue ${queueExpanded ? "cc-queue--expanded" : ""}`}>
+                <button className="cc-queue-header" onClick={() => setQueueExpanded((v) => !v)}>
+                  <span className="cc-queue-chevron">{queueExpanded ? "▾" : "▸"}</span>
+                  <span className="cc-queue-title">{session.promptQueue.length} queued prompt{session.promptQueue.length > 1 ? "s" : ""}</span>
+                  <button className="cc-queue-clear" onClick={(e) => { e.stopPropagation(); useClaudeStore.getState().clearQueue(sessionId); }}>Clear</button>
+                </button>
+                {queueExpanded && (
+                  <div className="cc-queue-list">
+                    {session.promptQueue.map((qp) => (
+                      <div key={qp.id} className="cc-queue-item">
+                        <span className="cc-queue-text">{qp.text}</span>
+                        <button className="cc-queue-remove" onClick={() => useClaudeStore.getState().removeQueuedPrompt(sessionId, qp.id)}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {planFinished && !session.isStreaming && (
               <div className="cc-plan-finished">
                 <span className="cc-plan-finished-text">Plan complete</span>
@@ -683,6 +1054,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                   <button className="cc-plan-finished-btn cc-plan-finished-btn--accept" onClick={() => {
                     setPlanFinished(false);
                     setShowPlanViewer(false);
+                    setPlanContent(null);
                     handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
                     setTimeout(() => {
                       setPermModeIdx(4); // YOLO
@@ -692,6 +1064,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                   <button className="cc-plan-finished-btn cc-plan-finished-btn--compact" onClick={() => {
                     setPlanFinished(false);
                     setShowPlanViewer(false);
+                    setPlanContent(null);
                     setPermModeIdx(4); // YOLO
                     handleSend(
                       "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.",
@@ -703,7 +1076,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                       {showPlanViewer ? "Close Plan" : "View Plan"}
                     </button>
                   )}
-                  <button className="cc-plan-finished-btn cc-plan-finished-btn--dismiss" onClick={() => { setPlanFinished(false); setShowPlanViewer(false); }}>Dismiss</button>
+                  <button className="cc-plan-finished-btn cc-plan-finished-btn--delegate" onClick={() => {
+                    setPlanFinished(false);
+                    setShowPlanViewer(false);
+                    const delegatePrompt = planContent
+                      ? `Based on this plan, break it into parallel tasks for delegation. Analyze the plan and output a delegation block:\n\n${planContent}`
+                      : "Break the plan you just created into parallel tasks for delegation.";
+                    setPlanContent(null);
+                    handleSend(`/delegate ${delegatePrompt}`, "bypass_all");
+                  }}>Delegate</button>
+                  <button className="cc-plan-finished-btn cc-plan-finished-btn--dismiss" onClick={() => { setPlanFinished(false); setShowPlanViewer(false); setPlanContent(null); }}>Dismiss</button>
                 </div>
               </div>
             )}
@@ -737,11 +1119,28 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                 {attachedFiles.length > 0 && (
                   <div className="cc-attached-files">
                     {attachedFiles.map((f, i) => (
-                      <div key={i} className="cc-file-chip">
+                      <div key={f} className="cc-file-chip">
                         <span className="cc-file-name">{f.split(/[/\\]/).pop()}</span>
                         <button className="cc-file-remove" onClick={() => setAttachedFiles((p) => p.filter((_, j) => j !== i))}>×</button>
                       </div>
                     ))}
+                  </div>
+                )}
+                {/* Loop indicator */}
+                {session.activeLoop && (
+                  <div className="cc-loop-banner">
+                    <span className="cc-loop-icon">⟳</span>
+                    <span className="cc-loop-text">
+                      Loop active — iteration #{session.activeLoop.iteration} · every {
+                        session.activeLoop.intervalMs >= 3600000 ? `${session.activeLoop.intervalMs / 3600000}h` :
+                        session.activeLoop.intervalMs >= 60000 ? `${session.activeLoop.intervalMs / 60000}m` :
+                        `${session.activeLoop.intervalMs / 1000}s`
+                      }
+                    </span>
+                    <span className="cc-loop-prompt" title={session.activeLoop.prompt}>
+                      {session.activeLoop.prompt.length > 40 ? session.activeLoop.prompt.slice(0, 40) + "…" : session.activeLoop.prompt}
+                    </span>
+                    <button className="cc-loop-stop" onClick={() => useClaudeStore.getState().setLoop(sessionId, null)}>Stop</button>
                   </div>
                 )}
                 <ChatInput
@@ -751,6 +1150,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                   onRewrite={handleRewrite}
                   isRewriting={isRewriting}
                   isStreaming={session.isStreaming}
+                  streamingStartedAt={session.streamingStartedAt}
                   slashCommands={slashCommands}
                   initialText={rewindText}
                   onInitialTextConsumed={() => setRewindText(null)}
@@ -759,6 +1159,11 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                   onCyclePerm={() => setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; useSettingsStore.getState().set({ claudePermMode: PERMISSION_MODES[next].id }); return next; })}
                   sessionName={session.name || undefined}
                   cwd={effectiveCwd}
+                  queueCount={session.promptQueue.length}
+                  draftPrompt={session.draftPrompt}
+                  onDraftChange={(t) => setDraftPrompt(sessionId, t)}
+                  contextUsed={session.contextUsed}
+                  contextMax={session.contextMax}
                 />
               </>
             )}
@@ -776,11 +1181,11 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                 <div className="cc-side-header">
                   <span>Tasks</span>
                   <span className="cc-tasks-count">
-                    {session.tasks.filter((t) => t.status === "completed").length}/{session.tasks.filter((t) => t.status !== "deleted").length}
+                    {completedTasks.length}/{activeTasks.length}
                   </span>
                 </div>
                 <div className="cc-tasks-list">
-                  {session.tasks.filter((t) => t.status !== "deleted").map((task) => (
+                  {activeTasks.map((task) => (
                     <div key={task.id} className={`cc-task cc-task--${task.status}`}>
                       <span className="cc-task-check">
                         {task.status === "completed" ? "✓" : task.status === "in_progress" ? "●" : "○"}
@@ -822,6 +1227,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
             <button className="cc-side-close" onClick={() => setSidePanelOpen(false)}>×</button>
           </div>
         )}
+
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { closeTerminal, writeTerminal, closeClaudeSession, renameDiscordSession 
 import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
 import XTerminal from "../terminal/XTerminal";
 import ClaudeChat from "../claude/ClaudeChat";
+import SharedChat from "../claude/SharedChat";
 import TextEditor from "./TextEditor";
 import "./FloatingTerminal.css";
 
@@ -14,16 +15,16 @@ interface FloatingTerminalProps {
 }
 
 export default function FloatingTerminal({ term }: FloatingTerminalProps) {
+  // Reactive state — only re-render when these change
+  const isActive = useCanvasStore((s) => s.activeTerminalId === term.terminalId);
+  const zoom = useCanvasStore((s) => s.zoom);
+  // Stable action refs — won't cause re-renders
   const moveTerminal = useCanvasStore((s) => s.moveTerminal);
   const resizeTerminal = useCanvasStore((s) => s.resizeTerminal);
   const removeTerminal = useCanvasStore((s) => s.removeTerminal);
   const bringToFront = useCanvasStore((s) => s.bringToFront);
   const setActive = useCanvasStore((s) => s.setActive);
   const setBorderColor = useCanvasStore((s) => s.setBorderColor);
-  const activeTerminalId = useCanvasStore((s) => s.activeTerminalId);
-  const zoom = useCanvasStore((s) => s.zoom);
-
-  const isActive = term.terminalId === activeTerminalId;
   const [showColors, setShowColors] = useState(false);
   const [isWorking, setIsWorking] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -154,7 +155,19 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
     setActive(term.terminalId);
   }, [term.id, term.terminalId, bringToFront, setActive]);
 
+  const handleTitleChange = useCallback((_: string, title: string) => {
+    useCanvasStore.getState().setTitle(term.id, title);
+    if (/^[A-Z]:\\/.test(title)) {
+      useCanvasStore.getState().setCwd(term.id, title);
+    }
+  }, [term.id]);
+
+  const handleCwdChange = useCallback((_: string, dir: string) => {
+    useCanvasStore.getState().setCwd(term.id, dir);
+  }, [term.id]);
+
   const isClaude = term.panelType === "claude";
+  const isSharedChat = term.panelType === "shared-chat";
   const claudeSessionName = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.name : undefined);
   const claudeCwd = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.cwd : undefined);
 
@@ -239,7 +252,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
         ) : (
           <span className="ft-title">{term.title}</span>
         )}
-        {!isClaude && (
+        {!isClaude && !isSharedChat && (
           <button
             className="ft-btn"
             onClick={(e) => { e.stopPropagation(); handlePopOut(); }}
@@ -252,24 +265,28 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
             </svg>
           </button>
         )}
-        <button
-          className="ft-btn ft-btn--settings"
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowColors((v) => !v);
-          }}
-          title="Border color"
-        >
-          <div
-            className="ft-color-dot"
-            style={{ background: term.borderColor }}
-          />
-        </button>
-        <button className="ft-btn" onClick={handleClose} title="Close">
-          <svg width="9" height="9" viewBox="0 0 9 9">
-            <path d="M1 1L8 8M8 1L1 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-        </button>
+        {!isSharedChat && (
+          <>
+            <button
+              className="ft-btn ft-btn--settings"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowColors((v) => !v);
+              }}
+              title="Border color"
+            >
+              <div
+                className="ft-color-dot"
+                style={{ background: term.borderColor }}
+              />
+            </button>
+            <button className="ft-btn" onClick={handleClose} title="Close">
+              <svg width="9" height="9" viewBox="0 0 9 9">
+                <path d="M1 1L8 8M8 1L1 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+          </>
+        )}
       </div>
 
       {/* Color picker popover */}
@@ -299,6 +316,10 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
           </svg>
           <span>POPPED OUT</span>
         </div>
+      ) : isSharedChat ? (
+        <div className="ft-body ft-body--claude">
+          <SharedChat groupId={term.terminalId.replace("shared-chat-", "")} />
+        </div>
       ) : isClaude ? (
         <div className="ft-body ft-body--claude">
           <ClaudeChat
@@ -314,18 +335,11 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
             terminalId={term.terminalId}
             isActive={isActive}
             cwd={term.cwd || undefined}
-            onFocus={() => handleFocus()}
-            onActivity={() => handleActivity()}
-            onTitleChange={(_, title) => {
-              useCanvasStore.getState().setTitle(term.id, title);
-              if (/^[A-Z]:\\/.test(title)) {
-                useCanvasStore.getState().setCwd(term.id, title);
-              }
-            }}
-            onCwdChange={(_, dir) =>
-              useCanvasStore.getState().setCwd(term.id, dir)
-            }
-            onExit={() => handleClose()}
+            onFocus={handleFocus}
+            onActivity={handleActivity}
+            onTitleChange={handleTitleChange}
+            onCwdChange={handleCwdChange}
+            onExit={handleClose}
           />
           {/* Text editor overlay */}
           {editorOpen && (

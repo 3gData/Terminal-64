@@ -79,14 +79,15 @@ input.ft-title--editing {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border: none;
   background: transparent;
   color: var(--fg-muted, #6c7086);
   border-radius: 4px;
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
+  flex-shrink: 0;
 }
 
 .ft-btn:hover {
@@ -110,7 +111,7 @@ input.ft-title--editing {
 .ft-colors {
   position: absolute;
   top: 32px;
-  right: 30px;
+  right: 8px;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -207,14 +208,14 @@ input.ft-title--editing {
   z-index: 10;
 }
 
-/* Edges */
-.ft-resize--n { top: 0; left: 8px; right: 8px; height: 5px; cursor: n-resize; }
-.ft-resize--s { bottom: 0; left: 8px; right: 8px; height: 5px; cursor: s-resize; }
-.ft-resize--w { left: 0; top: 32px; bottom: 8px; width: 5px; cursor: w-resize; }
-.ft-resize--e { right: 0; top: 32px; bottom: 8px; width: 5px; cursor: e-resize; }
+/* Edges — 8px hit area for easier grab */
+.ft-resize--n { top: 0; left: 10px; right: 10px; height: 8px; cursor: n-resize; }
+.ft-resize--s { bottom: 0; left: 10px; right: 10px; height: 8px; cursor: s-resize; }
+.ft-resize--w { left: 0; top: 32px; bottom: 10px; width: 8px; cursor: w-resize; }
+.ft-resize--e { right: 0; top: 32px; bottom: 10px; width: 8px; cursor: e-resize; }
 
-/* Corners */
-.ft-resize--nw { top: 0; left: 0; width: 10px; height: 10px; cursor: nw-resize; }
-.ft-resize--ne { top: 0; right: 0; width: 10px; height: 10px; cursor: ne-resize; }
-.ft-resize--sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: sw-resize; }
-.ft-resize--se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: se-resize; }
+/* Corners — 14px hit area for easier grab */
+.ft-resize--nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nw-resize; }
+.ft-resize--ne { top: 0; right: 0; width: 14px; height: 14px; cursor: ne-resize; }
+.ft-resize--sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: sw-resize; }
+.ft-resize--se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: se-resize; }

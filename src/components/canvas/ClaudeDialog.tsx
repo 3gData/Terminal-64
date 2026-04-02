@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { useClaudeStore, STORAGE_KEY } from "../../stores/claudeStore";
 import { listDiskSessions, DiskSession } from "../../lib/tauriApi";
 import "./ClaudeDialog.css";
 
@@ -9,7 +9,7 @@ interface ClaudeDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirm: (cwd: string, skipPermissions: boolean, sessionName?: string) => void;
-  onReopen: (sessionId: string) => void;
+  onReopen: (sessionId: string, cwd: string) => void;
 }
 
 function timeAgo(ts: number): string {
@@ -75,7 +75,7 @@ export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: C
 
   const handleOpenSession = (sessionId: string) => {
     if (dir.trim()) addRecentDir(dir.trim());
-    onReopen(sessionId);
+    onReopen(sessionId, dir.trim());
     onClose();
   };
 
@@ -222,7 +222,7 @@ function getNamedSessions(liveSessions: Record<string, any>, cwd: string): { id:
 
   // Persisted sessions
   try {
-    const raw = localStorage.getItem("terminal64-claude-sessions");
+    const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const data = JSON.parse(raw);
       for (const [id, session] of Object.entries(data as Record<string, any>)) {

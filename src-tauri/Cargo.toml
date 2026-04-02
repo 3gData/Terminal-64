@@ -1,9 +1,9 @@
 [package]
 name = "terminal-64"
-version = "0.1.0"
+version = "1.0.0"
 description = "A modern terminal emulator"
 authors = ["you"]
-license = ""
+license = "MIT"
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
@@ -23,6 +23,7 @@ portable-pty = "0.8"
 uuid = { version = "1", features = ["v4"] }
 tauri-plugin-dialog = "2.6.0"
 dirs = "5"
+chrono = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 reqwest = { version = "0.12", features = ["json", "native-tls"], default-features = false }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

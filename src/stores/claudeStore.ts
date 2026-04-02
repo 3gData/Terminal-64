@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import { ChatMessage, ToolCall } from "../lib/types";
 
-const STORAGE_KEY = "terminal64-claude-sessions";
+export const STORAGE_KEY = "terminal64-claude-sessions";
 
 export interface ClaudeTask {
   id: string;
@@ -36,9 +36,15 @@ export interface PendingPermission {
   toolInput: Record<string, unknown>;
 }
 
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+  timestamp: number;
+}
+
 export interface McpServerStatus {
   name: string;
-  status: string; // "connected" | "failed" | "error" etc.
+  status: string;
 }
 
 export interface ClaudeSession {
@@ -47,9 +53,12 @@ export interface ClaudeSession {
   tasks: ClaudeTask[];
   isStreaming: boolean;
   streamingText: string;
+  streamingStartedAt: number | null; // timestamp when streaming began
   model: string;
   totalCost: number;
   totalTokens: number;
+  contextUsed: number; // input tokens from latest turn (approximates context window usage)
+  contextMax: number;  // max context window for the model
   error: string | null;
   promptCount: number;
   planModeActive: boolean;
@@ -57,13 +66,25 @@ export interface ClaudeSession {
   pendingPermission: PendingPermission | null;
   name: string;
   cwd: string;
+  promptQueue: QueuedPrompt[];
+  hasBeenStarted: boolean; // true once the first prompt was ever sent (survives rewind)
+  draftPrompt: string; // unsent text in the input box, persisted across restarts
+  activeLoop: ActiveLoop | null;
+  ephemeral: boolean; // if true, skip localStorage persistence (delegation children)
   mcpServers: McpServerStatus[];
+}
+
+export interface ActiveLoop {
+  prompt: string;
+  intervalMs: number;
+  lastFiredAt: number | null;
+  iteration: number;
 }
 
 interface ClaudeState {
   sessions: Record<string, ClaudeSession>;
 
-  createSession: (sessionId: string, initialName?: string) => void;
+  createSession: (sessionId: string, initialName?: string, ephemeral?: boolean) => void;
   removeSession: (sessionId: string) => void;
   addUserMessage: (sessionId: string, text: string) => void;
   appendStreamingText: (sessionId: string, text: string) => void;
@@ -74,6 +95,7 @@ interface ClaudeState {
   setModel: (sessionId: string, model: string) => void;
   addCost: (sessionId: string, cost: number) => void;
   addTokens: (sessionId: string, tokens: number) => void;
+  setContextUsage: (sessionId: string, used: number, max: number) => void;
   setError: (sessionId: string, error: string | null) => void;
   incrementPromptCount: (sessionId: string) => void;
   addTask: (sessionId: string, task: ClaudeTask) => void;
@@ -85,6 +107,14 @@ interface ClaudeState {
   setName: (sessionId: string, name: string) => void;
   setCwd: (sessionId: string, cwd: string) => void;
   setMcpServers: (sessionId: string, servers: McpServerStatus[]) => void;
+  enqueuePrompt: (sessionId: string, text: string) => void;
+  dequeuePrompt: (sessionId: string) => QueuedPrompt | undefined;
+  removeQueuedPrompt: (sessionId: string, promptId: string) => void;
+  clearQueue: (sessionId: string) => void;
+  loadFromDisk: (sessionId: string, messages: ChatMessage[]) => void;
+  setDraftPrompt: (sessionId: string, text: string) => void;
+  setLoop: (sessionId: string, loop: ActiveLoop | null) => void;
+  tickLoop: (sessionId: string) => void;
   deleteSession: (sessionId: string) => void;
   truncateFromMessage: (sessionId: string, messageId: string) => void;
 }
@@ -99,7 +129,10 @@ function updateSession(
   return { ...sessions, [sessionId]: { ...session, ...update } };
 }
 
+let isDirty = false;
+
 function saveToStorage(sessions: Record<string, ClaudeSession>) {
+  isDirty = false;
   try {
     // Merge with existing localStorage to preserve named sessions that were removed from memory
     let existing: Record<string, any> = {};
@@ -115,8 +148,9 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
       }
     }
 
-    // Update with current in-memory sessions
+    // Update with current in-memory sessions (skip ephemeral)
     for (const [id, s] of Object.entries(sessions)) {
+      if (s.ephemeral) continue;
       existing[id] = {
         sessionId: s.sessionId,
         messages: s.messages,
@@ -127,10 +161,36 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
         promptCount: s.promptCount,
         name: s.name,
         cwd: s.cwd,
+        draftPrompt: s.draftPrompt || "",
       };
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
-  } catch {}
+    const json = JSON.stringify(existing);
+    localStorage.setItem(STORAGE_KEY, json);
+  } catch (e) {
+    console.error("[claudeStore] Failed to save sessions:", e);
+    // If quota exceeded, try saving just the current sessions without merging old ones
+    try {
+      const minimal: Record<string, any> = {};
+      for (const [id, s] of Object.entries(sessions)) {
+        minimal[id] = {
+          sessionId: s.sessionId,
+          messages: s.messages.slice(-200), // keep last 200 messages if full
+          model: s.model,
+          tasks: s.tasks,
+          totalCost: s.totalCost,
+          totalTokens: s.totalTokens,
+          promptCount: s.promptCount,
+          name: s.name,
+          cwd: s.cwd,
+          draftPrompt: s.draftPrompt || "",
+        };
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(minimal));
+      console.warn("[claudeStore] Saved truncated session data (quota recovery)");
+    } catch (e2) {
+      console.error("[claudeStore] Even truncated save failed:", e2);
+    }
+  }
 }
 
 function loadSession(sessionId: string): ClaudeSession | null {
@@ -146,9 +206,12 @@ function loadSession(sessionId: string): ClaudeSession | null {
       tasks: saved.tasks || [],
       isStreaming: false,
       streamingText: "",
+      streamingStartedAt: null,
       model: saved.model || "",
       totalCost: saved.totalCost || 0,
       totalTokens: saved.totalTokens || 0,
+      contextUsed: 0,
+      contextMax: 0,
       error: null,
       promptCount: saved.promptCount || saved.messages.filter((m: any) => m.role === "user").length,
       planModeActive: false,
@@ -156,6 +219,11 @@ function loadSession(sessionId: string): ClaudeSession | null {
       pendingPermission: null,
       name: saved.name || "",
       cwd: saved.cwd || "",
+      promptQueue: [],
+      hasBeenStarted: (saved.promptCount || 0) > 0 || (saved.messages?.length || 0) > 0,
+      draftPrompt: saved.draftPrompt || "",
+      activeLoop: null, // loops don't persist across restarts
+      ephemeral: false,
       mcpServers: [],
     };
   } catch {
@@ -165,38 +233,43 @@ function loadSession(sessionId: string): ClaudeSession | null {
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 function debouncedSave(sessions: Record<string, ClaudeSession>) {
+  isDirty = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => saveToStorage(sessions), 1000);
 }
 
+
 export const useClaudeStore = create<ClaudeState>((set, get) => ({
   sessions: {},
 
-  createSession: (sessionId: string, initialName?: string) => {
+  createSession: (sessionId: string, initialName?: string, ephemeral?: boolean) => {
     const existing = get().sessions[sessionId];
     if (existing) {
       if (initialName && !existing.name) {
         set((s) => {
           const updated = updateSession(s.sessions, sessionId, { name: initialName });
-          saveToStorage(updated);
+          if (!existing.ephemeral) saveToStorage(updated);
           return { sessions: updated };
         });
       }
       return;
     }
-    const restored = loadSession(sessionId);
-    if (restored) {
-      if (initialName && !restored.name) restored.name = initialName;
-      set((s) => ({ sessions: { ...s.sessions, [sessionId]: restored } }));
-      return;
+    if (!ephemeral) {
+      const restored = loadSession(sessionId);
+      if (restored) {
+        if (initialName && !restored.name) restored.name = initialName;
+        set((s) => ({ sessions: { ...s.sessions, [sessionId]: restored } }));
+        return;
+      }
     }
     set((s) => ({
       sessions: {
         ...s.sessions,
         [sessionId]: {
-          sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "",
-          model: "", totalCost: 0, totalTokens: 0, error: null, promptCount: 0, planModeActive: false,
-          pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "", mcpServers: [],
+          sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "", streamingStartedAt: null,
+          model: "", totalCost: 0, totalTokens: 0, contextUsed: 0, contextMax: 0, error: null, promptCount: 0, planModeActive: false,
+          pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "",
+          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [],
         },
       },
     }));
@@ -224,7 +297,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       if (!session) return s;
       const msg: ChatMessage = { id: uuidv4(), role: "user", content: text, timestamp: Date.now() };
       const updated = updateSession(s.sessions, sessionId, { messages: [...session.messages, msg], error: null });
-      debouncedSave(updated);
+      saveToStorage(updated); // immediate save — user messages must never be lost
       return { sessions: updated };
     });
   },
@@ -251,7 +324,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       if (!session) return s;
       const msg: ChatMessage = { id: uuidv4(), role: "assistant", content: text, timestamp: Date.now(), toolCalls };
       const updated = updateSession(s.sessions, sessionId, { messages: [...session.messages, msg], streamingText: "" });
-      debouncedSave(updated);
+      saveToStorage(updated); // immediate save — finalized messages must never be lost
       return { sessions: updated };
     });
   },
@@ -287,7 +360,10 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session || session.isStreaming === streaming) return s;
-      return { sessions: updateSession(s.sessions, sessionId, { isStreaming: streaming }) };
+      return { sessions: updateSession(s.sessions, sessionId, {
+        isStreaming: streaming,
+        streamingStartedAt: streaming ? Date.now() : null,
+      }) };
     });
   },
 
@@ -313,6 +389,12 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     });
   },
 
+  setContextUsage: (sessionId, used, max) => {
+    const sess = get().sessions[sessionId];
+    if (sess && sess.contextUsed === used && sess.contextMax === max) return;
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { contextUsed: used, contextMax: max }) }));
+  },
+
   setError: (sessionId, error) => {
     set((s) => ({ sessions: updateSession(s.sessions, sessionId, { error }) }));
   },
@@ -321,7 +403,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
-      const updated = updateSession(s.sessions, sessionId, { promptCount: session.promptCount + 1 });
+      const updated = updateSession(s.sessions, sessionId, { promptCount: session.promptCount + 1, hasBeenStarted: true });
       debouncedSave(updated);
       return { sessions: updated };
     });
@@ -401,6 +483,70 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => ({ sessions: updateSession(s.sessions, sessionId, { mcpServers: servers }) }));
   },
 
+  // Prompt queue management
+  enqueuePrompt: (sessionId, text) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      const item: QueuedPrompt = { id: uuidv4(), text, timestamp: Date.now() };
+      return { sessions: updateSession(s.sessions, sessionId, { promptQueue: [...session.promptQueue, item] }) };
+    });
+  },
+
+  dequeuePrompt: (sessionId) => {
+    const session = get().sessions[sessionId];
+    if (!session || session.promptQueue.length === 0) return undefined;
+    const [first, ...rest] = session.promptQueue;
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { promptQueue: rest }) }));
+    return first;
+  },
+
+  removeQueuedPrompt: (sessionId, promptId) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { promptQueue: session.promptQueue.filter((p) => p.id !== promptId) }) };
+    });
+  },
+
+  clearQueue: (sessionId) => {
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { promptQueue: [] }) }));
+  },
+
+  // Load message history from disk JSONL (only if session has no messages yet)
+  loadFromDisk: (sessionId, messages) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session || session.messages.length > 0) return s;
+      const promptCount = messages.filter((m) => m.role === "user").length;
+      const updated = updateSession(s.sessions, sessionId, { messages, promptCount, hasBeenStarted: promptCount > 0 });
+      debouncedSave(updated);
+      return { sessions: updated };
+    });
+  },
+
+  setDraftPrompt: (sessionId, text) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session || session.draftPrompt === text) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { draftPrompt: text }) };
+    });
+  },
+
+  setLoop: (sessionId, loop) => {
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { activeLoop: loop }) }));
+  },
+
+  tickLoop: (sessionId) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session?.activeLoop) return s;
+      return { sessions: updateSession(s.sessions, sessionId, {
+        activeLoop: { ...session.activeLoop, lastFiredAt: Date.now(), iteration: session.activeLoop.iteration + 1 },
+      }) };
+    });
+  },
+
   // Permanently delete a session from both memory and localStorage
   deleteSession: (sessionId) => {
     set((s) => {
@@ -434,3 +580,19 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     });
   },
 }));
+
+// Emergency save on tab hide / close — prevents data loss from random stops or network issues
+export function flushSave() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  saveToStorage(useClaudeStore.getState().sessions);
+}
+if (typeof window !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushSave();
+  });
+  window.addEventListener("beforeunload", flushSave);
+  // Periodic safety-net save every 5 seconds — only fires when state has changed
+  setInterval(() => {
+    if (isDirty) saveToStorage(useClaudeStore.getState().sessions);
+  }, 5000);
+}

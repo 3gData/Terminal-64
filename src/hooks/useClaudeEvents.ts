@@ -65,6 +65,7 @@ export function useClaudeEvents() {
           parsed = JSON.parse(data);
         } catch (err) {
           console.warn("[claude] Failed to parse event:", data.slice(0, 200), err);
+          store.setError(session_id, `Failed to parse Claude response — the session may need to be restarted.`);
           return;
         }
 
@@ -73,7 +74,7 @@ export function useClaudeEvents() {
         if (type === "system" && parsed.subtype === "init") {
           store.setModel(session_id, parsed.model || "");
           store.setStreaming(session_id, true);
-          // Extract MCP server status
+          store.setContextUsage(session_id, 0, 200000);
           if (Array.isArray(parsed.mcp_servers)) {
             store.setMcpServers(session_id, parsed.mcp_servers.map((s: any) => ({
               name: String(s.name || ""),
@@ -243,6 +244,15 @@ export function useClaudeEvents() {
           const input_tokens = parsed.usage?.input_tokens || parsed.input_tokens || 0;
           const output_tokens = parsed.usage?.output_tokens || parsed.output_tokens || 0;
           if (input_tokens || output_tokens) store.addTokens(session_id, input_tokens + output_tokens);
+          // Update context usage from API response — input_tokens = total tokens sent to model (real context fill)
+          const sess = store.sessions[session_id];
+          const ctxMax = sess?.contextMax || 200000;
+          if (input_tokens > 0) {
+            store.setContextUsage(session_id, input_tokens, ctxMax);
+          } else if (sess && sess.totalTokens > 0) {
+            // Fallback: estimate from accumulated tokens (input ~= 60-70% of total due to conversation growth)
+            store.setContextUsage(session_id, Math.round(sess.totalTokens * 0.65), ctxMax);
+          }
           if (parsed.is_error && parsed.result) store.setError(session_id, parsed.result);
           return;
         }
@@ -258,7 +268,9 @@ export function useClaudeEvents() {
 
       const fn2 = await onClaudeDone((payload) => {
         if (cancelled) return;
-        useClaudeStore.getState().setStreaming(payload.session_id, false);
+        const store = useClaudeStore.getState();
+        store.setStreaming(payload.session_id, false);
+        store.clearStreamingText(payload.session_id);
         // Clean up session's tool map to prevent unbounded growth
         sessionToolMaps.delete(payload.session_id);
       });

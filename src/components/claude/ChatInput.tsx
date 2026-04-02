@@ -9,6 +9,7 @@ interface ChatInputProps {
   onRewrite?: (text: string, setText: (t: string) => void) => void;
   isRewriting?: boolean;
   isStreaming: boolean;
+  streamingStartedAt?: number | null;
   disabled?: boolean;
   slashCommands?: SlashCommand[];
   initialText?: string | null;
@@ -18,10 +19,38 @@ interface ChatInputProps {
   onCyclePerm?: () => void;
   sessionName?: string;
   cwd?: string;
+  queueCount?: number;
+  draftPrompt?: string;
+  onDraftChange?: (text: string) => void;
+  contextUsed?: number;
+  contextMax?: number;
 }
 
-export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd }: ChatInputProps) {
-  const [text, setText] = useState("");
+export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, contextUsed, contextMax }: ChatInputProps) {
+  const [text, setText] = useState(draftPrompt || "");
+  const [elapsed, setElapsed] = useState("");
+
+  // Save draft prompt debounced
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!onDraftChange) return;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => onDraftChange(text), 1000);
+    return () => { if (draftTimer.current) clearTimeout(draftTimer.current); };
+  }, [text, onDraftChange]);
+
+  // Thinking timer — ticks every second while streaming
+  useEffect(() => {
+    if (!isStreaming || !streamingStartedAt) { setElapsed(""); return; }
+    const tick = () => {
+      const secs = Math.floor((Date.now() - streamingStartedAt) / 1000);
+      if (secs < 60) setElapsed(`${secs}s`);
+      else setElapsed(`${Math.floor(secs / 60)}m ${secs % 60}s`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [isStreaming, streamingStartedAt]);
 
   // Handle pre-filled text from rewind
   useEffect(() => {
@@ -68,15 +97,12 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
 
   // Detect @ file references in the text
   const checkForAtMention = useCallback((val: string, cursorPos: number) => {
-    // Look backwards from cursor for an @ that starts a file reference
-    // Must be preceded by whitespace or be at start of string
     let i = cursorPos - 1;
     while (i >= 0 && val[i] !== '@' && val[i] !== ' ' && val[i] !== '\n') i--;
     if (i >= 0 && val[i] === '@' && (i === 0 || val[i - 1] === ' ' || val[i - 1] === '\n')) {
       const query = val.slice(i + 1, cursorPos);
       setAtStart(i);
       if (cwd && query.length >= 0) {
-        // Debounce file search
         if (fileSearchTimer.current) clearTimeout(fileSearchTimer.current);
         fileSearchTimer.current = setTimeout(() => {
           searchFiles(cwd, query).then((results) => {
@@ -284,7 +310,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
       )}
 
       {/* Input row — CLI-style with > prompt */}
-      <div className="cc-input-row">
+      <div className="cc-input-row" style={{ position: "relative" }}>
         <span className="cc-prompt">&gt;</span>
         <textarea
           ref={textareaRef}
@@ -295,6 +321,9 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
           placeholder={isStreaming ? "Queue a message..." : "Type a message, / for commands, @ for files"}
           rows={1}
           disabled={disabled}
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
           onBlur={() => {
             setTimeout(() => { setShowSlash(false); setShowFiles(false); }, 200);
           }}
@@ -327,12 +356,13 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         )}
       </div>
 
-      {/* Status line below input — permission mode + streaming */}
+      {/* Status line below input — permission mode + streaming + context bar */}
       <div className="cc-status-line">
         {isStreaming ? (
           <>
             <span className="cc-streaming-dot" />
-            <span className="cc-streaming-label">Thinking...</span>
+            <span className="cc-streaming-label">Thinking{elapsed ? ` · ${elapsed}` : "..."}</span>
+            {(queueCount ?? 0) > 0 && <span className="cc-queue-badge">{queueCount} queued</span>}
           </>
         ) : permLabel ? (
           <span className="cc-perm-line" onClick={onCyclePerm} title="Click or Shift+Tab to cycle">
@@ -341,6 +371,21 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
             <span className="cc-perm-hint">(shift+tab to cycle)</span>
           </span>
         ) : null}
+        {(contextMax ?? 0) > 0 && (contextUsed ?? 0) > 0 && (() => {
+          const pct = Math.min(100, ((contextUsed ?? 0) / (contextMax ?? 1)) * 100);
+          const compactPct = 80; // auto-compaction threshold
+          const usedK = Math.round((contextUsed ?? 0) / 1000);
+          const maxK = Math.round((contextMax ?? 0) / 1000);
+          return (
+            <div className="cc-context-bar-wrap" title={`Context: ${usedK}k / ${maxK}k tokens (${pct.toFixed(0)}%) · Auto-compact at ${compactPct}%`}>
+              <span className="cc-context-label">{usedK}k/{maxK}k</span>
+              <div className="cc-context-bar">
+                <div className="cc-context-fill" style={{ width: `${pct}%` }} />
+                <div className="cc-context-compact-tick" style={{ left: `${compactPct}%` }} />
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

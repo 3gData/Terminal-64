@@ -1,15 +1,19 @@
 import { useCallback, useRef, useEffect } from "react";
 import { useCanvasStore } from "../../stores/canvasStore";
+import { useShallow } from "zustand/react/shallow";
 import FloatingTerminal from "./FloatingTerminal";
+import LeftPanelContainer from "../panels/LeftPanelContainer";
 import "./Canvas.css";
 
 export default function Canvas() {
-  const terminals = useCanvasStore((s) => s.terminals);
-  const panX = useCanvasStore((s) => s.panX);
-  const panY = useCanvasStore((s) => s.panY);
-  const zoom = useCanvasStore((s) => s.zoom);
+  const { terminals, panX, panY, zoom } = useCanvasStore(useShallow((s) => ({
+    terminals: s.terminals,
+    panX: s.panX,
+    panY: s.panY,
+    zoom: s.zoom,
+  })));
+  // Actions are stable refs — no need for shallow comparison
   const pan = useCanvasStore((s) => s.pan);
-  const setZoom = useCanvasStore((s) => s.setZoom);
   const addTerminal = useCanvasStore((s) => s.addTerminal);
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -101,6 +105,7 @@ export default function Canvas() {
         {terminals.map((term) => (
           <FloatingTerminal key={term.id} term={term} />
         ))}
+        <LeftPanelContainer />
       </div>
 
       {terminals.length === 0 && (

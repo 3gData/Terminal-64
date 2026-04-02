@@ -172,7 +172,7 @@ impl DiscordBot {
         });
 
         // Store unlisten handles for cleanup
-        *self._unlisten_handles.lock().unwrap() = vec![
+        *self._unlisten_handles.lock().map_err(|e| e.to_string())? = vec![
             Box::new(unlisten1),
             Box::new(unlisten2),
         ];
@@ -186,7 +186,7 @@ impl DiscordBot {
     pub fn stop(&mut self) -> Result<(), String> {
         eprintln!("[discord] Stopping bot");
         // Drop unlisten handles to stop event listeners
-        *self._unlisten_handles.lock().unwrap() = Vec::new();
+        *self._unlisten_handles.lock().map_err(|e| e.to_string())? = Vec::new();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(true);
         }
@@ -252,42 +252,7 @@ impl DiscordBot {
                     return Ok(());
                 }
 
-                let cat_id = bs.category_id.ok_or("Category not found".to_string())?;
-                let channel_name = sanitize_name(&session_name);
-
-                let body = serde_json::json!({
-                    "name": channel_name,
-                    "type": 0,
-                    "parent_id": cat_id.to_string(),
-                    "topic": format!("Terminal 64: {}", session_id),
-                });
-
-                eprintln!("[discord] Creating channel #{} for session {}", channel_name, session_id);
-
-                let resp = bs.http.post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
-                    .header("Authorization", format!("Bot {}", bs.token))
-                    .json(&body)
-                    .send().await
-                    .map_err(|e| format!("HTTP error: {}", e))?;
-
-                let status = resp.status();
-                let channel: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-
-                if !status.is_success() {
-                    return Err(format!("Discord API error {}: {:?}", status, channel));
-                }
-
-                let channel_id = channel["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
-                if channel_id == 0 {
-                    return Err(format!("Failed to parse channel ID: {:?}", channel));
-                }
-
-                eprintln!("[discord] Created #{} (ID: {}) for session {}", channel_name, channel_id, session_id);
-                bs.session_to_channel.insert(session_id.clone(), channel_id);
-                bs.channel_to_session.insert(channel_id, session_id.clone());
-                if !cwd.is_empty() {
-                    bs.session_cwd.insert(session_id, cwd);
-                }
+                let channel_id = create_session_channel(bs, &session_id, &session_name, &cwd).await?;
 
                 let _ = send_discord_message(&bs.http, &bs.token, channel_id,
                     &format!("**Linked to Terminal 64 session: {}**\nMessages here are forwarded to Claude.", session_name)
@@ -340,26 +305,8 @@ impl DiscordBot {
                     eprintln!("[discord] Renamed channel {} to #{}", channel_id, new_name);
                     Ok(())
                 } else if !session_name.is_empty() {
-                    // No channel yet — create one (reuse link_session logic)
-                    let cat_id = bs.category_id.ok_or("No category".to_string())?;
-                    let channel_name = sanitize_name(&session_name);
-                    let body = serde_json::json!({
-                        "name": channel_name, "type": 0,
-                        "parent_id": cat_id.to_string(),
-                        "topic": format!("Terminal 64: {}", session_id),
-                    });
-                    let resp = bs.http.post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
-                        .header("Authorization", format!("Bot {}", bs.token))
-                        .json(&body)
-                        .send().await.map_err(|e| e.to_string())?;
-                    let channel: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-                    let channel_id = channel["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
-                    if channel_id > 0 {
-                        bs.session_to_channel.insert(session_id.clone(), channel_id);
-                        bs.channel_to_session.insert(channel_id, session_id.clone());
-                        if !cwd.is_empty() { bs.session_cwd.insert(session_id, cwd); }
-                        eprintln!("[discord] Created #{} (ID: {}) on rename", channel_name, channel_id);
-                    }
+                    // No channel yet — create one
+                    create_session_channel(bs, &session_id, &session_name, &cwd).await?;
                     Ok(())
                 } else {
                     Ok(())
@@ -595,7 +542,8 @@ async fn run_gateway(
                                         permission_mode: "accept_edits".to_string(),
                                         model: None, effort: None,
                                         disallowed_tools: discord_blocked.clone(),
-                                    }, None)
+                                        channel_server: None,
+                                    }, None, None)
                                 } else {
                                     eprintln!("[discord] First message — creating new session");
                                     claude_manager.create_session(app_handle, CreateClaudeRequest {
@@ -604,7 +552,8 @@ async fn run_gateway(
                                         prompt: formatted_prompt.clone(),
                                         permission_mode: "accept_edits".to_string(),
                                         model: None, effort: None,
-                                    }, None)
+                                        channel_server: None,
+                                    }, None, None)
                                 };
                                 if let Err(e) = result {
                                     eprintln!("[discord] Prompt error: {}", e);
@@ -716,6 +665,66 @@ async fn cleanup_orphaned_channels(state: &Arc<TokioMutex<Option<BotState>>>, to
     }
 
     Ok(())
+}
+
+/// Create a new text channel under the Terminal 64 category and register the mapping.
+async fn create_session_channel(
+    bs: &mut BotState,
+    session_id: &str,
+    session_name: &str,
+    cwd: &str,
+) -> Result<u64, String> {
+    let cat_id = bs.category_id.ok_or("Category not found".to_string())?;
+    let channel_name = sanitize_name(session_name);
+    let body = serde_json::json!({
+        "name": channel_name,
+        "type": 0,
+        "parent_id": cat_id.to_string(),
+        "topic": format!("Terminal 64: {}", session_id),
+    });
+
+    eprintln!("[discord] Creating channel #{} for session {}", channel_name, session_id);
+
+    let mut channel: serde_json::Value;
+    let mut status;
+    let mut attempts = 0;
+    loop {
+        let resp = bs.http.post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
+            .header("Authorization", format!("Bot {}", bs.token))
+            .json(&body)
+            .send().await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        status = resp.status();
+        channel = resp.json().await.map_err(|e| e.to_string())?;
+
+        if status.as_u16() == 429 && attempts < 3 {
+            let retry_after = channel["retry_after"].as_f64().unwrap_or(1.0);
+            eprintln!("[discord] Rate limited, retrying in {:.1}s", retry_after);
+            tokio::time::sleep(std::time::Duration::from_secs_f64(retry_after)).await;
+            attempts += 1;
+            continue;
+        }
+        break;
+    }
+
+    if !status.is_success() {
+        return Err(format!("Discord API error {}: {:?}", status, channel));
+    }
+
+    let channel_id = channel["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+    if channel_id == 0 {
+        return Err(format!("Failed to parse channel ID: {:?}", channel));
+    }
+
+    eprintln!("[discord] Created #{} (ID: {}) for session {}", channel_name, channel_id, session_id);
+    bs.session_to_channel.insert(session_id.to_string(), channel_id);
+    bs.channel_to_session.insert(channel_id, session_id.to_string());
+    if !cwd.is_empty() {
+        bs.session_cwd.insert(session_id.to_string(), cwd.to_string());
+    }
+
+    Ok(channel_id)
 }
 
 fn split_msg(text: &str, max: usize) -> Vec<String> {

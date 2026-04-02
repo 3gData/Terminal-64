@@ -32,6 +32,7 @@ pub struct CreateClaudeRequest {
     pub permission_mode: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub channel_server: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,7 @@ pub struct SendClaudePromptRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub disallowed_tools: Option<String>,
+    pub channel_server: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,3 +80,4 @@ pub struct McpServer {
     pub command: String,
     pub scope: String,
 }
+

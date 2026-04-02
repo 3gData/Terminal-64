@@ -49,6 +49,7 @@ fn build_command(
     cwd: &str,
     disallowed_tools: &Option<String>,
     settings_path: &Option<String>,
+    channel_server: &Option<String>,
 ) -> Command {
     let claude_bin = resolve_claude_path();
     let mut cmd = Command::new(&claude_bin);
@@ -96,6 +97,11 @@ fn build_command(
     if let Some(sp) = settings_path {
         if !sp.is_empty() { cmd.arg("--settings").arg(sp); }
     }
+    if let Some(ch) = channel_server {
+        if !ch.is_empty() {
+            cmd.arg("--dangerously-load-development-channels").arg(format!("server:{}", ch));
+        }
+    }
     if !cwd.is_empty() && cwd != "." { cmd.current_dir(cwd); }
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
@@ -120,6 +126,9 @@ fn spawn_and_stream(
         if let Some(mut old) = inst.remove(&session_id) {
             let _ = old.child.kill();
             let _ = old.child.wait();
+            // Brief delay for OS to release file locks on session JSONL
+            drop(inst); // release mutex before sleeping
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
     }
 
@@ -215,27 +224,29 @@ impl ClaudeManager {
     }
 
 
-    pub fn create_session(&self, app_handle: &AppHandle, req: CreateClaudeRequest, settings_path: Option<String>) -> Result<(), String> {
+    pub fn create_session(&self, app_handle: &AppHandle, req: CreateClaudeRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
         eprintln!("[claude] Creating session id={} cwd={}", req.session_id, req.cwd);
         let cmd = build_command(
             "--session-id", &req.session_id, &req.prompt,
-            &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path,
+            &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path, &channel_server,
         );
         spawn_and_stream(&self.instances, app_handle, req.session_id, cmd)
     }
 
-    pub fn send_prompt(&self, app_handle: &AppHandle, req: SendClaudePromptRequest, settings_path: Option<String>) -> Result<(), String> {
+    pub fn send_prompt(&self, app_handle: &AppHandle, req: SendClaudePromptRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
         eprintln!("[claude] Sending prompt to session {} (cwd: {})", req.session_id, req.cwd);
         let cmd = build_command(
             "--resume", &req.session_id, &req.prompt,
-            &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path,
+            &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path, &channel_server,
         );
         spawn_and_stream(&self.instances, app_handle, req.session_id, cmd)
     }
 
     pub fn cancel(&self, session_id: &str) -> Result<(), String> {
         let mut instances = self.instances.lock().map_err(|e| e.to_string())?;
-        if let Some(mut instance) = instances.remove(session_id) {
+        if let Some(instance) = instances.get_mut(session_id) {
+            // Kill but don't remove — spawn_and_stream will find the dead instance,
+            // remove it, and wait for file locks to release before spawning a new one.
             let _ = instance.child.kill();
             let _ = instance.child.wait();
             eprintln!("[claude] Cancelled session {}", session_id);

@@ -9,8 +9,8 @@ import {
   ClaudeEvent,
   ClaudeDone,
   SlashCommand,
-  McpServer,
   DirEntry,
+  McpServer,
 } from "./types";
 
 // PTY terminal commands
@@ -88,6 +88,51 @@ export async function listDiskSessions(cwd: string): Promise<DiskSession[]> {
   return invoke("list_disk_sessions", { cwd });
 }
 
+export interface HistoryToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  result?: string;
+  is_error?: boolean;
+}
+
+export interface HistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  tool_calls?: HistoryToolCall[];
+}
+
+export async function loadSessionHistory(sessionId: string, cwd: string): Promise<HistoryMessage[]> {
+  return invoke("load_session_history", { sessionId, cwd });
+}
+
+/** Map Rust HistoryMessage[] (snake_case) to frontend ChatMessage format (camelCase) */
+export function mapHistoryMessages(history: HistoryMessage[]) {
+  return history.map((m) => ({
+    id: m.id,
+    role: m.role as "user" | "assistant",
+    content: m.content,
+    timestamp: m.timestamp,
+    toolCalls: m.tool_calls?.map((tc) => ({
+      id: tc.id,
+      name: tc.name,
+      input: tc.input,
+      result: tc.result,
+      isError: tc.is_error,
+    })),
+  }));
+}
+
+export async function truncateSessionJsonl(sessionId: string, cwd: string, keepTurns: number): Promise<void> {
+  return invoke("truncate_session_jsonl", { sessionId, cwd, keepTurns });
+}
+
+export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepTurns: number): Promise<void> {
+  return invoke("fork_session_jsonl", { parentSessionId, newSessionId, cwd, keepTurns });
+}
+
 // Discord bot commands
 
 export async function startDiscordBot(token: string, guildId: string): Promise<void> {
@@ -132,4 +177,24 @@ export async function listMcpServers(cwd: string): Promise<McpServer[]> {
 
 export async function listDirectory(path: string): Promise<DirEntry[]> {
   return invoke("list_directory", { path });
+}
+
+// Delegation
+export async function getDelegationPort(): Promise<number> {
+  return invoke("get_delegation_port");
+}
+
+export interface DelegationMsg {
+  agent: string;
+  message: string;
+  timestamp: number;
+  msg_type: string;
+}
+
+export async function getDelegationMessages(groupId: string): Promise<DelegationMsg[]> {
+  return invoke("get_delegation_messages", { groupId });
+}
+
+export async function cleanupDelegationGroup(groupId: string): Promise<void> {
+  return invoke("cleanup_delegation_group", { groupId });
 }

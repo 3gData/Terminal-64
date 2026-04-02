@@ -155,6 +155,7 @@ export interface CreateClaudeRequest {
   permission_mode: PermissionMode;
   model?: string;
   effort?: string;
+  channel_server?: string;
 }
 
 export interface SendClaudePromptRequest {
@@ -165,6 +166,7 @@ export interface SendClaudePromptRequest {
   model?: string;
   effort?: string;
   disallowed_tools?: string;
+  channel_server?: string;
 }
 
 export interface ClaudeEvent {
@@ -192,7 +194,7 @@ export interface McpServer {
   name: string;
   transport: string;
   command: string;
-  scope: string; // "user" | "project"
+  scope: string;
 }
 
 export interface ToolCall {
@@ -209,4 +211,34 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   toolCalls?: ToolCall[];
+}
+
+// Delegation types
+
+export type DelegateTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export interface DelegateTask {
+  id: string;
+  description: string;
+  sessionId: string;
+  status: DelegateTaskStatus;
+  result?: string;
+  startedAt?: number;
+  completedAt?: number;
+  lastForwardedMessageId?: string;
+  lastAction?: string; // most recent tool call or action description
+  lastActionAt?: number;
+}
+
+export type DelegationStatus = "active" | "merging" | "merged" | "cancelled";
+
+export interface DelegationGroup {
+  id: string;
+  parentSessionId: string;
+  tasks: DelegateTask[];
+  mergeStrategy: "auto" | "manual";
+  status: DelegationStatus;
+  createdAt: number;
+  sharedContext?: string;
+  collaborationEnabled: boolean;
 }

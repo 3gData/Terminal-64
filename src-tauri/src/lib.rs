@@ -12,6 +12,18 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use types::*;
 
+const SKIP_DIRS: &[&str] = &["node_modules", ".git", "target", "dist", ".next", "__pycache__", ".venv", "vendor"];
+
+fn session_project_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("No home dir")?;
+    let dir_hash = cwd.replace(':', "-").replace('\\', "-").replace('/', "-");
+    Ok(home.join(".claude").join("projects").join(dir_hash))
+}
+
+fn session_jsonl_path(cwd: &str, session_id: &str) -> Result<std::path::PathBuf, String> {
+    Ok(session_project_dir(cwd)?.join(format!("{}.jsonl", session_id)))
+}
+
 struct AppState {
     pty_manager: PtyManager,
     claude_manager: Arc<ClaudeManager>,
@@ -64,7 +76,8 @@ fn create_claude_session(
     let settings_path = if req.permission_mode != "bypass_all" {
         state.permission_server.register_session(&req.session_id).ok().map(|(_, p)| p.to_string_lossy().to_string())
     } else { None };
-    state.claude_manager.create_session(&app_handle, req, settings_path)
+    let channel = req.channel_server.clone();
+    state.claude_manager.create_session(&app_handle, req, settings_path, channel)
 }
 
 #[tauri::command]
@@ -76,7 +89,8 @@ fn send_claude_prompt(
     let settings_path = if req.permission_mode != "bypass_all" {
         state.permission_server.register_session(&req.session_id).ok().map(|(_, p)| p.to_string_lossy().to_string())
     } else { None };
-    state.claude_manager.send_prompt(&app_handle, req, settings_path)
+    let channel = req.channel_server.clone();
+    state.claude_manager.send_prompt(&app_handle, req, settings_path, channel)
 }
 
 #[tauri::command]
@@ -117,7 +131,7 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
         .arg("--output-format").arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
-        .arg("--model").arg("sonnet")
+        .arg("--model").arg("haiku")
         .arg("--effort").arg("high")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -183,7 +197,6 @@ async fn search_files(cwd: String, query: String) -> Result<Vec<String>, String>
         if !root.is_dir() { return vec![]; }
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
-        let skip = ["node_modules", ".git", "target", "dist", ".next", "__pycache__", ".venv", "vendor"];
         fn walk(dir: &std::path::Path, root: &std::path::Path, query: &str, results: &mut Vec<String>, skip: &[&str], depth: u8) {
             if depth > 6 || results.len() >= 20 { return; }
             let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -201,7 +214,7 @@ async fn search_files(cwd: String, query: String) -> Result<Vec<String>, String>
                 }
             }
         }
-        walk(root, root, &query_lower, &mut results, &skip, 0);
+        walk(root, root, &query_lower, &mut results, SKIP_DIRS, 0);
         results.sort_by(|a, b| a.len().cmp(&b.len()));
         results.truncate(12);
         results
@@ -214,6 +227,27 @@ struct DiskSession {
     modified: u64,
     size: u64,
     summary: String,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryToolCall {
+    id: String,
+    name: String,
+    input: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(default)]
+    is_error: bool,
+}
+
+#[derive(serde::Serialize)]
+struct HistoryMessage {
+    id: String,
+    role: String,  // "user" or "assistant"
+    content: String,
+    timestamp: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<HistoryToolCall>>,
 }
 
 fn extract_session_summary(path: &std::path::Path) -> String {
@@ -240,9 +274,7 @@ fn extract_session_summary(path: &std::path::Path) -> String {
 
 #[tauri::command]
 fn list_disk_sessions(cwd: String) -> Result<Vec<DiskSession>, String> {
-    let home = dirs::home_dir().ok_or("No home dir")?;
-    let dir_hash = cwd.replace(':', "-").replace('\\', "-").replace('/', "-");
-    let project_dir = home.join(".claude").join("projects").join(&dir_hash);
+    let project_dir = session_project_dir(&cwd)?;
     if !project_dir.exists() { return Ok(vec![]); }
 
     let mut sessions = Vec::new();
@@ -269,6 +301,156 @@ fn list_disk_sessions(cwd: String) -> Result<Vec<DiskSession>, String> {
 }
 
 #[tauri::command]
+fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMessage>, String> {
+    let path = session_jsonl_path(&cwd, &session_id)?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(format!("read: {}", e)),
+    };
+    let mut messages: Vec<HistoryMessage> = Vec::new();
+    // Track tool_use_id → index in messages vec + index in tool_calls vec for result merging
+    let mut tool_index: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+
+    for line in content.lines() {
+        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let rec_type = val["type"].as_str().unwrap_or("");
+
+        if rec_type == "user" {
+            let msg = &val["message"];
+            let role = msg["role"].as_str().unwrap_or("user");
+            if role != "user" { continue; }
+
+            let content_val = &msg["content"];
+            // Content can be a string (simple prompt) or array (with tool_results)
+            if let Some(text) = content_val.as_str() {
+                let uuid = val["uuid"].as_str().unwrap_or("").to_string();
+                let ts = parse_timestamp(val["timestamp"].as_str().unwrap_or(""));
+                if !text.is_empty() {
+                    messages.push(HistoryMessage {
+                        id: uuid, role: "user".to_string(), content: text.to_string(), timestamp: ts, tool_calls: None,
+                    });
+                }
+            } else if let Some(blocks) = content_val.as_array() {
+                // Array content = tool_results from a previous assistant turn
+                for block in blocks {
+                    if block["type"].as_str() == Some("tool_result") {
+                        let tool_use_id = block["tool_use_id"].as_str().unwrap_or("");
+                        if let Some(&(msg_idx, tc_idx)) = tool_index.get(tool_use_id) {
+                            if let Some(tcs) = messages[msg_idx].tool_calls.as_mut() {
+                                let result_text = if let Some(s) = block["content"].as_str() {
+                                    s.to_string()
+                                } else if let Some(arr) = block["content"].as_array() {
+                                    arr.iter().filter_map(|c| {
+                                        if c["type"].as_str() == Some("text") { c["text"].as_str().map(|s| s.to_string()) }
+                                        else { None }
+                                    }).collect::<Vec<_>>().join("\n")
+                                } else {
+                                    String::new()
+                                };
+                                tcs[tc_idx].result = Some(result_text);
+                                tcs[tc_idx].is_error = block["is_error"].as_bool().unwrap_or(false);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if rec_type == "assistant" {
+            let msg = &val["message"];
+            let content_arr = match msg["content"].as_array() { Some(a) => a, None => continue };
+            let uuid = val["uuid"].as_str().unwrap_or("").to_string();
+            let ts = parse_timestamp(val["timestamp"].as_str().unwrap_or(""));
+
+            let mut text = String::new();
+            let mut tool_calls: Vec<HistoryToolCall> = Vec::new();
+
+            for block in content_arr {
+                match block["type"].as_str() {
+                    Some("text") => {
+                        if let Some(t) = block["text"].as_str() {
+                            text.push_str(t);
+                        }
+                    }
+                    Some("tool_use") => {
+                        let tc_id = block["id"].as_str().unwrap_or("").to_string();
+                        let tc_name = block["name"].as_str().unwrap_or("").to_string();
+                        let tc_input = block["input"].clone();
+                        tool_calls.push(HistoryToolCall {
+                            id: tc_id.clone(), name: tc_name, input: tc_input, result: None, is_error: false,
+                        });
+                        // Register for result merging
+                        tool_index.insert(tc_id, (messages.len(), tool_calls.len() - 1));
+                    }
+                    _ => {}
+                }
+            }
+
+            let trimmed = text.trim().to_string();
+            if !trimmed.is_empty() || !tool_calls.is_empty() {
+                messages.push(HistoryMessage {
+                    id: uuid,
+                    role: "assistant".to_string(),
+                    content: trimmed,
+                    timestamp: ts,
+                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                });
+            }
+        }
+        // Skip queue-operation, last-prompt, etc.
+    }
+    Ok(messages)
+}
+
+/// Collect JSONL lines up to `keep_turns` user messages (actual user prompts, not tool_result-only messages).
+fn collect_jsonl_lines_up_to_turns<'a>(content: &'a str, keep_turns: usize) -> Vec<&'a str> {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut user_turn_count = 0;
+    for line in content.lines() {
+        if line.trim().is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => { kept.push(line); continue; } };
+        if val["type"].as_str().unwrap_or("") == "user" {
+            let is_real = val["message"]["content"].as_str().map(|s| !s.is_empty()).unwrap_or_else(||
+                val["message"]["content"].as_array().map(|arr| arr.iter().any(|b| b["type"].as_str() == Some("text"))).unwrap_or(false)
+            );
+            if is_real { user_turn_count += 1; }
+        }
+        if user_turn_count > keep_turns { break; }
+        kept.push(line);
+    }
+    kept
+}
+
+#[tauri::command]
+fn truncate_session_jsonl(session_id: String, cwd: String, keep_turns: usize) -> Result<(), String> {
+    let path = session_jsonl_path(&cwd, &session_id)?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+    let kept = collect_jsonl_lines_up_to_turns(&content, keep_turns);
+    let truncated = kept.join("\n") + "\n";
+    std::fs::write(&path, truncated).map_err(|e| format!("write: {}", e))?;
+    eprintln!("[rewind] Truncated JSONL to {} turns (was {} lines, now {} lines)", keep_turns, content.lines().count(), kept.len());
+    Ok(())
+}
+
+#[tauri::command]
+fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: String, keep_turns: usize) -> Result<(), String> {
+    let src = session_jsonl_path(&cwd, &parent_session_id)?;
+    let content = std::fs::read_to_string(&src).map_err(|e| format!("read: {}", e))?;
+    let kept = collect_jsonl_lines_up_to_turns(&content, keep_turns);
+    let dest = session_jsonl_path(&cwd, &new_session_id)?;
+    let truncated = kept.join("\n") + "\n";
+    std::fs::write(&dest, truncated).map_err(|e| format!("write: {}", e))?;
+    eprintln!("[fork] Copied {} -> {} ({} turns, {} lines)", parent_session_id, new_session_id, keep_turns, kept.len());
+    Ok(())
+}
+
+fn parse_timestamp(ts: &str) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(&format!("{}Z", ts)))
+        .map(|dt| dt.timestamp_millis() as f64)
+        .unwrap_or(0.0)
+}
+
+#[tauri::command]
 fn resolve_permission(
     state: tauri::State<'_, AppState>,
     request_id: String,
@@ -283,12 +465,11 @@ fn resolve_permission(
 fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     let root = std::path::Path::new(&path);
     if !root.is_dir() { return Err("Not a directory".into()); }
-    let skip = ["node_modules", ".git", "target", "dist", ".next", "__pycache__", ".venv", "vendor", ".DS_Store"];
     let mut entries = Vec::new();
     let Ok(rd) = std::fs::read_dir(root) else { return Ok(entries); };
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if skip.iter().any(|s| name == *s) { continue; }
+        if SKIP_DIRS.iter().any(|s| name == *s) { continue; }
         if name.starts_with('.') && name != ".." { continue; }
         let is_dir = entry.path().is_dir();
         entries.push(DirEntry { name, is_dir });
@@ -316,7 +497,6 @@ fn list_mcp_servers(cwd: String) -> Result<Vec<McpServer>, String> {
     let mut servers = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Read global MCPs from ~/.claude/settings.json
     if let Some(home) = dirs::home_dir() {
         for name in &["settings.json", "settings.local.json"] {
             let path = home.join(".claude").join(name);
@@ -342,7 +522,6 @@ fn list_mcp_servers(cwd: String) -> Result<Vec<McpServer>, String> {
         }
     }
 
-    // Read project MCPs from <cwd>/.mcp.json
     let project_mcp = std::path::Path::new(&cwd).join(".mcp.json");
     if let Ok(data) = std::fs::read_to_string(&project_mcp) {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -376,24 +555,50 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
 
     // Built-in Claude Code commands — (name, description, usage hint)
     let builtins: Vec<(&str, &str, Option<&str>)> = vec![
-        ("commit", "Create a git commit with a generated message", Some("/commit or /commit -m \"message\"")),
-        ("review-pr", "Review a pull request", Some("/review-pr [PR number or URL]")),
-        ("simplify", "Review changed code for reuse, quality, and efficiency", None),
-        ("loop", "Run a command on a recurring interval", Some("/loop [interval] [command] — e.g. /loop 5m /commit")),
-        ("schedule", "Create, update, or list scheduled remote agents", Some("/schedule [create|list|run] ...")),
-        ("claude-api", "Build apps with the Claude API or Anthropic SDK", None),
-        ("update-config", "Configure Claude Code settings and hooks", None),
+        ("add-dir", "Add a working directory for file access", Some("/add-dir <path>")),
+        ("agents", "Manage agent configurations", None),
+        ("branch", "Branch the conversation at this point", Some("/branch [name] — alias: /fork")),
+        ("btw", "Ask a side question without adding to context", Some("/btw <question>")),
+        ("clear", "Clear conversation history", None),
+        ("color", "Set session prompt bar color", Some("/color [red|blue|green|yellow|purple|orange|pink|cyan|default]")),
         ("compact", "Compact conversation to save context", Some("/compact [instructions]")),
+        ("config", "Open settings interface", None),
+        ("context", "Visualize current context usage", None),
+        ("copy", "Copy last assistant response to clipboard", Some("/copy [N] — N=2 for second-to-last")),
         ("cost", "Show token usage and cost for this session", None),
+        ("diff", "Interactive diff viewer for uncommitted changes", None),
+        ("doctor", "Check Claude Code setup for issues", None),
+        ("effort", "Set model effort level", Some("/effort [low|medium|high|max|auto]")),
+        ("export", "Export conversation as plain text", Some("/export [filename]")),
+        ("fast", "Toggle fast mode", Some("/fast [on|off]")),
+        ("feedback", "Submit feedback about Claude Code", None),
+        ("help", "Show help and available commands", None),
+        ("hooks", "View hook configurations for tool events", None),
+        ("init", "Initialize a CLAUDE.md for this project", None),
+        ("insights", "Generate session analysis report", None),
+        ("keybindings", "Open keybindings configuration file", None),
+        ("login", "Sign in to your Anthropic account", None),
+        ("logout", "Sign out from your Anthropic account", None),
+        ("mcp", "Manage MCP server connections", None),
+        ("memory", "Edit CLAUDE.md memory files", None),
         ("model", "Switch the AI model", Some("/model [sonnet|opus|haiku]")),
         ("permissions", "View and manage tool permissions", None),
-        ("init", "Initialize a CLAUDE.md for this project", None),
-        ("doctor", "Check Claude Code setup for issues", None),
-        ("clear", "Clear conversation history", None),
-        ("help", "Show help and available commands", None),
-        ("login", "Switch Anthropic account", None),
-        ("logout", "Sign out of your account", None),
-        ("bug", "Report a bug with Claude Code", None),
+        ("plan", "Enter plan mode", Some("/plan [description]")),
+        ("plugin", "Manage Claude Code plugins", None),
+        ("pr-comments", "Fetch comments from a GitHub PR", Some("/pr-comments [PR number or URL]")),
+        ("release-notes", "View the full changelog", None),
+        ("rename", "Rename the current session", Some("/rename [name]")),
+        ("resume", "Resume a conversation by ID or name", Some("/resume [session]")),
+        ("rewind", "Rewind conversation to a previous point", None),
+        ("schedule", "Create, update, or list scheduled remote agents", Some("/schedule [create|list|run] ...")),
+        ("security-review", "Analyze pending changes for security vulnerabilities", None),
+        ("skills", "List available skills", None),
+        ("stats", "Visualize daily usage and session history", None),
+        ("status", "Show version, model, account, and connectivity", None),
+        ("tasks", "List and manage background tasks", None),
+        ("theme", "Change the color theme", None),
+        ("usage", "Show plan usage limits and rate limit status", None),
+        ("voice", "Toggle push-to-talk voice dictation", None),
     ];
     for (name, desc, usage) in &builtins {
         commands.push(SlashCommand {
@@ -519,7 +724,45 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
         scan_dir(&cache_dir, &mut commands);
     }
 
-    // Skip marketplaces — only show installed (cache) plugins
+    // Scan user-level skills (~/.claude/skills/)
+    let user_skills = claude_dir.join("skills");
+    if user_skills.exists() {
+        if let Ok(entries) = std::fs::read_dir(&user_skills) {
+            for entry in entries.flatten() {
+                let skill_path = entry.path();
+                if skill_path.is_dir() {
+                    let skill_md = skill_path.join("SKILL.md");
+                    if skill_md.exists() {
+                        if let Some(mut cmd) = parse_skill_md(&skill_md, &skill_path) {
+                            cmd.source = "user".to_string();
+                            commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan project-level skills (.claude/skills/)
+    if let Ok(cwd) = std::env::current_dir() {
+        let project_skills = cwd.join(".claude").join("skills");
+        if project_skills.exists() {
+            if let Ok(entries) = std::fs::read_dir(&project_skills) {
+                for entry in entries.flatten() {
+                    let skill_path = entry.path();
+                    if skill_path.is_dir() {
+                        let skill_md = skill_path.join("SKILL.md");
+                        if skill_md.exists() {
+                            if let Some(mut cmd) = parse_skill_md(&skill_md, &skill_path) {
+                                cmd.source = "project".to_string();
+                                commands.push(cmd);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Scan user-level commands (~/.claude/commands/)
     let user_cmds = claude_dir.join("commands");
@@ -625,6 +868,38 @@ fn discord_cleanup_orphaned(
     bot.cleanup_orphaned()
 }
 
+#[tauri::command]
+fn get_delegation_port(
+    state: tauri::State<'_, AppState>,
+) -> Result<u16, String> {
+    Ok(state.permission_server.port())
+}
+
+#[tauri::command]
+fn get_delegation_messages(
+    state: tauri::State<'_, AppState>,
+    group_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let msgs = state.permission_server.delegation_messages
+        .lock().map_err(|e| e.to_string())?;
+    let group_msgs = msgs.get(&group_id).cloned().unwrap_or_default();
+    Ok(group_msgs.iter().map(|m| serde_json::json!({
+        "agent": m.agent,
+        "message": m.message,
+        "timestamp": m.timestamp,
+        "msg_type": m.msg_type,
+    })).collect())
+}
+
+#[tauri::command]
+fn cleanup_delegation_group(
+    state: tauri::State<'_, AppState>,
+    group_id: String,
+) -> Result<(), String> {
+    state.permission_server.cleanup_delegation_group(&group_id);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -661,10 +936,16 @@ pub fn run() {
             rewrite_prompt,
             search_files,
             list_disk_sessions,
+            load_session_history,
+            truncate_session_jsonl,
+            fork_session_jsonl,
             read_file,
             write_file,
             list_mcp_servers,
             list_directory,
+            get_delegation_port,
+            get_delegation_messages,
+            cleanup_delegation_group,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
