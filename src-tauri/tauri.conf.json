@@ -21,9 +21,11 @@
         "fullscreen": false,
         "center": true,
         "decorations": false,
-        "transparent": true
+        "transparent": true,
+        "zoomHotkeysEnabled": false
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Terminal 64 Party Mode captures audio to create visual effects synchronized with your music.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Terminal 64 widgets may request camera access for features like webcam display.</string>
+</dict>
+</plist>

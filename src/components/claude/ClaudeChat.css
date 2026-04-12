@@ -350,6 +350,7 @@
 .cc-mcp-info { display: flex; flex-direction: column; min-width: 0; }
 .cc-mcp-name { font-family: 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--fg-secondary, #bac2de); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cc-mcp-meta { font-size: 9px; color: var(--fg-muted, #6c7086); }
+.cc-mcp-item--builtin { opacity: 0.6; }
 
 /* Permission badge moved to status line below input */
 
@@ -361,8 +362,13 @@
   color: #94e2d5;
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: 9px;
-  border-radius: 3px;
+  border-radius: 4px;
   cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.cc-plan-toggle:hover {
+  background: rgba(148, 226, 213, 0.2);
+  border-color: rgba(148, 226, 213, 0.5);
 }
 
 /* ---- Messages ---- */
@@ -419,6 +425,19 @@
   font-size: 11px;
   color: var(--fg-muted, #6c7086);
   letter-spacing: 0.2px;
+}
+
+.cc-load-more {
+  text-align: center;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  transition: color 0.1s;
+}
+.cc-load-more:hover {
+  color: var(--fg, #cdd6f4);
 }
 
 /* ---- Message bubbles ---- */
@@ -557,6 +576,12 @@
   animation: cc-blink 0.8s step-end infinite;
 }
 
+.cc-thinking-text {
+  color: var(--fg-muted, #6c7086);
+  font-style: italic;
+  font-size: 12px;
+}
+
 @keyframes cc-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
@@ -628,6 +653,41 @@
 
 .cc-bubble--assistant .cc-list li {
   margin: 2px 0;
+}
+
+/* ---- Tables ---- */
+
+.cc-table-wrap {
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.cc-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.5;
+  width: 100%;
+}
+
+.cc-table th,
+.cc-table td {
+  border: 1px solid var(--border, #313244);
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+.cc-table th {
+  background: var(--bg-tertiary, #11111b);
+  font-weight: 600;
+  color: var(--fg-secondary, #bac2de);
+}
+
+.cc-table td {
+  color: var(--fg, #cdd6f4);
+}
+
+.cc-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* ---- Code blocks ---- */
@@ -708,6 +768,101 @@
   border-radius: 3px;
   font-size: 12px;
   font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+/* ---- Delegation badges ---- */
+
+.cc-delegation-badge,
+.cc-merge-card {
+  border: 1px solid var(--border, #313244);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-secondary, rgba(255,255,255,0.03));
+}
+.cc-delegation-badge-header,
+.cc-merge-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.cc-delegation-badge-header:hover,
+.cc-merge-card-header:hover {
+  background: rgba(255,255,255,0.04);
+}
+.cc-delegation-badge-icon {
+  color: #94e2d5;
+  font-size: 14px;
+}
+.cc-delegation-badge-text {
+  flex: 1;
+  font-weight: 500;
+  color: var(--fg, #cdd6f4);
+}
+.cc-delegation-badge-body,
+.cc-merge-card-body {
+  padding: 0 12px 10px;
+}
+.cc-delegation-badge-ctx {
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  margin: 0 0 8px;
+  line-height: 1.4;
+}
+.cc-delegation-badge-tasks {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg, #cdd6f4);
+}
+.cc-merge-task {
+  margin-bottom: 8px;
+}
+.cc-merge-task:last-child {
+  margin-bottom: 0;
+}
+.cc-merge-task-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.cc-merge-task-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.cc-merge-task-dot--completed { background: #a6e3a1; }
+.cc-merge-task-dot--failed { background: #f38ba8; }
+.cc-merge-task-dot--cancelled { background: #6c7086; }
+.cc-merge-task-name {
+  color: var(--fg, #cdd6f4);
+}
+.cc-merge-task-result {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  margin: 0;
+  padding: 6px 8px;
+  background: rgba(0,0,0,0.15);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.4;
 }
 
 /* ---- Tool calls ---- */
@@ -881,7 +1036,15 @@
   font-size: 12px;
   color: #94e2d5;
   font-weight: 600;
-  flex: 1;
+}
+.cc-plan-ctx {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  margin-left: auto;
+}
+.cc-plan-ctx--warn {
+  color: #f9e2af;
 }
 
 .cc-plan-finished-actions {
@@ -1035,6 +1198,25 @@
   overflow: hidden;
 }
 
+/* Tighten line number padding */
+.cc-edit-overlay-editor .monaco-editor .line-numbers {
+  padding-right: 6px;
+}
+
+/* Hide right-side overview ruler */
+.cc-edit-overlay-editor .monaco-editor .decorationsOverviewRuler {
+  display: none !important;
+}
+
+/* Scrollbar styling */
+.cc-edit-overlay-editor .monaco-editor .monaco-scrollable-element > .scrollbar > .slider {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+.cc-edit-overlay-editor .monaco-editor .monaco-scrollable-element > .scrollbar > .slider:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
 /* Green highlight for changed lines */
 .cc-editor-changed-line {
   background: rgba(166, 227, 161, 0.10) !important;
@@ -1043,7 +1225,7 @@
 .cc-editor-changed-gutter {
   background: rgba(166, 227, 161, 0.50);
   width: 3px !important;
-  margin-left: 3px;
+  margin-left: 1px;
   border-radius: 1px;
 }
 
@@ -1335,47 +1517,6 @@
 }
 
 /* ---- Context usage bar ---- */
-.cc-context-bar-wrap {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  cursor: default;
-}
-.cc-context-label {
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 10px;
-  color: var(--fg-muted, #6c7086);
-  white-space: nowrap;
-}
-.cc-context-bar {
-  position: relative;
-  width: 80px;
-  height: 6px;
-  background: var(--bg-tertiary, rgba(255,255,255,0.06));
-  border-radius: 3px;
-  overflow: visible;
-}
-.cc-context-fill {
-  height: 100%;
-  border-radius: 3px;
-  background: var(--accent, #89b4fa);
-  transition: width 0.4s ease;
-}
-.cc-context-fill[style*="width: 8"] ~ .cc-context-compact-tick,
-.cc-context-bar-wrap[title*="80%"] .cc-context-fill {
-  /* handled by JS threshold */
-}
-.cc-context-compact-tick {
-  position: absolute;
-  top: -2px;
-  width: 2px;
-  height: 10px;
-  background: #89b4fa;
-  border-radius: 1px;
-  transform: translateX(-1px);
-  opacity: 0.7;
-}
 
 
 .cc-textarea {
@@ -1521,38 +1662,53 @@
 .cc-loop-banner {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: 6px;
+  padding: 5px 8px;
   background: color-mix(in srgb, var(--ft-border, #cba6f7) 8%, var(--bg-tertiary, #11111b));
-  border: 1px solid color-mix(in srgb, var(--ft-border, #cba6f7) 25%, transparent);
-  border-radius: 6px;
-  margin: 0 10px 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ft-border, #cba6f7) 25%, transparent);
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
   color: var(--fg-muted, #6c7086);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .cc-loop-icon {
-  font-size: 14px;
-  animation: cc-loop-spin 2s linear infinite;
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 1.5px solid color-mix(in srgb, var(--ft-border, #cba6f7) 30%, transparent);
+  border-top-color: var(--ft-border, #cba6f7);
+  border-radius: 50%;
+  animation: cc-loop-spin 0.8s linear infinite;
 }
 
 @keyframes cc-loop-spin {
-  from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
 .cc-loop-text {
   color: var(--fg, #cdd6f4);
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .cc-loop-prompt {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   opacity: 0.6;
+}
+
+.cc-loop-countdown {
+  font-size: 10px;
+  color: var(--ft-border, #cba6f7);
+  white-space: nowrap;
+  flex-shrink: 0;
+  opacity: 0.8;
 }
 
 .cc-loop-stop {
@@ -1564,6 +1720,7 @@
   font-size: 10px;
   padding: 2px 8px;
   cursor: pointer;
+  flex-shrink: 0;
   transition: all 0.15s;
 }
 

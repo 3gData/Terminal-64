@@ -33,13 +33,13 @@ impl PtyManager {
         let cols = req.cols.unwrap_or(80);
         let rows = req.rows.unwrap_or(24);
 
-        eprintln!("[pty] Creating terminal id={} cols={} rows={}", req.id, cols, rows);
+        safe_eprintln!("[pty] Creating terminal id={} cols={} rows={}", req.id, cols, rows);
 
         // Prevent double-creation (React StrictMode calls this twice)
         {
             let instances = self.instances.lock().map_err(|e| e.to_string())?;
             if instances.contains_key(&req.id) {
-                eprintln!("[pty] Terminal {} already exists, skipping", req.id);
+                safe_eprintln!("[pty] Terminal {} already exists, skipping", req.id);
                 return Ok(());
             }
         }
@@ -53,7 +53,7 @@ impl PtyManager {
                 pixel_height: 0,
             })
             .map_err(|e| {
-                eprintln!("[pty] Failed to open pty: {}", e);
+                safe_eprintln!("[pty] Failed to open pty: {}", e);
                 e.to_string()
             })?;
 
@@ -64,7 +64,7 @@ impl PtyManager {
                 std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
             }
         });
-        eprintln!("[pty] Spawning shell: {}", shell);
+        safe_eprintln!("[pty] Spawning shell: {}", shell);
 
         let mut cmd = CommandBuilder::new(&shell);
         if let Some(cwd) = &req.cwd {
@@ -72,10 +72,10 @@ impl PtyManager {
         }
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| {
-            eprintln!("[pty] Failed to spawn command: {}", e);
+            safe_eprintln!("[pty] Failed to spawn command: {}", e);
             e.to_string()
         })?;
-        eprintln!("[pty] Shell spawned successfully");
+        safe_eprintln!("[pty] Shell spawned successfully");
 
         let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -106,19 +106,19 @@ impl PtyManager {
         terminal_id: String,
         mut reader: Box<dyn Read + Send>,
     ) {
-        eprintln!("[pty] Reader thread started for {}", terminal_id);
+        safe_eprintln!("[pty] Reader thread started for {}", terminal_id);
         let mut buf = [0u8; 4096];
         let mut total_bytes = 0usize;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    eprintln!("[pty] Reader got EOF for {}", terminal_id);
+                    safe_eprintln!("[pty] Reader got EOF for {}", terminal_id);
                     break;
                 }
                 Ok(n) => {
                     total_bytes += n;
                     if total_bytes == n {
-                        eprintln!("[pty] First read: {} bytes for {}", n, terminal_id);
+                        safe_eprintln!("[pty] First read: {} bytes for {}", n, terminal_id);
                     }
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
                     let result = app_handle.emit(
@@ -129,11 +129,11 @@ impl PtyManager {
                         },
                     );
                     if let Err(e) = result {
-                        eprintln!("[pty] Emit error: {} for {}", e, terminal_id);
+                        safe_eprintln!("[pty] Emit error: {} for {}", e, terminal_id);
                     }
                 }
                 Err(e) => {
-                    eprintln!("[pty] Reader error: {} for {}", e, terminal_id);
+                    safe_eprintln!("[pty] Reader error: {} for {}", e, terminal_id);
                     break;
                 }
             }

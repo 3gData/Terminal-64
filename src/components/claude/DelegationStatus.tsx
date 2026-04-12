@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { endDelegation, performMerge } from "../../hooks/useDelegationOrchestrator";

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useThemeStore } from "../../stores/themeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { startDiscordBot, stopDiscordBot, discordBotStatus } from "../../lib/tauriApi";
+import { startDiscordBot, stopDiscordBot, discordBotStatus, partyModeStatus } from "../../lib/tauriApi";
 import "./SettingsPanel.css";
 
 import { FONT_OPTIONS, fontStack } from "../../lib/fonts";
@@ -22,8 +22,20 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const setSetting = useSettingsStore((s) => s.set);
   const addQuickPaste = useSettingsStore((s) => s.addQuickPaste);
   const removeQuickPaste = useSettingsStore((s) => s.removeQuickPaste);
+  const snapToGrid = useSettingsStore((s) => s.snapToGrid);
 
   const [newCommand, setNewCommand] = useState("");
+
+  // Party Mode
+  const partyEnabled = useSettingsStore((s) => s.partyModeEnabled);
+  const partyEdgeGlow = useSettingsStore((s) => s.partyEdgeGlow);
+  const partyEqualizer = useSettingsStore((s) => s.partyEqualizer);
+  const partyBackgroundPulse = useSettingsStore((s) => s.partyBackgroundPulse);
+  const partyColorCycling = useSettingsStore((s) => s.partyColorCycling);
+  const partyEqualizerDance = useSettingsStore((s) => s.partyEqualizerDance);
+  const partyEqualizerRotation = useSettingsStore((s) => s.partyEqualizerRotation);
+  const partyIntensity = useSettingsStore((s) => s.partyIntensity);
+
   const discordToken = useSettingsStore((s) => s.discordBotToken);
   const discordServerId = useSettingsStore((s) => s.discordServerId);
   const [botConnected, setBotConnected] = useState(false);
@@ -109,6 +121,19 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             />
           </div>
 
+          <div className="settings-group">
+            <label className="settings-label settings-label--row">
+              <span>Snap to Grid</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={snapToGrid}
+                onChange={(e) => setSetting({ snapToGrid: e.target.checked })}
+              />
+            </label>
+            <span className="settings-hint">Snap windows to edges and sizes of nearby windows when dragging or resizing</span>
+          </div>
+
           <div className="settings-divider" />
 
           {/* Quick Pastes */}
@@ -153,6 +178,64 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           </div>
 
           <div className="settings-divider" />
+
+          {/* Party Mode */}
+          <div className="settings-group">
+            <label className="settings-label">
+              Party Mode
+              <span className={`settings-dot ${partyEnabled ? "settings-dot--on" : ""}`} />
+            </label>
+            <span className="settings-hint">Capture system audio and visualize it across the UI.</span>
+            <button
+              className={`settings-discord-btn ${partyEnabled ? "settings-discord-btn--stop" : ""}`}
+              onClick={() => setSetting({ partyModeEnabled: !partyEnabled })}
+            >
+              {partyEnabled ? "Disable" : "Enable"}
+            </button>
+
+            {partyEnabled && (
+              <div className="party-sub-settings">
+                <div className="settings-group" style={{ marginTop: 4 }}>
+                  <label className="settings-label">
+                    Intensity
+                    <span className="settings-value">{Math.round(partyIntensity * 100)}%</span>
+                  </label>
+                  <input
+                    type="range"
+                    className="settings-range"
+                    min={10}
+                    max={100}
+                    value={Math.round(partyIntensity * 100)}
+                    onChange={(e) => setSetting({ partyIntensity: Number(e.target.value) / 100 })}
+                  />
+                </div>
+                <label className="settings-checkbox">
+                  <input type="checkbox" checked={partyEdgeGlow} onChange={(e) => setSetting({ partyEdgeGlow: e.target.checked })} />
+                  Edge Glow
+                </label>
+                <label className="settings-checkbox">
+                  <input type="checkbox" checked={partyEqualizer} onChange={(e) => setSetting({ partyEqualizer: e.target.checked })} />
+                  Equalizer Bars
+                </label>
+                <label className="settings-checkbox">
+                  <input type="checkbox" checked={partyBackgroundPulse} onChange={(e) => setSetting({ partyBackgroundPulse: e.target.checked })} />
+                  Background Pulse
+                </label>
+                <label className="settings-checkbox">
+                  <input type="checkbox" checked={partyColorCycling} onChange={(e) => setSetting({ partyColorCycling: e.target.checked })} />
+                  Color Cycling
+                </label>
+                <label className="settings-checkbox">
+                  <input type="checkbox" checked={partyEqualizerDance} onChange={(e) => setSetting({ partyEqualizerDance: e.target.checked })} />
+                  Equalizer Dance
+                </label>
+                <label className="settings-checkbox">
+                  <input type="checkbox" checked={partyEqualizerRotation} onChange={(e) => setSetting({ partyEqualizerRotation: e.target.checked })} />
+                  Equalizer Rotation
+                </label>
+              </div>
+            )}
+          </div>
 
           <div className="settings-divider" />
 

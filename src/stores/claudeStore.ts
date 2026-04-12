@@ -54,6 +54,7 @@ export interface ClaudeSession {
   isStreaming: boolean;
   streamingText: string;
   streamingStartedAt: number | null; // timestamp when streaming began
+  lastEventAt: number | null; // timestamp of most recent event from the process
   model: string;
   totalCost: number;
   totalTokens: number;
@@ -72,6 +73,7 @@ export interface ClaudeSession {
   activeLoop: ActiveLoop | null;
   ephemeral: boolean; // if true, skip localStorage persistence (delegation children)
   mcpServers: McpServerStatus[];
+  modifiedFiles: string[];
 }
 
 export interface ActiveLoop {
@@ -92,6 +94,7 @@ interface ClaudeState {
   finalizeAssistantMessage: (sessionId: string, text: string, toolCalls?: ToolCall[]) => void;
   updateToolResult: (sessionId: string, toolUseId: string, result: string, isError: boolean) => void;
   setStreaming: (sessionId: string, streaming: boolean) => void;
+  touchLastEvent: (sessionId: string) => void;
   setModel: (sessionId: string, model: string) => void;
   addCost: (sessionId: string, cost: number) => void;
   addTokens: (sessionId: string, tokens: number) => void;
@@ -115,6 +118,8 @@ interface ClaudeState {
   setDraftPrompt: (sessionId: string, text: string) => void;
   setLoop: (sessionId: string, loop: ActiveLoop | null) => void;
   tickLoop: (sessionId: string) => void;
+  addModifiedFiles: (sessionId: string, paths: string[]) => void;
+  resetModifiedFiles: (sessionId: string) => void;
   deleteSession: (sessionId: string) => void;
   truncateFromMessage: (sessionId: string, messageId: string) => void;
 }
@@ -207,6 +212,7 @@ function loadSession(sessionId: string): ClaudeSession | null {
       isStreaming: false,
       streamingText: "",
       streamingStartedAt: null,
+      lastEventAt: null,
       model: saved.model || "",
       totalCost: saved.totalCost || 0,
       totalTokens: saved.totalTokens || 0,
@@ -225,6 +231,7 @@ function loadSession(sessionId: string): ClaudeSession | null {
       activeLoop: null, // loops don't persist across restarts
       ephemeral: false,
       mcpServers: [],
+      modifiedFiles: [],
     };
   } catch {
     return null;
@@ -266,10 +273,10 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       sessions: {
         ...s.sessions,
         [sessionId]: {
-          sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "", streamingStartedAt: null,
+          sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "", streamingStartedAt: null, lastEventAt: null,
           model: "", totalCost: 0, totalTokens: 0, contextUsed: 0, contextMax: 0, error: null, promptCount: 0, planModeActive: false,
           pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "",
-          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [],
+          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [],
         },
       },
     }));
@@ -363,7 +370,16 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       return { sessions: updateSession(s.sessions, sessionId, {
         isStreaming: streaming,
         streamingStartedAt: streaming ? Date.now() : null,
+        lastEventAt: streaming ? Date.now() : null,
       }) };
+    });
+  },
+
+  touchLastEvent: (sessionId) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { lastEventAt: Date.now() }) };
     });
   },
 
@@ -513,11 +529,11 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => ({ sessions: updateSession(s.sessions, sessionId, { promptQueue: [] }) }));
   },
 
-  // Load message history from disk JSONL (only if session has no messages yet)
+  // Load message history from disk JSONL (replaces current messages unconditionally)
   loadFromDisk: (sessionId, messages) => {
     set((s) => {
       const session = s.sessions[sessionId];
-      if (!session || session.messages.length > 0) return s;
+      if (!session) return s;
       const promptCount = messages.filter((m) => m.role === "user").length;
       const updated = updateSession(s.sessions, sessionId, { messages, promptCount, hasBeenStarted: promptCount > 0 });
       debouncedSave(updated);
@@ -547,6 +563,21 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     });
   },
 
+  addModifiedFiles: (sessionId, paths) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      const existing = new Set(session.modifiedFiles);
+      const newPaths = paths.filter((p) => !existing.has(p));
+      if (newPaths.length === 0) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { modifiedFiles: [...session.modifiedFiles, ...newPaths] }) };
+    });
+  },
+
+  resetModifiedFiles: (sessionId) => {
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { modifiedFiles: [] }) }));
+  },
+
   // Permanently delete a session from both memory and localStorage
   deleteSession: (sessionId) => {
     set((s) => {
@@ -574,6 +605,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       const promptCount = messages.filter((m) => m.role === "user").length;
       const updated = updateSession(s.sessions, sessionId, {
         messages, promptCount, streamingText: "", isStreaming: false, error: null,
+        pendingPermission: null, pendingQuestions: null, activeLoop: null, promptQueue: [],
       });
       debouncedSave(updated);
       return { sessions: updated };

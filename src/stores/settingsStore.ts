@@ -14,10 +14,19 @@ export interface Settings {
   claudeFont: string;
   theme: string;
   bgAlpha: number;
+  snapToGrid: boolean;
   quickPastes: QuickPaste[];
   recentDirs: string[];
   discordBotToken: string;
   discordServerId: string;
+  partyModeEnabled: boolean;
+  partyEdgeGlow: boolean;
+  partyEqualizer: boolean;
+  partyBackgroundPulse: boolean;
+  partyColorCycling: boolean;
+  partyEqualizerDance: boolean;
+  partyEqualizerRotation: boolean;
+  partyIntensity: number;
 }
 
 const STORAGE_KEY = "terminal64-settings";
@@ -29,10 +38,19 @@ const defaultSettings: Settings = {
   claudeFont: "system",
   theme: "Catppuccin Mocha",
   bgAlpha: 1,
+  snapToGrid: false,
   quickPastes: [],
   recentDirs: [],
   discordBotToken: "",
   discordServerId: "",
+  partyModeEnabled: false,
+  partyEdgeGlow: true,
+  partyEqualizer: false,
+  partyBackgroundPulse: true,
+  partyColorCycling: false,
+  partyEqualizerDance: true,
+  partyEqualizerRotation: true,
+  partyIntensity: 0.7,
 };
 
 function loadSettings(): Settings {

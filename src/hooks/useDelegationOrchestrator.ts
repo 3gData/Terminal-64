@@ -2,10 +2,11 @@ import { useEffect } from "react";
 import { useClaudeStore } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 import { useCanvasStore } from "../stores/canvasStore";
-import { cancelClaude, sendClaudePrompt, cleanupDelegationGroup } from "../lib/tauriApi";
+import { cancelClaude, sendClaudePrompt, cleanupDelegationGroup, clearT64DelegationEnv, onClaudeDone } from "../lib/tauriApi";
 
 const FORWARDING_PREFIX = "[Update from";
 const MAX_SUMMARY_LENGTH = 800;
+const idleTurnCounts = new Map<string, number>();
 
 function closeSharedChatPanel(groupId: string) {
   const canvas = useCanvasStore.getState();
@@ -52,7 +53,43 @@ export function useDelegationOrchestrator() {
         }
       }
     });
-    return unsub;
+
+    // Safety net: listen for claude-done events to catch delegation children whose
+    // streaming transition was missed (e.g. process exited before isStreaming was set).
+    let unlistenDone: (() => void) | null = null;
+    onClaudeDone((payload) => {
+      const delStore = useDelegationStore.getState();
+      const group = delStore.getGroupForSession(payload.session_id);
+      if (!group || group.status !== "active") return;
+      const task = group.tasks.find((t) => t.sessionId === payload.session_id);
+      if (!task || task.status !== "running") return;
+      // Delay slightly to let the store subscription fire first
+      setTimeout(() => {
+        const freshTask = useDelegationStore.getState().groups[group.id]?.tasks.find((t) => t.sessionId === payload.session_id);
+        if (freshTask && freshTask.status === "running") {
+          // Store subscription didn't catch it — handle now
+          handleTurnComplete(payload.session_id);
+          // If still running after handleTurnComplete, force-complete with whatever we have
+          const stillRunning = useDelegationStore.getState().groups[group.id]?.tasks.find((t) => t.sessionId === payload.session_id);
+          if (stillRunning && stillRunning.status === "running") {
+            const session = useClaudeStore.getState().sessions[payload.session_id];
+            const msgs = session?.messages || [];
+            const summary = extractReportDone(msgs)
+              || [...msgs].reverse().find((m: any) => m.role === "assistant")?.content
+              || "(agent process exited without result)";
+            delStore.updateTaskStatus(group.id, freshTask.id, "completed", summary.slice(0, MAX_SUMMARY_LENGTH * 2));
+            delStore.setTaskAction(group.id, freshTask.id, "Done");
+            idleTurnCounts.delete(payload.session_id);
+            checkAndMerge(group.id);
+          }
+        }
+      }, 500);
+    }).then((fn) => { unlistenDone = fn; });
+
+    return () => {
+      unsub();
+      unlistenDone?.();
+    };
   }, []);
 }
 
@@ -63,29 +100,91 @@ function handleTurnComplete(sessionId: string) {
 
   const claudeState = useClaudeStore.getState();
   const session = claudeState.sessions[sessionId];
-  if (!session || session.error) return;
+  // Session may have been removed by rewind/cancel — bail out
+  if (!session) return;
 
   const task = group.tasks.find((t) => t.sessionId === sessionId);
   if (!task || task.status !== "running") return;
 
+  // Re-check group status after accessing task — rewind may have cancelled between the two reads
+  const freshGroup = delStore.groups[group.id];
+  if (!freshGroup || freshGroup.status !== "active") return;
+
   const msgs = session.messages;
+
+  // Check if agent called report_done — that's the strongest completion signal.
+  // Scan recent messages for a report_done tool call.
+  const reportDoneSummary = extractReportDone(msgs);
+
   const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-  if (!lastAssistant) return;
+  if (!lastAssistant && !reportDoneSummary) return;
 
-  if (task.lastForwardedMessageId === lastAssistant.id) return;
-  if (lastAssistant.content.startsWith(FORWARDING_PREFIX)) return;
+  if (lastAssistant) {
+    if (task.lastForwardedMessageId === lastAssistant.id && !reportDoneSummary) return;
+    if (lastAssistant.content.startsWith(FORWARDING_PREFIX)) return;
+    delStore.setTaskForwarded(group.id, task.id, lastAssistant.id);
+  }
 
-  delStore.setTaskForwarded(group.id, task.id, lastAssistant.id);
+  // Determine result — prefer report_done summary, fall back to last message content
+  const resultText = reportDoneSummary
+    || lastAssistant?.content
+    || summarizeToolCalls(lastAssistant)
+    || "";
 
-  const isDone = detectCompletion(lastAssistant.content);
+  const isDone = reportDoneSummary || detectCompletion(resultText);
+
+  // If session errored out or process exited with no streaming, treat as done
+  const processExited = session.error || (!session.isStreaming && msgs.length > 1);
+
   if (isDone) {
-    const resultSummary = lastAssistant.content.slice(0, MAX_SUMMARY_LENGTH * 2);
+    const resultSummary = resultText.slice(0, MAX_SUMMARY_LENGTH * 2);
     delStore.updateTaskStatus(group.id, task.id, "completed", resultSummary);
     delStore.setTaskAction(group.id, task.id, "Done");
+    idleTurnCounts.delete(sessionId);
+  } else {
+    // Track consecutive idle turns (no tool calls, no completion phrase)
+    const hasToolCalls = lastAssistant?.toolCalls && lastAssistant.toolCalls.length > 0;
+    if (!hasToolCalls) {
+      const count = (idleTurnCounts.get(sessionId) || 0) + 1;
+      idleTurnCounts.set(sessionId, count);
+      if (count >= MAX_IDLE_TURNS) {
+        const resultSummary = resultText.slice(0, MAX_SUMMARY_LENGTH * 2) || "(agent stopped without explicit summary)";
+        delStore.updateTaskStatus(group.id, task.id, "completed", resultSummary);
+        delStore.setTaskAction(group.id, task.id, "Done");
+        idleTurnCounts.delete(sessionId);
+      }
+    } else {
+      idleTurnCounts.set(sessionId, 0);
+    }
   }
 
   // Check if all tasks are complete → merge
   checkAndMerge(group.id);
+}
+
+/** Scan messages for a report_done tool call and extract its summary arg. */
+function extractReportDone(msgs: any[]): string | null {
+  for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 5); i--) {
+    const msg = msgs[i];
+    if (msg.role === "assistant" && msg.toolCalls) {
+      for (const tc of msg.toolCalls) {
+        if (tc.name === "report_done" && tc.input?.summary) {
+          return String(tc.input.summary);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Build a summary from tool calls when there's no text content. */
+function summarizeToolCalls(msg: any): string {
+  if (!msg?.toolCalls?.length) return "";
+  const actions = msg.toolCalls.map((tc: any) => {
+    const detail = tc.input?.file_path || tc.input?.command || tc.input?.pattern || "";
+    return `${tc.name}${detail ? ` ${String(detail).split("/").pop()?.slice(0, 50)}` : ""}`;
+  });
+  return `Completed actions: ${actions.join(", ")}`;
 }
 
 function checkAndMerge(groupId: string) {
@@ -102,7 +201,7 @@ function checkAndMerge(groupId: string) {
   performMerge(groupId);
 }
 
-export function performMerge(groupId: string) {
+export async function performMerge(groupId: string) {
   const delStore = useDelegationStore.getState();
   const group = delStore.groups[groupId];
   if (!group) return;
@@ -123,32 +222,47 @@ export function performMerge(groupId: string) {
     return;
   }
 
+  let mergeSucceeded = false;
   if (parentSession.isStreaming) {
     useClaudeStore.getState().enqueuePrompt(group.parentSessionId, mergePrompt);
+    mergeSucceeded = true; // queued — will send when streaming finishes
   } else {
     useClaudeStore.getState().addUserMessage(group.parentSessionId, mergePrompt);
-    sendClaudePrompt({
-      session_id: group.parentSessionId,
-      cwd: parentSession.cwd || ".",
-      prompt: mergePrompt,
-      permission_mode: "auto",
-    }).catch((err) => {
+    try {
+      await sendClaudePrompt({
+        session_id: group.parentSessionId,
+        cwd: parentSession.cwd || ".",
+        prompt: mergePrompt,
+        permission_mode: group.parentPermissionMode || "auto",
+      });
+      mergeSucceeded = true;
+    } catch (err) {
       console.warn("[delegation] Failed to merge to parent:", err);
-    });
+      // Revert to active so user can retry or manually handle
+      delStore.setGroupStatus(groupId, "active");
+    }
   }
 
-  delStore.setGroupStatus(groupId, "merged");
-  closeSharedChatPanel(groupId);
-  cleanupDelegationGroup(groupId).catch(() => {});
+  if (mergeSucceeded) {
+    delStore.setGroupStatus(groupId, "merged");
+    closeSharedChatPanel(groupId);
+    cleanupDelegationGroup(groupId).catch(() => {});
+    if (parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
+  }
 }
 
-export function endDelegation(groupId: string) {
+/**
+ * End a delegation group. If `forceCancel` is true (e.g. during rewind),
+ * skip merging results and just tear everything down immediately.
+ */
+export function endDelegation(groupId: string, forceCancel = false) {
   const delStore = useDelegationStore.getState();
   const group = delStore.groups[groupId];
   if (!group) return;
 
-  // Cancel all running children
+  // Cancel all running children and clean up idle tracking
   for (const task of group.tasks) {
+    if (task.sessionId) idleTurnCounts.delete(task.sessionId);
     if (task.status === "running" || task.status === "pending") {
       delStore.updateTaskStatus(groupId, task.id, "cancelled");
       if (task.sessionId) {
@@ -159,14 +273,16 @@ export function endDelegation(groupId: string) {
     }
   }
 
-  // If any completed, merge results first
-  const hasResults = group.tasks.some((t) => t.status === "completed" && t.result);
+  // If any completed and we're not force-cancelling, merge results first
+  const hasResults = !forceCancel && group.tasks.some((t) => t.status === "completed" && t.result);
   if (hasResults) {
     performMerge(groupId);
   } else {
     delStore.setGroupStatus(groupId, "cancelled");
     closeSharedChatPanel(groupId);
     cleanupDelegationGroup(groupId).catch(() => {});
+    const parentSession = useClaudeStore.getState().sessions[group.parentSessionId];
+    if (parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
   }
 }
 
@@ -176,6 +292,14 @@ function detectCompletion(content: string): boolean {
     "task complete", "task is complete", "i've completed", "i have completed",
     "all done", "finished implementing", "implementation is complete",
     "work is done", "changes are complete", "successfully completed",
+    "i'm done", "that's everything", "everything is set up",
+    "completed all", "all changes have been", "all tasks", "finished all",
+    "that completes", "this completes", "everything has been",
   ];
   return completionPhrases.some((phrase) => lower.includes(phrase));
 }
+
+// If a child session stops streaming without requesting more input and hasn't
+// been marked complete by phrase detection, treat it as complete after this
+// many consecutive "turn complete without user input" events.
+const MAX_IDLE_TURNS = 2;

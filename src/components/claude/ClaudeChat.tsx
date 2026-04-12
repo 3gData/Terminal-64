@@ -5,18 +5,17 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useThemeStore } from "../../stores/themeStore";
-import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, writeFile, loadSessionHistory, mapHistoryMessages, truncateSessionJsonl, forkSessionJsonl, listMcpServers } from "../../lib/tauriApi";
+import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, writeFile, loadSessionHistory, mapHistoryMessages, truncateSessionJsonl, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, revertFilesGit, ensureT64Mcp, setT64DelegationEnv, getDelegationPort } from "../../lib/tauriApi";
 import { SlashCommand, PermissionMode, McpServer } from "../../lib/types";
 import { rewritePromptStream } from "../../lib/ai";
-import ChatMessage, { toolHeader, renderContent, ReadGroupCard } from "./ChatMessage";
+import ChatMessage, { toolHeader, renderContent, ToolGroupCard, GROUPABLE_TOOLS } from "./ChatMessage";
 import Editor from "@monaco-editor/react";
 import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
 import ChatInput from "./ChatInput";
-import DelegationStatus from "./DelegationStatus";
 import { useDelegationStore } from "../../stores/delegationStore";
+import { endDelegation } from "../../hooks/useDelegationOrchestrator";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { getDelegationPort } from "../../lib/tauriApi";
 import { v4 as uuidv4 } from "uuid";
 import "./ClaudeChat.css";
 
@@ -72,6 +71,9 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const loopTimerRef = useRef<number | null>(null);
+  const INITIAL_VISIBLE = 40;
+  const LOAD_MORE_BATCH = 30;
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [configMcpServers, setConfigMcpServers] = useState<McpServer[]>([]);
   const [showMcpDrop, setShowMcpDrop] = useState(false);
@@ -131,28 +133,48 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   useEffect(() => {
     document.documentElement.style.setProperty("--claude-font", fontStack(useSettingsStore.getState().claudeFont || "system"));
   }, []);
+  // Reset visible messages when switching sessions
+  useEffect(() => { setVisibleCount(INITIAL_VISIBLE); }, [sessionId]);
+
   // Track whether user is at the bottom so we only auto-scroll when appropriate
   const wasAtBottom = useRef(true);
+  // Use refs so the scroll handler doesn't need to be reattached on every message/visibleCount change
+  const visibleCountRef = useRef(visibleCount);
+  visibleCountRef.current = visibleCount;
+  const messageLenRef = useRef(session?.messages?.length ?? 0);
+  messageLenRef.current = session?.messages?.length ?? 0;
+
   useEffect(() => {
     const el = messagesEndRef.current?.parentElement;
     if (!el) return;
     const handler = () => {
       wasAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      // Load more messages when scrolled to top
+      if (el.scrollTop < 80 && visibleCountRef.current < messageLenRef.current) {
+        const prevHeight = el.scrollHeight;
+        setVisibleCount((v) => Math.min(v + LOAD_MORE_BATCH, messageLenRef.current));
+        requestAnimationFrame(() => {
+          el.scrollTop = el.scrollHeight - prevHeight;
+        });
+      }
     };
     el.addEventListener("scroll", handler, { passive: true });
     return () => el.removeEventListener("scroll", handler);
-  }, []);
-  // Scroll on new messages (only if at bottom)
+  }, [sessionId]); // Only reattach when session changes
+  // Scroll on new messages (only if at bottom — check position directly)
   useEffect(() => {
-    if (!wasAtBottom.current) return;
     const el = messagesEndRef.current?.parentElement;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [session?.messages]);
-  // For streaming, scroll instantly (only if at bottom)
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (atBottom) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [session?.messages?.length]);
+  // For streaming, scroll instantly (only if at bottom — check position directly to avoid stale ref)
   useEffect(() => {
-    if (!session?.streamingText || !wasAtBottom.current) return;
+    if (!session?.streamingText) return;
     const el = messagesEndRef.current?.parentElement;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (atBottom) el.scrollTop = el.scrollHeight;
   }, [session?.streamingText]);
   useEffect(() => {
     const handler = () => { setShowModelDrop(false); setShowEffortDrop(false); setShowMcpDrop(false); };
@@ -186,6 +208,27 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
       setPermModeIdx(0);
     }
   }, [session?.planModeActive]);
+
+  // If streaming ends while plan mode is still active, Claude didn't call ExitPlanMode —
+  // treat this as plan completion so the action bar appears.
+  // Also trigger planFinished if a plan file was written/detected during the turn.
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    if (!session) return;
+    if (session.isStreaming) {
+      wasStreaming.current = true;
+    } else if (wasStreaming.current) {
+      wasStreaming.current = false;
+      if (session.planModeActive) {
+        // Auto-exit plan mode since the turn ended
+        useClaudeStore.getState().setPlanMode(sessionId, false);
+      } else if (planContent && !planFinished) {
+        // Plan file was written but EnterPlanMode/ExitPlanMode were never called —
+        // still show the action bar so user can build/delegate
+        setPlanFinished(true);
+      }
+    }
+  }, [session?.isStreaming, session?.planModeActive, sessionId, planContent, planFinished]);
 
   // Detect plan files from tool calls
   useEffect(() => {
@@ -234,13 +277,15 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // Resolve CWD: use prop, fall back to stored session CWD
   const effectiveCwd = (cwd && cwd !== ".") ? cwd : (session?.cwd || ".");
 
-  // Safety: if streaming has been stuck for >5 min, force-reset it
+  // Safety: if no events received for >5 min while streaming, force-reset.
+  // Uses lastEventAt (updated on every event) so long-running but active
+  // sessions aren't killed — only truly stuck ones.
   useEffect(() => {
-    if (!session?.isStreaming || !session?.streamingStartedAt) return;
+    if (!session?.isStreaming) return;
     const timer = setInterval(() => {
       const s = useClaudeStore.getState().sessions[sessionId];
-      if (s?.isStreaming && s.streamingStartedAt && Date.now() - s.streamingStartedAt > 5 * 60 * 1000) {
-        console.warn(`[queue-safety] Streaming stuck for ${sessionId}, force-resetting`);
+      if (s?.isStreaming && s.lastEventAt && Date.now() - s.lastEventAt > 5 * 60 * 1000) {
+        console.warn(`[queue-safety] No events for 5min on ${sessionId}, force-resetting`);
         useClaudeStore.getState().setStreaming(sessionId, false);
         useClaudeStore.getState().clearStreamingText(sessionId);
       }
@@ -299,6 +344,17 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
       const sess = useClaudeStore.getState().sessions[sessionId];
       const started = sess?.hasBeenStarted ?? false;
       try {
+        if (sess && sess.modifiedFiles.length > 0) {
+          const results = await Promise.allSettled(
+            sess.modifiedFiles.map(async (fp) => {
+              try { return { path: fp, content: await readFile(fp) }; }
+              catch { return { path: fp, content: "" }; }
+            })
+          );
+          const snapshots = results.map((r) => (r as PromiseFulfilledResult<{ path: string; content: string }>).value);
+          createCheckpoint(sessionId, sess.promptCount + 1, snapshots).catch(() => {});
+        }
+
         const req = {
           session_id: sessionId, cwd: effectiveCwd, prompt,
           permission_mode: permissionOverride || permMode.id,
@@ -308,6 +364,10 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         if (!started && (!effectiveCwd || effectiveCwd === ".")) {
           useClaudeStore.getState().setError(sessionId, "No working directory set. Create a new session.");
           return;
+        }
+        // Ensure T64 MCP server is in .mcp.json before first session creation
+        if (!started) {
+          await ensureT64Mcp(effectiveCwd).catch(() => {});
         }
         // Use --resume if session was ever started (survives rewind/cancel),
         // otherwise create new. Falls back to the other on failure.
@@ -406,6 +466,12 @@ Rules:
         return;
       }
 
+      // Clear plan-finished banner whenever the user sends anything
+      if (planFinished) {
+        setPlanFinished(false);
+        setShowPlanViewer(false);
+      }
+
       let prompt = text;
       if (attachedFiles.length > 0) {
         const fileList = attachedFiles.map((f) => `[Attached file: ${f}]`).join("\n");
@@ -444,16 +510,84 @@ Rules:
       setIsRewriting(false);
     }
   }, [sessionId]);
-  const handleRewind = useCallback((messageId: string, content: string) => {
-    cancelClaude(sessionId).catch(() => {});
-    useClaudeStore.getState().truncateFromMessage(sessionId, messageId);
+  const handleRewind = useCallback(async (messageId: string, content: string) => {
+    // Kill the CLI process first and wait for it to die before touching the JSONL
+    try { await cancelClaude(sessionId); } catch {}
+    const store = useClaudeStore.getState();
+    store.setStreaming(sessionId, false);
+    store.setError(sessionId, null);
+    store.clearStreamingText(sessionId);
+    store.truncateFromMessage(sessionId, messageId);
+
     const sess = useClaudeStore.getState().sessions[sessionId];
     if (sess) {
-      const keepTurns = sess.messages.filter(m => m.role === "user").length;
-      truncateSessionJsonl(sessionId, effectiveCwd, keepTurns)
-        .catch((err) => console.warn("[rewind] Failed to truncate JSONL:", err));
+      let rewindContent = content;
+      const lastMsg = sess.messages[sess.messages.length - 1];
+
+      // If the last remaining message is an unpaired user message (we removed its assistant response),
+      // also remove it — the user gets its content prefilled so they can resend.
+      // This keeps the frontend and JSONL in sync (both end at a complete turn).
+      if (lastMsg?.role === "user") {
+        rewindContent = lastMsg.content;
+        store.truncateFromMessage(sessionId, lastMsg.id);
+      }
+
+      const updatedSess = useClaudeStore.getState().sessions[sessionId];
+      const keepTurns = updatedSess ? updatedSess.messages.filter(m => m.role === "user").length : 0;
+
+      // Await truncation so --resume reads the correct JSONL
+      try {
+        await truncateSessionJsonl(sessionId, effectiveCwd, keepTurns);
+      } catch (err) {
+        console.warn("[rewind] Failed to truncate JSONL:", err);
+      }
+
+      // Force-cancel any active delegation group FIRST — rewind must not trigger a merge
+      // Use parentToGroup directly to find group regardless of status (getGroupByParent skips cancelled)
+      const delState = useDelegationStore.getState();
+      const delGroupId = delState.parentToGroup[sessionId];
+      const delGroup = delGroupId ? delState.groups[delGroupId] : undefined;
+      let childModifiedFiles: string[] = [];
+      if (delGroup) {
+        // Collect all files modified by child delegation sessions before tearing them down
+        const claudeState = useClaudeStore.getState();
+        for (const task of delGroup.tasks) {
+          if (task.sessionId) {
+            const childSess = claudeState.sessions[task.sessionId];
+            if (childSess?.modifiedFiles?.length) {
+              childModifiedFiles.push(...childSess.modifiedFiles);
+            }
+          }
+        }
+        if (delGroup.status === "active") {
+          endDelegation(delGroup.id, true);
+        }
+      }
+
+      // Restore parent's own modified files from checkpoint
+      try {
+        const restored = await restoreCheckpoint(sessionId, keepTurns + 1);
+        void restored; // checkpoint restored successfully
+      } catch (err) {
+        console.warn("[rewind] No checkpoint to restore:", err);
+      }
+
+      // Revert ALL files modified by delegation children using git
+      // This handles: new files (deleted), modified files (restored to HEAD),
+      // and deleted files (restored from HEAD) — zero trace after rewind
+      if (childModifiedFiles.length > 0) {
+        const uniqueFiles = [...new Set(childModifiedFiles)];
+        revertFilesGit(effectiveCwd, uniqueFiles)
+          .then((reverted) => { if (reverted.length > 0) console.log("[rewind] Git-reverted delegation files:", reverted); })
+          .catch((err) => console.warn("[rewind] Failed to git-revert delegation files:", err));
+      }
+
+      cleanupCheckpoints(sessionId, keepTurns)
+        .catch((err) => console.warn("[rewind] Checkpoint cleanup:", err));
+      store.resetModifiedFiles(sessionId);
+
+      setRewindText(rewindContent);
     }
-    setRewindText(content);
   }, [sessionId, effectiveCwd]);
 
   const handleFork = useCallback((messageId: string) => {
@@ -533,6 +667,21 @@ Rules:
     } catch {}
   }, []);
 
+  // Listen for widget file-open requests (CustomEvent from WidgetPanel)
+  useEffect(() => {
+    let handled = false;
+    const handler = (e: Event) => {
+      if (handled) return;
+      const path = (e as CustomEvent).detail?.path;
+      if (!path) return;
+      handled = true;
+      requestAnimationFrame(() => { handled = false; });
+      handleFileTreeOpen(path);
+    };
+    window.addEventListener("t64-open-file", handler);
+    return () => window.removeEventListener("t64-open-file", handler);
+  }, [handleFileTreeOpen]);
+
   const handleAttach = useCallback(async () => {
     try {
       const selected = await open({ multiple: true, title: "Attach files" });
@@ -542,13 +691,12 @@ Rules:
 
   const hasPlan = planContent !== null;
   const hasTasks = (session?.tasks.length ?? 0) > 0;
-  const isDelegationParent = !!useDelegationStore((s) => s.getGroupByParent(sessionId));
   const hasSideContent = hasPlan || hasTasks;
 
   const spawnDelegation = useCallback(
     async (tasks: { description: string }[], sharedContext: string) => {
       const delStore = useDelegationStore.getState();
-      const group = delStore.createGroup(sessionId, tasks, "auto", sharedContext || undefined);
+      const group = delStore.createGroup(sessionId, tasks, "auto", sharedContext || undefined, permMode.id);
 
       // Spawn shared chat panel below the parent
       const canvas = useCanvasStore.getState();
@@ -563,7 +711,7 @@ Rules:
         Math.min(300, parentH * 0.6),
       );
 
-      // Get delegation port + write MCP config for channel server
+      // Get delegation port + update T64 MCP with delegation env vars
       let delegationPort = 0;
       try {
         delegationPort = await getDelegationPort();
@@ -573,71 +721,70 @@ Rules:
 
       const appDir = effectiveCwd;
 
-      if (delegationPort > 0) {
-        // Resolve MCP channel server script path
-        const mcpScriptPath = new URL("../../mcp/delegation-server.mjs", window.location.href).pathname.startsWith("/")
-          ? `${appDir.replace(/\/[^/]+\/?$/, "")}/Terminal-64/mcp/delegation-server.mjs`
-          : `${appDir}/mcp/delegation-server.mjs`;
-
-        try {
-          const mcpConfig: Record<string, unknown> = {};
-          try {
-            const existing = await readFile(`${appDir}/.mcp.json`);
-            Object.assign(mcpConfig, JSON.parse(existing));
-          } catch {}
-          if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-          (mcpConfig.mcpServers as Record<string, unknown>)["t64-delegation"] = {
-            command: "node",
-            args: [mcpScriptPath],
-            env: {
-              T64_DELEGATION_PORT: String(delegationPort),
-              T64_GROUP_ID: group.id,
-              T64_AGENT_LABEL: "Agent",
-            },
-          };
-          await writeFile(`${appDir}/.mcp.json`, JSON.stringify(mcpConfig, null, 2));
-        } catch (err) {
-          console.warn("[delegation] Failed to write .mcp.json:", err);
-        }
-      }
-
       // Spawn headless child sessions — no canvas panels, ephemeral
-      group.tasks.forEach((task, i) => {
+      // Each agent needs its own MCP config with a unique label, and we must
+      // await the file write before spawning so Claude CLI picks up the env vars.
+      const spawnChild = async (task: typeof group.tasks[0], i: number) => {
         const childSessionId = uuidv4();
         const childName = `[D] ${task.description.slice(0, 30)}`;
+        const agentLabel = `Agent ${i + 1}`;
 
         delStore.setTaskSessionId(group.id, task.id, childSessionId);
         delStore.updateTaskStatus(group.id, task.id, "running");
 
+        // Write per-agent MCP config so this child's MCP server gets the right label
+        if (delegationPort > 0) {
+          try {
+            await setT64DelegationEnv(appDir, delegationPort, group.id, agentLabel);
+          } catch (err) {
+            console.warn(`[delegation] Failed to set env for ${agentLabel}:`, err);
+          }
+        }
+
         const channelNote = delegationPort > 0
-          ? `\n\nYou have a team channel (t64-delegation). Messages from other agents appear as <channel> notifications. You can also use:
-- send_to_team: Share progress with the team chat
-- read_team: Read what other agents posted
-- report_done: Signal task completion with a summary
-Use send_to_team to post updates as you work.`
+          ? `\n\nIMPORTANT — Team Coordination via terminal-64 MCP:
+You are part of a team of ${tasks.length} agents working in the same codebase. You MUST use the team chat to coordinate:
+
+1. send_to_team — Post a message to the shared team chat. Do this:
+   • At the START of your work (announce what you're about to do)
+   • Before modifying any shared files (to avoid conflicts)
+   • After completing major milestones
+   • If you encounter issues or blockers
+2. read_team — Check what other agents have posted. Do this BEFORE starting work and periodically during long tasks to stay aware of what others are doing.
+3. report_done — When your task is fully complete, call this with a summary of what you did and what files you changed.
+
+Coordinate actively. If another agent is working on a file you need, mention it in team chat and work around it. Communication prevents conflicts.`
           : "";
 
-        const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, state your task is complete.`;
+        const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are "${agentLabel}" — one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, call report_done (if available) or explicitly say "task complete" with a summary.`;
 
         // Create ephemeral session in store (not saved to localStorage)
         useClaudeStore.getState().createSession(childSessionId, childName, true);
         addUserMessage(childSessionId, initialPrompt);
 
-        setTimeout(() => {
-          createClaudeSession({
+        try {
+          await createClaudeSession({
             session_id: childSessionId,
             cwd: appDir,
             prompt: initialPrompt,
             permission_mode: "bypass_all",
-            channel_server: delegationPort > 0 ? "t64-delegation" : undefined,
-          }).catch((err) => {
-            console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
-            delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
           });
-        }, i * 500);
-      });
+        } catch (err) {
+          console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
+          delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
+        }
+      };
+
+      // Spawn children sequentially with staggered delay so each gets its own
+      // MCP config written before Claude CLI reads .mcp.json at startup
+      (async () => {
+        for (let i = 0; i < group.tasks.length; i++) {
+          if (i > 0) await new Promise((r) => setTimeout(r, 500));
+          spawnChild(group.tasks[i], i);
+        }
+      })();
     },
-    [sessionId, effectiveCwd, addUserMessage],
+    [sessionId, effectiveCwd, addUserMessage, permMode.id],
   );
 
   // Detect delegation blocks in assistant messages and auto-spawn (only when /delegate was used)
@@ -688,11 +835,17 @@ Use send_to_team to post updates as you work.`
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 1L7 5L3 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </button>
         <div className="cc-topbar-left">
-          {/* MCP servers */}
+          {/* MCP servers — t64 built-in excluded from count but shown in dropdown */}
           <div className="cc-dropdown-wrap" onClick={(e) => e.stopPropagation()}>
-            <button className={`cc-dropdown-trigger cc-mcp-btn ${mcpServers.length > 0 ? "cc-mcp-btn--active" : ""} ${mcpServers.some((s: any) => s.status === "failed" || s.status === "error") ? "cc-mcp-btn--error" : ""}`} onClick={() => { setShowMcpDrop((v) => !v); setShowModelDrop(false); setShowEffortDrop(false); }}>
-              MCP{mcpServers.length > 0 ? ` (${mcpServers.length})` : ""}<span className="cc-chevron">▾</span>
-            </button>
+            {(() => {
+              const userMcp = mcpServers.filter((s: any) => s.name !== "terminal-64");
+              const hasError = mcpServers.some((s: any) => s.status === "failed" || s.status === "error");
+              return (
+                <button className={`cc-dropdown-trigger cc-mcp-btn ${userMcp.length > 0 ? "cc-mcp-btn--active" : ""} ${hasError ? "cc-mcp-btn--error" : ""}`} onClick={() => { setShowMcpDrop((v) => !v); setShowModelDrop(false); setShowEffortDrop(false); }}>
+                  MCP{userMcp.length > 0 ? ` (${userMcp.length})` : ""}<span className="cc-chevron">▾</span>
+                </button>
+              );
+            })()}
             {showMcpDrop && (
               <div className="cc-dropdown cc-mcp-dropdown">
                 {mcpServers.length === 0 ? (
@@ -702,12 +855,13 @@ Use send_to_team to post updates as you work.`
                     const status = s.status || "configured";
                     const isError = status === "failed" || status === "error";
                     const isConnected = status === "connected";
+                    const isBuiltIn = s.name === "terminal-64";
                     return (
-                      <div key={s.name} className="cc-mcp-item">
+                      <div key={s.name} className={`cc-mcp-item ${isBuiltIn ? "cc-mcp-item--builtin" : ""}`}>
                         <span className={`cc-mcp-dot ${isError ? "cc-mcp-dot--error" : isConnected ? "cc-mcp-dot--ok" : "cc-mcp-dot--idle"}`} />
                         <div className="cc-mcp-info">
-                          <span className="cc-mcp-name">{s.name}</span>
-                          <span className="cc-mcp-meta">{status}{s.transport ? ` · ${s.transport}` : ""}{s.scope ? ` · ${s.scope}` : ""}</span>
+                          <span className="cc-mcp-name">{isBuiltIn ? "T64" : s.name}</span>
+                          <span className="cc-mcp-meta">{status}{isBuiltIn ? " · built-in" : ""}{s.transport ? ` · ${s.transport}` : ""}{s.scope ? ` · ${s.scope}` : ""}</span>
                         </div>
                       </div>
                     );
@@ -917,23 +1071,32 @@ Use send_to_team to post updates as you work.`
             )}
             {(() => {
               const elements: React.ReactNode[] = [];
-              const msgs = session.messages;
+              const allMsgs = session.messages;
+              const startIdx = Math.max(0, allMsgs.length - visibleCount);
+              const msgs = allMsgs.slice(startIdx);
+              if (startIdx > 0) {
+                elements.push(
+                  <div key="load-more" className="cc-load-more" onClick={() => setVisibleCount((v) => Math.min(v + LOAD_MORE_BATCH, allMsgs.length))}>
+                    ▲ {startIdx} older message{startIdx !== 1 ? "s" : ""} — click or scroll up to load
+                  </div>
+                );
+              }
               let i = 0;
               while (i < msgs.length) {
                 const msg = msgs[i];
                 // Check for consecutive Read-only assistant messages
-                if (msg.role === "assistant" && !msg.content && msg.toolCalls?.length && msg.toolCalls.every((tc) => tc.name === "Read")) {
-                  const readTcs = [...msg.toolCalls];
+                if (msg.role === "assistant" && !msg.content && msg.toolCalls?.length && msg.toolCalls.every((tc) => GROUPABLE_TOOLS.has(tc.name))) {
+                  const groupTcs = [...msg.toolCalls];
                   let j = i + 1;
                   while (j < msgs.length) {
                     const next = msgs[j];
-                    if (next.role === "assistant" && !next.content && next.toolCalls?.length && next.toolCalls.every((tc) => tc.name === "Read")) {
-                      readTcs.push(...next.toolCalls);
+                    if (next.role === "assistant" && !next.content && next.toolCalls?.length && next.toolCalls.every((tc) => GROUPABLE_TOOLS.has(tc.name))) {
+                      groupTcs.push(...next.toolCalls);
                       j++;
                     } else break;
                   }
                   if (j > i + 1) {
-                    elements.push(<div key={`rg-${i}`} className="cc-message cc-message--assistant"><div className="cc-tc-list"><ReadGroupCard tcs={readTcs} /></div></div>);
+                    elements.push(<div key={`rg-${i}`} className="cc-message cc-message--assistant"><div className="cc-tc-list"><ToolGroupCard tcs={groupTcs} /></div></div>);
                     i = j;
                     continue;
                   }
@@ -943,10 +1106,10 @@ Use send_to_team to post updates as you work.`
               }
               return elements;
             })()}
-            {session.streamingText && (
+            {session.isStreaming && (
               <div className="cc-message cc-message--assistant">
                 <div className="cc-bubble cc-bubble--assistant cc-bubble--streaming">
-                  {session.streamingText}
+                  {session.streamingText || <span className="cc-thinking-text">Thinking...</span>}
                   <span className="cc-cursor" />
                 </div>
               </div>
@@ -1026,7 +1189,6 @@ Use send_to_team to post updates as you work.`
           )}
 
           <div className="cc-footer">
-            {isDelegationParent && <DelegationStatus sessionId={sessionId} />}
             {/* Prompt queue overlay — absolutely positioned upward from footer */}
             {session.promptQueue.length > 0 && (
               <div className={`cc-queue ${queueExpanded ? "cc-queue--expanded" : ""}`}>
@@ -1047,19 +1209,23 @@ Use send_to_team to post updates as you work.`
                 )}
               </div>
             )}
-            {planFinished && !session.isStreaming && (
+            {planFinished && !session.isStreaming && (() => {
+              const ctxPct = session.contextMax > 0 ? Math.min(100, Math.round((session.contextUsed / session.contextMax) * 100)) : 0;
+              return (
               <div className="cc-plan-finished">
                 <span className="cc-plan-finished-text">Plan complete</span>
+                {ctxPct > 0 && <span className={`cc-plan-ctx ${ctxPct >= 80 ? "cc-plan-ctx--warn" : ""}`}>{ctxPct}% context</span>}
                 <div className="cc-plan-finished-actions">
                   <button className="cc-plan-finished-btn cc-plan-finished-btn--accept" onClick={() => {
                     setPlanFinished(false);
                     setShowPlanViewer(false);
                     setPlanContent(null);
+                    setPermModeIdx(4); // YOLO
+                    // Queue the build prompt so it fires automatically after /compact finishes
+                    useClaudeStore.getState().enqueuePrompt(sessionId,
+                      "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about."
+                    );
                     handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
-                    setTimeout(() => {
-                      setPermModeIdx(4); // YOLO
-                      handleSend("Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.", "bypass_all");
-                    }, 2000);
                   }}>Compact &amp; Build</button>
                   <button className="cc-plan-finished-btn cc-plan-finished-btn--compact" onClick={() => {
                     setPlanFinished(false);
@@ -1088,7 +1254,8 @@ Use send_to_team to post updates as you work.`
                   <button className="cc-plan-finished-btn cc-plan-finished-btn--dismiss" onClick={() => { setPlanFinished(false); setShowPlanViewer(false); setPlanContent(null); }}>Dismiss</button>
                 </div>
               </div>
-            )}
+              );
+            })()}
             {session.pendingPermission ? (() => {
               const perm = session.pendingPermission;
               const hdr = toolHeader({ id: "", name: perm.toolName, input: perm.toolInput });
@@ -1162,8 +1329,6 @@ Use send_to_team to post updates as you work.`
                   queueCount={session.promptQueue.length}
                   draftPrompt={session.draftPrompt}
                   onDraftChange={(t) => setDraftPrompt(sessionId, t)}
-                  contextUsed={session.contextUsed}
-                  contextMax={session.contextMax}
                 />
               </>
             )}

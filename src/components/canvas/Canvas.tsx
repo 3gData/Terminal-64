@@ -2,21 +2,30 @@ import { useCallback, useRef, useEffect } from "react";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useShallow } from "zustand/react/shallow";
 import FloatingTerminal from "./FloatingTerminal";
-import LeftPanelContainer from "../panels/LeftPanelContainer";
+import { PartyEqualizer } from "../party/PartyOverlay";
 import "./Canvas.css";
 
 export default function Canvas() {
-  const { terminals, panX, panY, zoom } = useCanvasStore(useShallow((s) => ({
+  const { terminals, panX, panY, zoom, snapGuides } = useCanvasStore(useShallow((s) => ({
     terminals: s.terminals,
     panX: s.panX,
     panY: s.panY,
     zoom: s.zoom,
+    snapGuides: s.snapGuides,
   })));
   // Actions are stable refs — no need for shallow comparison
   const pan = useCanvasStore((s) => s.pan);
   const addTerminal = useCanvasStore((s) => s.addTerminal);
 
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // Center view on terminals on first mount
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    useCanvasStore.getState().centerView(rect.width, rect.height);
+  }, []);
 
   // Pan canvas by dragging on empty space
   const handleMouseDown = useCallback(
@@ -43,30 +52,72 @@ export default function Canvas() {
     [pan]
   );
 
-  // Zoom with scroll wheel (non-passive so preventDefault works)
+  // Smooth zoom + pan with trackpad/mouse
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
-    const handler = (e: WheelEvent) => {
-      if (e.ctrlKey) {
-        e.preventDefault();
+
+    // Track whether a native gesture is active so the wheel handler
+    // doesn't double-process pinch events (WebKit fires both)
+    let gesturing = false;
+    let gestureStartZoom = 1;
+
+    // --- macOS WebKit gesture events (pinch-to-zoom on trackpad) ---
+    const onGestureStart = (e: any) => {
+      e.preventDefault();
+      if ((e.target as HTMLElement)?.closest?.(".floating-terminal")) return;
+      gesturing = true;
+      gestureStartZoom = useCanvasStore.getState().zoom;
+    };
+    const onGestureChange = (e: any) => {
+      e.preventDefault();
+      if (!gesturing) return;
+      const rect = el.getBoundingClientRect();
+      const cx = (e.clientX ?? rect.width / 2) - rect.left;
+      const cy = (e.clientY ?? rect.height / 2) - rect.top;
+      const newZoom = Math.max(0.3, Math.min(2, gestureStartZoom * e.scale));
+      useCanvasStore.getState().zoomAtPoint(newZoom, cx, cy);
+    };
+    const onGestureEnd = (e: any) => {
+      e.preventDefault();
+      gesturing = false;
+    };
+
+    // --- Wheel events (ctrl+scroll on mouse, two-finger pan on trackpad) ---
+    const onWheel = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".floating-terminal")) return;
+      e.preventDefault();
+
+      // Skip zoom from wheel if gesture handler is already processing it
+      if (gesturing) return;
+
+      const s = useCanvasStore.getState();
+
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+scroll (mouse wheel) or fallback pinch-to-zoom
         const rect = el.getBoundingClientRect();
-        const cx = rect.width / 2;
-        const cy = rect.height / 2;
-        const s = useCanvasStore.getState();
-        const oldZoom = s.zoom;
-        const delta = e.deltaY > 0 ? -0.08 : 0.08;
-        const newZoom = Math.max(0.3, Math.min(2, oldZoom + delta));
-        // Adjust pan so the center stays fixed
-        const scale = newZoom / oldZoom;
-        const newPanX = cx - scale * (cx - s.panX);
-        const newPanY = cy - scale * (cy - s.panY);
-        s.setZoom(newZoom);
-        s.pan(newPanX - s.panX, newPanY - s.panY);
+        const cx = e.clientX - rect.left;
+        const cy = e.clientY - rect.top;
+        const clampedDelta = Math.max(-10, Math.min(10, e.deltaY));
+        const newZoom = Math.max(0.3, Math.min(2, s.zoom * Math.exp(-clampedDelta * 0.01)));
+        s.zoomAtPoint(newZoom, cx, cy);
+      } else {
+        // Two-finger scroll — pan
+        s.pan(-e.deltaX, -e.deltaY);
       }
     };
-    el.addEventListener("wheel", handler, { passive: false });
-    return () => el.removeEventListener("wheel", handler);
+
+    el.addEventListener("gesturestart", onGestureStart, { passive: false } as any);
+    el.addEventListener("gesturechange", onGestureChange, { passive: false } as any);
+    el.addEventListener("gestureend", onGestureEnd, { passive: false } as any);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("gesturestart", onGestureStart);
+      el.removeEventListener("gesturechange", onGestureChange);
+      el.removeEventListener("gestureend", onGestureEnd);
+      el.removeEventListener("wheel", onWheel);
+    };
   }, []);
 
   // Double-click to spawn terminal at cursor
@@ -91,8 +142,8 @@ export default function Canvas() {
       onMouseDown={handleMouseDown}
       onDoubleClick={handleDoubleClick}
       style={{
-        backgroundSize: "24px 24px",
-        backgroundPosition: `${panX % 24}px ${panY % 24}px`,
+        backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
+        backgroundPosition: `${panX % (24 * zoom)}px ${panY % (24 * zoom)}px`,
       }}
     >
       <div
@@ -105,8 +156,24 @@ export default function Canvas() {
         {terminals.map((term) => (
           <FloatingTerminal key={term.id} term={term} />
         ))}
-        <LeftPanelContainer />
+        {snapGuides.map((g, i) => (
+          <div
+            key={i}
+            className={`snap-guide snap-guide--${g.orientation}`}
+            style={g.orientation === "vertical" ? {
+              left: g.position,
+              top: g.start,
+              height: g.end - g.start,
+            } : {
+              left: g.start,
+              top: g.position,
+              width: g.end - g.start,
+            }}
+          />
+        ))}
       </div>
+
+      <PartyEqualizer />
 
       {terminals.length === 0 && (
         <div className="canvas-empty">
@@ -120,6 +187,7 @@ export default function Canvas() {
           {Math.round(zoom * 100)}%
         </div>
       )}
+
     </div>
   );
 }

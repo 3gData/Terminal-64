@@ -6,20 +6,48 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
 pub fn resolve_claude_path() -> String {
-    // Check common locations since macOS GUI apps don't inherit shell PATH
-    if let Ok(p) = std::process::Command::new("which").arg("claude").output() {
+    // Try the platform-appropriate PATH lookup (GUI apps often have a limited PATH)
+    let lookup = {
+        let (cmd, arg) = if cfg!(windows) { ("where", "claude.exe") } else { ("which", "claude") };
+        let mut c = std::process::Command::new(cmd);
+        c.arg(arg)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        c.output()
+    };
+    if let Ok(p) = lookup {
         if p.status.success() {
-            let s = String::from_utf8_lossy(&p.stdout).trim().to_string();
+            let s = String::from_utf8_lossy(&p.stdout)
+                .lines().next().unwrap_or("").trim().to_string();
             if !s.is_empty() { return s; }
         }
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        format!("{}/.local/bin/claude", home),
-        "/usr/local/bin/claude".to_string(),
-        format!("{}/.npm-global/bin/claude", home),
-        "/opt/homebrew/bin/claude".to_string(),
-    ];
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+
+    let mut candidates: Vec<String> = Vec::new();
+
+    if cfg!(windows) {
+        if let Some(ref h) = home {
+            candidates.push(format!("{}\\.local\\bin\\claude.exe", h));
+        }
+    } else {
+        if let Some(ref h) = home {
+            candidates.push(format!("{}/.local/bin/claude", h));
+            candidates.push(format!("{}/.npm-global/bin/claude", h));
+        }
+        candidates.push("/usr/local/bin/claude".to_string());
+        candidates.push("/opt/homebrew/bin/claude".to_string());
+    }
+
     for c in &candidates {
         if std::path::Path::new(c).exists() { return c.clone(); }
     }
@@ -70,9 +98,8 @@ fn build_command(
             cmd.arg("--allowedTools").arg(SAFE_TOOLS);
         }
         "plan" => {
-            // Plan mode: allow reads + plan tools + Write/Edit for plan files
-            cmd.arg("--permission-mode").arg("default");
-            cmd.arg("--allowedTools").arg(format!("{},Write,Edit", SAFE_TOOLS));
+            cmd.arg("--permission-mode").arg("plan");
+            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
         }
         "auto" => {
             cmd.arg("--permission-mode").arg("auto");
@@ -143,7 +170,7 @@ fn spawn_and_stream(
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                eprintln!("[claude:stderr:{}] {}", &sid_for_stderr[..8.min(sid_for_stderr.len())], line);
+                safe_eprintln!("[claude:stderr:{}] {}", &sid_for_stderr[..8.min(sid_for_stderr.len())], line);
                 if let Ok(mut b) = buf.lock() {
                     if b.len() < 4000 {
                         if !b.is_empty() { b.push('\n'); }
@@ -160,7 +187,7 @@ fn spawn_and_stream(
     let instances_clone = instances.clone();
 
     std::thread::spawn(move || {
-        eprintln!("[claude] Reader thread started for {} (gen {})", sid, gen);
+        safe_eprintln!("[claude] Reader thread started for {} (gen {})", sid, gen);
         let reader = std::io::BufReader::new(stdout);
         let mut had_output = false;
         for line in reader.lines() {
@@ -168,13 +195,15 @@ fn spawn_and_stream(
                 Ok(line) if line.trim().is_empty() => continue,
                 Ok(line) => {
                     had_output = true;
-                    let _ = handle.emit("claude-event", ClaudeEvent {
+                    if let Err(e) = handle.emit("claude-event", ClaudeEvent {
                         session_id: sid.clone(),
                         data: line,
-                    });
+                    }) {
+                        safe_eprintln!("[claude] Failed to emit claude-event for {}: {}", sid, e);
+                    }
                 }
                 Err(e) => {
-                    eprintln!("[claude] Reader error: {} for {}", e, sid);
+                    safe_eprintln!("[claude] Reader error: {} for {}", e, sid);
                     break;
                 }
             }
@@ -189,8 +218,8 @@ fn spawn_and_stream(
             } else {
                 stderr_msg
             };
-            eprintln!("[claude] No stdout output for {} — emitting error: {}", sid, &error_msg[..error_msg.len().min(200)]);
-            let _ = handle.emit("claude-event", ClaudeEvent {
+            safe_eprintln!("[claude] No stdout output for {} — emitting error: {}", sid, &error_msg[..error_msg.len().min(200)]);
+            if let Err(e) = handle.emit("claude-event", ClaudeEvent {
                 session_id: sid.clone(),
                 data: serde_json::json!({
                     "type": "result",
@@ -198,18 +227,34 @@ fn spawn_and_stream(
                     "is_error": true,
                     "result": error_msg
                 }).to_string(),
-            });
+            }) {
+                safe_eprintln!("[claude] Failed to emit error event for {}: {}", sid, e);
+            }
         }
-        eprintln!("[claude] Reader thread ended for {} (gen {})", sid, gen);
-        // Only clean up if this is still the current generation (prevent race with new spawn)
-        if let Ok(mut inst) = instances_clone.lock() {
+        safe_eprintln!("[claude] Reader thread ended for {} (gen {})", sid, gen);
+        // Only clean up and emit claude-done if this is still the current generation.
+        // A newer generation means the session was re-spawned — emitting claude-done
+        // from a stale reader would incorrectly flip isStreaming to false in the frontend.
+        let is_current = if let Ok(mut inst) = instances_clone.lock() {
             if let Some(instance) = inst.get(&sid) {
                 if instance.generation == gen {
                     inst.remove(&sid);
+                    true
+                } else {
+                    safe_eprintln!("[claude] Stale reader gen {} != current gen {} for {} — skipping claude-done", gen, instance.generation, sid);
+                    false
                 }
+            } else {
+                true // instance already removed, we're the last one
+            }
+        } else {
+            true // lock failed, emit anyway to avoid silent hangs
+        };
+        if is_current {
+            if let Err(e) = handle.emit("claude-done", ClaudeDone { session_id: sid.clone() }) {
+                safe_eprintln!("[claude] Failed to emit claude-done for {}: {}", sid, e);
             }
         }
-        let _ = handle.emit("claude-done", ClaudeDone { session_id: sid });
     });
 
     instances.lock().map_err(|e| e.to_string())?
@@ -225,7 +270,7 @@ impl ClaudeManager {
 
 
     pub fn create_session(&self, app_handle: &AppHandle, req: CreateClaudeRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
-        eprintln!("[claude] Creating session id={} cwd={}", req.session_id, req.cwd);
+        safe_eprintln!("[claude] Creating session id={} cwd={}", req.session_id, req.cwd);
         let cmd = build_command(
             "--session-id", &req.session_id, &req.prompt,
             &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path, &channel_server,
@@ -234,7 +279,7 @@ impl ClaudeManager {
     }
 
     pub fn send_prompt(&self, app_handle: &AppHandle, req: SendClaudePromptRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
-        eprintln!("[claude] Sending prompt to session {} (cwd: {})", req.session_id, req.cwd);
+        safe_eprintln!("[claude] Sending prompt to session {} (cwd: {})", req.session_id, req.cwd);
         let cmd = build_command(
             "--resume", &req.session_id, &req.prompt,
             &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path, &channel_server,
@@ -249,7 +294,7 @@ impl ClaudeManager {
             // remove it, and wait for file locks to release before spawning a new one.
             let _ = instance.child.kill();
             let _ = instance.child.wait();
-            eprintln!("[claude] Cancelled session {}", session_id);
+            safe_eprintln!("[claude] Cancelled session {}", session_id);
         }
         Ok(())
     }

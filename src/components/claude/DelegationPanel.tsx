@@ -1,7 +1,7 @@
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { performMerge } from "../../hooks/useDelegationOrchestrator";
-import { DelegationGroup, DelegateTask } from "../../lib/types";
+import { performMerge, endDelegation } from "../../hooks/useDelegationOrchestrator";
+import { DelegateTask } from "../../lib/types";
 import "./Delegation.css";
 
 interface DelegationPanelProps {
@@ -32,15 +32,7 @@ export default function DelegationPanel({ sessionId }: DelegationPanelProps) {
     if (term) canvas.bringToFront(term.id);
   };
 
-  const cancelAll = () => {
-    const delStore = useDelegationStore.getState();
-    for (const task of group.tasks) {
-      if (task.status === "running" || task.status === "pending") {
-        delStore.updateTaskStatus(group.id, task.id, "cancelled");
-      }
-    }
-    delStore.setGroupStatus(group.id, "cancelled");
-  };
+  const cancelAll = () => endDelegation(group.id);
 
   const handleMerge = () => {
     performMerge(group.id);

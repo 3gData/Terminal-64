@@ -524,7 +524,7 @@
 .shared-chat-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border, #313244);
   flex-shrink: 0;
@@ -536,9 +536,129 @@
   color: var(--fg, #cdd6f4);
 }
 
-.shared-chat-count {
-  font-size: 10px;
+.sc-progress {
+  font-size: 11px;
   color: var(--fg-muted, #6c7086);
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-status {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.sc-status--active { color: #a6e3a1; background: rgba(166, 227, 161, 0.1); }
+.sc-status--merging { color: #f9e2af; background: rgba(249, 226, 175, 0.1); }
+.sc-status--merged { color: #89b4fa; background: rgba(137, 180, 250, 0.1); }
+.sc-status--cancelled { color: var(--fg-muted, #6c7086); background: rgba(108, 112, 134, 0.1); }
+
+.sc-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sc-btn {
+  font-size: 10px;
+  padding: 2px 10px;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.sc-btn--end {
+  background: rgba(243, 139, 168, 0.15);
+  color: #f38ba8;
+}
+.sc-btn--end:hover { background: rgba(243, 139, 168, 0.25); }
+
+.sc-btn--merge {
+  background: #a6e3a1;
+  color: #1e1e2e;
+}
+.sc-btn--merge:hover { opacity: 0.9; }
+
+.sc-btn--dismiss {
+  background: var(--bg, #1e1e2e);
+  color: var(--fg-secondary, #bac2de);
+  border: 1px solid var(--border, #313244);
+}
+.sc-btn--dismiss:hover { border-color: var(--fg-muted, #6c7086); }
+
+.sc-merging {
+  font-size: 10px;
+  color: #f9e2af;
+  font-style: italic;
+}
+
+/* Compact task status bar */
+.sc-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, #313244);
+  flex-shrink: 0;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.sc-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.sc-task-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 10px;
+}
+
+.sc-task-icon--done { color: #a6e3a1; }
+.sc-task-icon--fail { color: #f38ba8; }
+.sc-task-icon--cancel { color: var(--fg-muted, #6c7086); }
+.sc-task-icon--pending { color: var(--fg-muted, #6c7086); }
+
+.sc-task-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #a6e3a1;
+  flex-shrink: 0;
+  animation: del-pulse 1.2s ease-in-out infinite;
+}
+
+.sc-task-desc {
+  flex: 1;
+  color: var(--fg, #cdd6f4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-task--completed .sc-task-desc {
+  color: var(--fg-muted, #6c7086);
+}
+
+.sc-task-action {
+  font-size: 9px;
+  color: var(--accent, #cba6f7);
+  flex-shrink: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shared-chat-messages {

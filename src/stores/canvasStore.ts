@@ -8,8 +8,9 @@ import {
   MIN_TERMINAL_HEIGHT,
   AUTO_SAVE_INTERVAL_MS,
 } from "../lib/constants";
+import type { SnapGuide } from "../lib/snapUtils";
 
-export type PanelType = "terminal" | "claude" | "shared-chat";
+export type PanelType = "terminal" | "claude" | "shared-chat" | "widget" | "browser";
 
 export interface CanvasTerminal {
   id: string;
@@ -25,6 +26,8 @@ export interface CanvasTerminal {
   cwd: string;
   panelType: PanelType;
   claudeSkipPermissions: boolean;
+  widgetId?: string;
+  browserUrl?: string;
 }
 
 interface CanvasState {
@@ -34,11 +37,14 @@ interface CanvasState {
   zoom: number;
   nextZ: number;
   activeTerminalId: string | null;
+  snapGuides: SnapGuide[];
 
   addTerminal: (x?: number, y?: number) => void;
   addClaudeTerminal: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string) => void;
   addClaudeTerminalAt: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string, x?: number, y?: number, width?: number, height?: number) => CanvasTerminal;
+  addWidgetTerminal: (widgetId: string, widgetName?: string) => CanvasTerminal;
   addSharedChatPanel: (groupId: string, x: number, y: number, width: number, height: number) => CanvasTerminal;
+  addBrowserPanel: (url: string, title?: string) => CanvasTerminal;
   removeTerminal: (id: string) => void;
   moveTerminal: (id: string, x: number, y: number) => void;
   resizeTerminal: (id: string, width: number, height: number) => void;
@@ -49,8 +55,12 @@ interface CanvasState {
   popOut: (id: string) => void;
   popIn: (terminalId: string) => void;
   setActive: (id: string) => void;
+  setSnapGuides: (guides: SnapGuide[]) => void;
+  clearSnapGuides: () => void;
   pan: (dx: number, dy: number) => void;
   setZoom: (zoom: number) => void;
+  zoomAtPoint: (newZoom: number, cx: number, cy: number) => void;
+  centerView: (viewportW: number, viewportH: number) => void;
   getAllTerminalIds: () => string[];
   saveSession: () => void;
   loadSession: () => boolean;
@@ -72,8 +82,7 @@ function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
     const raw = t as any;
     // Migrate legacy isClaudeSession to panelType
     const panelType: PanelType = raw.panelType ?? (raw.isClaudeSession ? "claude" : "terminal");
-    // Preserve terminalId for claude panels (needed for session/chat persistence)
-    const terminalId = (panelType === "claude" && raw.terminalId) ? raw.terminalId : uuidv4();
+    const terminalId = (panelType !== "terminal" && raw.terminalId) ? raw.terminalId : uuidv4();
     return {
       id: uuidv4(),
       terminalId,
@@ -88,6 +97,8 @@ function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
       cwd: t.cwd ?? "",
       panelType,
       claudeSkipPermissions: raw.claudeSkipPermissions ?? false,
+      widgetId: raw.widgetId,
+      browserUrl: raw.browserUrl,
     };
   });
 }
@@ -107,25 +118,9 @@ function makeTerminal(zIndex: number, overrides: Partial<CanvasTerminal> = {}): 
     cwd: "",
     panelType: "terminal",
     claudeSkipPermissions: false,
+    widgetId: undefined,
+    browserUrl: undefined,
     ...overrides,
-  };
-}
-
-function createDefaultTerminal(): CanvasTerminal {
-  return {
-    id: uuidv4(),
-    terminalId: uuidv4(),
-    x: 60,
-    y: 60,
-    width: DEFAULT_TERMINAL_WIDTH,
-    height: DEFAULT_TERMINAL_HEIGHT,
-    zIndex: 1,
-    title: "Terminal",
-    borderColor: DEFAULT_BORDER_COLOR,
-    poppedOut: false,
-    cwd: "",
-    panelType: "terminal",
-    claudeSkipPermissions: false,
   };
 }
 
@@ -144,12 +139,13 @@ function getInitialState() {
           zoom: session.zoom ?? 1,
           nextZ: terminals.length + 1,
           activeTerminalId: terminals[0]?.terminalId ?? null,
+          snapGuides: [],
         };
       }
     }
   } catch {}
 
-  const def = createDefaultTerminal();
+  const def = makeTerminal(1);
   return {
     terminals: [def],
     panX: 0,
@@ -157,6 +153,7 @@ function getInitialState() {
     zoom: 1,
     nextZ: 2,
     activeTerminalId: def.terminalId,
+    snapGuides: [],
   };
 }
 
@@ -222,6 +219,27 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       return newTerm;
     },
 
+    addWidgetTerminal: (widgetId, widgetName) => {
+      const state = get();
+      const newTerm = makeTerminal(state.nextZ, {
+        x: 80 + (state.terminals.length % 5) * 30,
+        y: 80 + (state.terminals.length % 5) * 30,
+        width: 500,
+        height: 400,
+        title: widgetName || widgetId,
+        borderColor: "#f9e2af",
+        panelType: "widget",
+        widgetId,
+      });
+      set({
+        terminals: [...state.terminals, newTerm],
+        nextZ: state.nextZ + 1,
+        activeTerminalId: newTerm.terminalId,
+      });
+      markDirty();
+      return newTerm;
+    },
+
     addSharedChatPanel: (groupId, x, y, width, height) => {
       const state = get();
       const newTerm = makeTerminal(state.nextZ, {
@@ -238,6 +256,29 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       set({
         terminals: [...state.terminals, newTerm],
         nextZ: state.nextZ + 1,
+      });
+      markDirty();
+      return newTerm;
+    },
+
+    addBrowserPanel: (url, title) => {
+      const state = get();
+      const browserId = `browser-${uuidv4().slice(0, 8)}`;
+      const newTerm = makeTerminal(state.nextZ, {
+        x: 80 + (state.terminals.length % 5) * 30,
+        y: 80 + (state.terminals.length % 5) * 30,
+        width: 900,
+        height: 600,
+        title: title || "Browser",
+        borderColor: "#89b4fa",
+        panelType: "browser",
+        terminalId: browserId,
+        browserUrl: url,
+      });
+      set({
+        terminals: [...state.terminals, newTerm],
+        nextZ: state.nextZ + 1,
+        activeTerminalId: newTerm.terminalId,
       });
       markDirty();
       return newTerm;
@@ -343,12 +384,54 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       set({ activeTerminalId: id });
     },
 
+    setSnapGuides: (guides: SnapGuide[]) => {
+      set({ snapGuides: guides });
+    },
+
+    clearSnapGuides: () => {
+      set({ snapGuides: [] });
+    },
+
     pan: (dx: number, dy: number) => {
       set((s) => ({ panX: s.panX + dx, panY: s.panY + dy }));
     },
 
     setZoom: (zoom: number) => {
       set({ zoom: Math.max(0.3, Math.min(2, zoom)) });
+    },
+
+    zoomAtPoint: (newZoom: number, cx: number, cy: number) => {
+      const s = get();
+      const clamped = Math.max(0.3, Math.min(2, newZoom));
+      const ratio = clamped / s.zoom;
+      set({
+        zoom: clamped,
+        panX: cx - (cx - s.panX) * ratio,
+        panY: cy - (cy - s.panY) * ratio,
+      });
+    },
+
+    centerView: (viewportW: number, viewportH: number) => {
+      const terms = get().terminals.filter((t) => !t.poppedOut);
+      if (terms.length === 0) return;
+      // Compute bounding box of all visible terminals
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const t of terms) {
+        minX = Math.min(minX, t.x);
+        minY = Math.min(minY, t.y);
+        maxX = Math.max(maxX, t.x + t.width);
+        maxY = Math.max(maxY, t.y + t.height);
+      }
+      const contentW = maxX - minX;
+      const contentH = maxY - minY;
+      const pad = 40; // padding around content
+      const zoom = Math.max(0.3, Math.min(1, Math.min(
+        (viewportW - pad * 2) / contentW,
+        (viewportH - pad * 2) / contentH,
+      )));
+      const panX = (viewportW - contentW * zoom) / 2 - minX * zoom;
+      const panY = (viewportH - contentH * zoom) / 2 - minY * zoom;
+      set({ panX, panY, zoom });
     },
 
     getAllTerminalIds: () => {
@@ -370,8 +453,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
             cwd: t.cwd,
             panelType: t.panelType,
             claudeSkipPermissions: t.claudeSkipPermissions,
-            // Persist terminalId for claude panels (session key for chat history)
-            ...(t.panelType === "claude" ? { terminalId: t.terminalId } : {}),
+            ...(t.panelType !== "terminal" ? { terminalId: t.terminalId } : {}),
+            ...(t.widgetId ? { widgetId: t.widgetId } : {}),
+            ...(t.browserUrl ? { browserUrl: t.browserUrl } : {}),
           })),
         panX: s.panX,
         panY: s.panY,

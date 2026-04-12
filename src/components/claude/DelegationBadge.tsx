@@ -49,7 +49,7 @@ export default function DelegationBadge({ sessionId }: DelegationBadgeProps) {
           session_id: sibId,
           cwd: sibSession.cwd || ".",
           prompt: forwardMsg,
-          permission_mode: "auto",
+          permission_mode: "bypass_all",
         }).catch((err) => console.warn(`[delegation] Manual forward failed:`, err));
       }
     }

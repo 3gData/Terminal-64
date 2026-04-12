@@ -49,7 +49,7 @@ impl DiscordBot {
             return Err("Bot already running".into());
         }
 
-        eprintln!("[discord] Starting bot for guild {}", guild_id);
+        safe_eprintln!("[discord] Starting bot for guild {}", guild_id);
 
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -73,14 +73,14 @@ impl DiscordBot {
         rt.block_on(async {
             let channels = match fetch_guild_channels(&state_for_init, &token_for_init).await {
                 Ok(ch) => ch,
-                Err(e) => { eprintln!("[discord] Failed to fetch channels: {}", e); return; }
+                Err(e) => { safe_eprintln!("[discord] Failed to fetch channels: {}", e); return; }
             };
             if let Err(e) = ensure_category(&state_for_init, &token_for_init, &channels).await {
-                eprintln!("[discord] Failed to ensure category: {}", e);
+                safe_eprintln!("[discord] Failed to ensure category: {}", e);
                 return;
             }
             if let Err(e) = restore_channel_mappings(&state_for_init, &channels).await {
-                eprintln!("[discord] Channel restore error: {}", e);
+                safe_eprintln!("[discord] Channel restore error: {}", e);
             }
         });
 
@@ -100,12 +100,12 @@ impl DiscordBot {
             loop {
                 if *shutdown_rx_gw.borrow() { break; }
                 if let Err(e) = run_gateway(&token_for_gw, &state_for_gw, &cm, &ah, &mut shutdown_rx_gw, &typing_stops_for_gw, &http_for_typing).await {
-                    eprintln!("[discord] Gateway error: {}, reconnecting in 5s...", e);
+                    safe_eprintln!("[discord] Gateway error: {}, reconnecting in 5s...", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
                 if *shutdown_rx_gw.borrow() { break; }
             }
-            eprintln!("[discord] Gateway loop ended");
+            safe_eprintln!("[discord] Gateway loop ended");
         });
 
         // Channel for forwarding messages to Discord from Tauri event listeners
@@ -184,7 +184,7 @@ impl DiscordBot {
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
-        eprintln!("[discord] Stopping bot");
+        safe_eprintln!("[discord] Stopping bot");
         // Drop unlisten handles to stop event listeners
         *self._unlisten_handles.lock().map_err(|e| e.to_string())? = Vec::new();
         if let Some(tx) = self.shutdown_tx.take() {
@@ -223,7 +223,7 @@ impl DiscordBot {
                     let _ = bs.http.delete(format!("{}/channels/{}", DISCORD_API, channel_id))
                         .header("Authorization", format!("Bot {}", bs.token))
                         .send().await;
-                    eprintln!("[discord] Deleted channel {} for session {}", channel_id, sid);
+                    safe_eprintln!("[discord] Deleted channel {} for session {}", channel_id, sid);
                 }
                 Ok(())
             })
@@ -302,7 +302,7 @@ impl DiscordBot {
                         .header("Authorization", format!("Bot {}", bs.token))
                         .json(&body)
                         .send().await;
-                    eprintln!("[discord] Renamed channel {} to #{}", channel_id, new_name);
+                    safe_eprintln!("[discord] Renamed channel {} to #{}", channel_id, new_name);
                     Ok(())
                 } else if !session_name.is_empty() {
                     // No channel yet — create one
@@ -335,7 +335,7 @@ async fn ensure_category(state: &Arc<TokioMutex<Option<BotState>>>, token: &str,
         if ch["type"] == 4 && ch["name"].as_str() == Some("Terminal 64") {
             let id = ch["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
             bs.category_id = Some(id);
-            eprintln!("[discord] Found category: {}", id);
+            safe_eprintln!("[discord] Found category: {}", id);
             return Ok(());
         }
     }
@@ -350,7 +350,7 @@ async fn ensure_category(state: &Arc<TokioMutex<Option<BotState>>>, token: &str,
     let cat: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let id = cat["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
     bs.category_id = Some(id);
-    eprintln!("[discord] Created category: {}", id);
+    safe_eprintln!("[discord] Created category: {}", id);
     Ok(())
 }
 
@@ -375,7 +375,7 @@ async fn run_gateway(
     let url = gw["url"].as_str().unwrap_or("wss://gateway.discord.gg");
     let ws_url = format!("{}/?v=10&encoding=json", url);
 
-    eprintln!("[discord] Connecting to gateway: {}", ws_url);
+    safe_eprintln!("[discord] Connecting to gateway: {}", ws_url);
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
         .await.map_err(|e| format!("WS connect: {}", e))?;
@@ -444,7 +444,7 @@ async fn run_gateway(
                             let username = d["author"]["username"].as_str().unwrap_or("user").to_string();
                             let attachments = d["attachments"].as_array();
 
-                            eprintln!("[discord] MESSAGE_CREATE in channel {} from {}: {}", channel_id, username, &content[..content.len().min(50)]);
+                            safe_eprintln!("[discord] MESSAGE_CREATE in channel {} from {}: {}", channel_id, username, &content[..content.len().min(50)]);
 
                             let has_attachments = attachments.map(|a| !a.is_empty()).unwrap_or(false);
                             if content.is_empty() && !has_attachments { continue; }
@@ -496,12 +496,12 @@ async fn run_gateway(
                                             Ok(resp) => {
                                                 if let Ok(bytes) = resp.bytes().await {
                                                     if std::fs::write(&dest, &bytes).is_ok() {
-                                                        eprintln!("[discord] Downloaded attachment: {} -> {}", filename, dest.display());
+                                                        safe_eprintln!("[discord] Downloaded attachment: {} -> {}", filename, dest.display());
                                                         attachment_lines.push(format!("[Attached file: {}]", dest.display()));
                                                     }
                                                 }
                                             }
-                                            Err(e) => eprintln!("[discord] Failed to download {}: {}", filename, e),
+                                            Err(e) => safe_eprintln!("[discord] Failed to download {}: {}", filename, e),
                                         }
                                     }
                                 }
@@ -513,7 +513,7 @@ async fn run_gateway(
                                     let files = attachment_lines.join("\n");
                                     if content.is_empty() { files } else { format!("{}\n\n{}", files, content) }
                                 };
-                                eprintln!("[discord] Routing to session {} (cwd: {}): {}", sid, session_cwd, &formatted_prompt[..formatted_prompt.len().min(100)]);
+                                safe_eprintln!("[discord] Routing to session {} (cwd: {}): {}", sid, session_cwd, &formatted_prompt[..formatted_prompt.len().min(100)]);
 
                                 // Show in the GUI as a user message
                                 let _ = app_handle.emit("discord-message", serde_json::json!({
@@ -545,7 +545,7 @@ async fn run_gateway(
                                         channel_server: None,
                                     }, None, None)
                                 } else {
-                                    eprintln!("[discord] First message — creating new session");
+                                    safe_eprintln!("[discord] First message — creating new session");
                                     claude_manager.create_session(app_handle, CreateClaudeRequest {
                                         session_id: sid.clone(),
                                         cwd: session_cwd.clone(),
@@ -556,11 +556,11 @@ async fn run_gateway(
                                     }, None, None)
                                 };
                                 if let Err(e) = result {
-                                    eprintln!("[discord] Prompt error: {}", e);
+                                    safe_eprintln!("[discord] Prompt error: {}", e);
                                 }
                             }
                         } else if event_name == "READY" {
-                            eprintln!("[discord] Gateway READY");
+                            safe_eprintln!("[discord] Gateway READY");
                         }
                     }
                     11 => {} // Heartbeat ACK
@@ -631,7 +631,7 @@ async fn restore_channel_mappings(state: &Arc<TokioMutex<Option<BotState>>>, cha
         }
     }
 
-    eprintln!("[discord] Restored {} channel mappings from existing channels", restored);
+    safe_eprintln!("[discord] Restored {} channel mappings from existing channels", restored);
     Ok(())
 }
 
@@ -657,7 +657,7 @@ async fn cleanup_orphaned_channels(state: &Arc<TokioMutex<Option<BotState>>>, to
 
         // If this channel isn't in our session map, it's orphaned
         if !bs.channel_to_session.contains_key(&ch_id) {
-            eprintln!("[discord] Deleting orphaned channel #{} ({})", ch_name, ch_id);
+            safe_eprintln!("[discord] Deleting orphaned channel #{} ({})", ch_name, ch_id);
             let _ = bs.http.delete(format!("{}/channels/{}", DISCORD_API, ch_id))
                 .header("Authorization", format!("Bot {}", token))
                 .send().await;
@@ -683,7 +683,7 @@ async fn create_session_channel(
         "topic": format!("Terminal 64: {}", session_id),
     });
 
-    eprintln!("[discord] Creating channel #{} for session {}", channel_name, session_id);
+    safe_eprintln!("[discord] Creating channel #{} for session {}", channel_name, session_id);
 
     let mut channel: serde_json::Value;
     let mut status;
@@ -700,7 +700,7 @@ async fn create_session_channel(
 
         if status.as_u16() == 429 && attempts < 3 {
             let retry_after = channel["retry_after"].as_f64().unwrap_or(1.0);
-            eprintln!("[discord] Rate limited, retrying in {:.1}s", retry_after);
+            safe_eprintln!("[discord] Rate limited, retrying in {:.1}s", retry_after);
             tokio::time::sleep(std::time::Duration::from_secs_f64(retry_after)).await;
             attempts += 1;
             continue;
@@ -717,7 +717,7 @@ async fn create_session_channel(
         return Err(format!("Failed to parse channel ID: {:?}", channel));
     }
 
-    eprintln!("[discord] Created #{} (ID: {}) for session {}", channel_name, channel_id, session_id);
+    safe_eprintln!("[discord] Created #{} (ID: {}) for session {}", channel_name, channel_id, session_id);
     bs.session_to_channel.insert(session_id.to_string(), channel_id);
     bs.channel_to_session.insert(channel_id, session_id.to_string());
     if !cwd.is_empty() {

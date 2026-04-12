@@ -81,3 +81,13 @@ pub struct McpServer {
     pub scope: String,
 }
 
+// Party Mode audio types
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpectrumData {
+    pub bands: Vec<f32>,  // 64 frequency band magnitudes, normalized 0.0-1.0
+    pub peak: f32,        // overall peak amplitude
+    pub bass: f32,        // average of low bands (sub-bass + bass)
+    pub mid: f32,         // average of mid bands
+    pub treble: f32,      // average of high bands
+}

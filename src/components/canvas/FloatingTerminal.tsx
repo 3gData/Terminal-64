@@ -2,11 +2,15 @@ import { useCallback, useRef, useState, useEffect } from "react";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, CanvasTerminal } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
-import { closeTerminal, writeTerminal, closeClaudeSession, renameDiscordSession } from "../../lib/tauriApi";
+import { closeTerminal, writeTerminal, closeClaudeSession, renameDiscordSession, closeBrowser } from "../../lib/tauriApi";
 import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
+import { computeDragSnap, computeResizeSnap } from "../../lib/snapUtils";
+import { useSettingsStore } from "../../stores/settingsStore";
 import XTerminal from "../terminal/XTerminal";
 import ClaudeChat from "../claude/ClaudeChat";
 import SharedChat from "../claude/SharedChat";
+import WidgetPanel from "../widget/WidgetPanel";
+import BrowserPanel from "../widget/BrowserPanel";
 import TextEditor from "./TextEditor";
 import "./FloatingTerminal.css";
 
@@ -17,7 +21,6 @@ interface FloatingTerminalProps {
 export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   // Reactive state — only re-render when these change
   const isActive = useCanvasStore((s) => s.activeTerminalId === term.terminalId);
-  const zoom = useCanvasStore((s) => s.zoom);
   // Stable action refs — won't cause re-renders
   const moveTerminal = useCanvasStore((s) => s.moveTerminal);
   const resizeTerminal = useCanvasStore((s) => s.resizeTerminal);
@@ -30,6 +33,9 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   const [editorOpen, setEditorOpen] = useState(false);
   const workTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef({ startX: 0, startY: 0, origX: 0, origY: 0 });
+  // Keep a live ref to term so drag/resize callbacks don't need term.x/y/w/h in deps
+  const termRef = useRef(term);
+  termRef.current = term;
 
   const handleActivity = useCallback(() => {
     setIsWorking(true);
@@ -43,6 +49,14 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
     };
   }, []);
 
+  // Close color picker on outside click
+  useEffect(() => {
+    if (!showColors) return;
+    const handler = () => setShowColors(false);
+    window.addEventListener("click", handler);
+    return () => window.removeEventListener("click", handler);
+  }, [showColors]);
+
   const handleHeaderMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if ((e.target as HTMLElement).closest(".ft-btn")) return;
@@ -52,25 +66,47 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
       bringToFront(term.id);
       setShowColors(false);
 
+      const t = termRef.current;
+      const curZoom = useCanvasStore.getState().zoom;
       const d = dragRef.current;
       d.startX = e.clientX;
       d.startY = e.clientY;
-      d.origX = term.x;
-      d.origY = term.y;
+      d.origX = t.x;
+      d.origY = t.y;
 
       const onMove = (ev: MouseEvent) => {
-        const dx = (ev.clientX - d.startX) / zoom;
-        const dy = (ev.clientY - d.startY) / zoom;
-        moveTerminal(term.id, d.origX + dx, d.origY + dy);
+        const dx = (ev.clientX - d.startX) / curZoom;
+        const dy = (ev.clientY - d.startY) / curZoom;
+        const rawX = d.origX + dx;
+        const rawY = d.origY + dy;
+
+        if (!useSettingsStore.getState().snapToGrid) {
+          moveTerminal(term.id, rawX, rawY);
+          return;
+        }
+
+        const state = useCanvasStore.getState();
+        const self = state.terminals.find((s) => s.id === term.id);
+        const dragW = self?.width ?? t.width;
+        const dragH = self?.height ?? t.height;
+
+        const others = state.terminals
+          .filter((s) => s.id !== term.id && !s.poppedOut)
+          .map((s) => ({ x: s.x, y: s.y, width: s.width, height: s.height }));
+
+        const snap = computeDragSnap({ x: rawX, y: rawY, width: dragW, height: dragH }, others);
+        moveTerminal(term.id, snap.x, snap.y);
+        useCanvasStore.getState().setSnapGuides(snap.guides);
       };
       const onUp = () => {
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
+        useCanvasStore.getState().clearSnapGuides();
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [term.id, term.x, term.y, zoom, moveTerminal, bringToFront]
+    [term.id, moveTerminal, bringToFront]
   );
 
   const startEdgeResize = useCallback(
@@ -79,47 +115,68 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
       e.stopPropagation();
       bringToFront(term.id);
 
+      const t = termRef.current;
+      const curZoom = useCanvasStore.getState().zoom;
       const startX = e.clientX;
       const startY = e.clientY;
-      const origX = term.x;
-      const origY = term.y;
-      const origW = term.width;
-      const origH = term.height;
+      const origX = t.x;
+      const origY = t.y;
+      const origW = t.width;
+      const origH = t.height;
 
       const onMove = (ev: MouseEvent) => {
-        const dx = (ev.clientX - startX) / zoom;
-        const dy = (ev.clientY - startY) / zoom;
+        const dx = (ev.clientX - startX) / curZoom;
+        const dy = (ev.clientY - startY) / curZoom;
 
         let newX = origX, newY = origY, newW = origW, newH = origH;
 
         if (edge.includes("e")) newW = origW + dx;
         if (edge.includes("s")) newH = origH + dy;
         if (edge.includes("w")) { newW = origW - dx; newX = origX + dx; }
-        if (edge === "n" || edge === "nw" || edge === "ne") { newH = origH - dy; newY = origY + dy; }
+        if (edge.includes("n")) { newH = origH - dy; newY = origY + dy; }
 
-        newW = Math.max(300, newW);
-        newH = Math.max(200, newH);
-        // Clamp position if size hit minimum
-        if (newW === 300 && edge.includes("w")) newX = origX + origW - 300;
-        if (newH === 200 && (edge === "n" || edge === "nw" || edge === "ne")) newY = origY + origH - 200;
+        if (!useSettingsStore.getState().snapToGrid) {
+          newW = Math.max(300, newW);
+          newH = Math.max(200, newH);
+          if (newW === 300 && edge.includes("w")) newX = origX + origW - 300;
+          if (newH === 200 && edge.includes("n")) newY = origY + origH - 200;
+          resizeTerminal(term.id, newW, newH);
+          moveTerminal(term.id, newX, newY);
+          return;
+        }
 
-        resizeTerminal(term.id, newW, newH);
-        moveTerminal(term.id, newX, newY);
+        const others = useCanvasStore.getState().terminals
+          .filter((s) => s.id !== term.id && !s.poppedOut)
+          .map((s) => ({ x: s.x, y: s.y, width: s.width, height: s.height }));
+
+        const snap = computeResizeSnap({ x: newX, y: newY, width: newW, height: newH }, edge, others);
+
+        snap.width = Math.max(300, snap.width);
+        snap.height = Math.max(200, snap.height);
+        if (snap.width === 300 && edge.includes("w")) snap.x = origX + origW - 300;
+        if (snap.height === 200 && edge.includes("n")) snap.y = origY + origH - 200;
+
+        resizeTerminal(term.id, snap.width, snap.height);
+        moveTerminal(term.id, snap.x, snap.y);
+        useCanvasStore.getState().setSnapGuides(snap.guides);
       };
       const onUp = () => {
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
+        useCanvasStore.getState().clearSnapGuides();
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [term.id, term.x, term.y, term.width, term.height, zoom, resizeTerminal, moveTerminal, bringToFront]
+    [term.id, resizeTerminal, moveTerminal, bringToFront]
   );
 
   const handleClose = useCallback(() => {
     if (term.panelType === "claude") {
       closeClaudeSession(term.terminalId).catch(() => {});
-    } else {
+    } else if (term.panelType === "browser") {
+      closeBrowser(term.terminalId).catch(() => {});
+    } else if (term.panelType !== "widget" && term.panelType !== "shared-chat") {
       closeTerminal(term.terminalId).catch(() => {});
     }
     removeTerminal(term.id);
@@ -168,6 +225,8 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
 
   const isClaude = term.panelType === "claude";
   const isSharedChat = term.panelType === "shared-chat";
+  const isWidget = term.panelType === "widget";
+  const isBrowser = term.panelType === "browser";
   const claudeSessionName = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.name : undefined);
   const claudeCwd = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.cwd : undefined);
 
@@ -184,7 +243,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
 
   return (
     <div
-      className={`floating-terminal ${isWorking ? "floating-terminal--working" : ""}`}
+      className={`floating-terminal ${isWorking ? "floating-terminal--working" : ""} ${isWidget ? "floating-terminal--widget" : ""}`}
       style={{
         left: term.x,
         top: term.y,
@@ -195,8 +254,9 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
       } as React.CSSProperties}
       onMouseDown={handleFocus}
     >
-      {/* Header */}
-      <div className="ft-header" onMouseDown={handleHeaderMouseDown}>
+      {/* Header — widgets wrap in hover zone */}
+      {isWidget && <div className="ft-widget-hover-zone" />}
+      <div className={`ft-header ${isWidget ? "ft-header--widget" : ""}`} onMouseDown={handleHeaderMouseDown}>
         {isClaude ? (
           editingName ? (
             <>
@@ -252,7 +312,7 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
         ) : (
           <span className="ft-title">{term.title}</span>
         )}
-        {!isClaude && !isSharedChat && (
+        {!isClaude && !isSharedChat && !isWidget && !isBrowser && (
           <button
             className="ft-btn"
             onClick={(e) => { e.stopPropagation(); handlePopOut(); }}
@@ -265,27 +325,27 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
             </svg>
           </button>
         )}
+        {!isSharedChat && !isWidget && (
+          <button
+            className="ft-btn ft-btn--settings"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowColors((v) => !v);
+            }}
+            title="Border color"
+          >
+            <div
+              className="ft-color-dot"
+              style={{ background: term.borderColor }}
+            />
+          </button>
+        )}
         {!isSharedChat && (
-          <>
-            <button
-              className="ft-btn ft-btn--settings"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowColors((v) => !v);
-              }}
-              title="Border color"
-            >
-              <div
-                className="ft-color-dot"
-                style={{ background: term.borderColor }}
-              />
-            </button>
-            <button className="ft-btn" onClick={handleClose} title="Close">
-              <svg width="9" height="9" viewBox="0 0 9 9">
-                <path d="M1 1L8 8M8 1L1 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </button>
-          </>
+          <button className="ft-btn" onClick={handleClose} title="Close">
+            <svg width="9" height="9" viewBox="0 0 9 9">
+              <path d="M1 1L8 8M8 1L1 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
         )}
       </div>
 
@@ -315,6 +375,14 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
             <path d="M9 1L5 5" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
           </svg>
           <span>POPPED OUT</span>
+        </div>
+      ) : isBrowser ? (
+        <div className="ft-body ft-body--claude">
+          <BrowserPanel browserId={term.terminalId} initialUrl={term.browserUrl || "https://google.com"} />
+        </div>
+      ) : isWidget && term.widgetId ? (
+        <div className="ft-body ft-body--claude">
+          <WidgetPanel widgetId={term.widgetId} />
         </div>
       ) : isSharedChat ? (
         <div className="ft-body ft-body--claude">

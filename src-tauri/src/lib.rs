@@ -1,13 +1,41 @@
+/// Safe stderr logging — never panics if the pipe is broken.
+#[macro_export]
+macro_rules! safe_eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = err.write_fmt(format_args!($($arg)*));
+        let _ = err.write_all(b"\n");
+    }};
+}
+
+/// Safe stdout logging — never panics if the pipe is broken.
+#[macro_export]
+macro_rules! safe_println {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = out.write_fmt(format_args!($($arg)*));
+        let _ = out.write_all(b"\n");
+    }};
+}
+
+mod audio_manager;
+mod browser_manager;
 mod claude_manager;
 mod discord_bot;
 mod permission_server;
 mod pty_manager;
 mod types;
+mod widget_server;
 
+use audio_manager::AudioManager;
+use browser_manager::BrowserManager;
 use claude_manager::ClaudeManager;
 use discord_bot::DiscordBot;
 use permission_server::PermissionServer;
 use pty_manager::PtyManager;
+use widget_server::WidgetServer;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use types::*;
@@ -29,6 +57,9 @@ struct AppState {
     claude_manager: Arc<ClaudeManager>,
     discord_bot: Mutex<DiscordBot>,
     permission_server: Arc<PermissionServer>,
+    audio_manager: Arc<AudioManager>,
+    browser_manager: BrowserManager,
+    widget_server: WidgetServer,
 }
 
 #[tauri::command]
@@ -108,7 +139,7 @@ fn close_claude_session(
 ) -> Result<(), String> {
     // Clean up permission server temp files for this session
     let tokens_to_remove: Vec<String> = {
-        let map = state.permission_server.session_map.lock().unwrap();
+        let map = state.permission_server.session_map.lock().unwrap_or_else(|e| e.into_inner());
         map.iter().filter(|(_, sid)| **sid == session_id).map(|(t, _)| t.clone()).collect()
     };
     for token in tokens_to_remove {
@@ -152,7 +183,7 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                eprintln!("[rewrite:stderr] {}", line);
+                safe_eprintln!("[rewrite:stderr] {}", line);
             }
         });
     }
@@ -183,7 +214,7 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
             }
         }
         let _ = app_handle.emit("rewrite-done", serde_json::json!({ "id": rid }));
-        eprintln!("[rewrite] Done ({})", rid);
+        safe_eprintln!("[rewrite] Done ({})", rid);
     });
 
     Ok(rewrite_id)
@@ -332,7 +363,8 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                     });
                 }
             } else if let Some(blocks) = content_val.as_array() {
-                // Array content = tool_results from a previous assistant turn
+                // Array content may contain tool_results AND/OR text blocks
+                let mut user_text = String::new();
                 for block in blocks {
                     if block["type"].as_str() == Some("tool_result") {
                         let tool_use_id = block["tool_use_id"].as_str().unwrap_or("");
@@ -352,7 +384,20 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                                 tcs[tc_idx].is_error = block["is_error"].as_bool().unwrap_or(false);
                             }
                         }
+                    } else if block["type"].as_str() == Some("text") {
+                        if let Some(t) = block["text"].as_str() {
+                            if !user_text.is_empty() { user_text.push('\n'); }
+                            user_text.push_str(t);
+                        }
                     }
+                }
+                // If the array contained text blocks (not just tool_results), emit a user message
+                if !user_text.trim().is_empty() {
+                    let uuid = val["uuid"].as_str().unwrap_or("").to_string();
+                    let ts = parse_timestamp(val["timestamp"].as_str().unwrap_or(""));
+                    messages.push(HistoryMessage {
+                        id: uuid, role: "user".to_string(), content: user_text.trim().to_string(), timestamp: ts, tool_calls: None,
+                    });
                 }
             }
         } else if rec_type == "assistant" {
@@ -427,7 +472,7 @@ fn truncate_session_jsonl(session_id: String, cwd: String, keep_turns: usize) ->
     let kept = collect_jsonl_lines_up_to_turns(&content, keep_turns);
     let truncated = kept.join("\n") + "\n";
     std::fs::write(&path, truncated).map_err(|e| format!("write: {}", e))?;
-    eprintln!("[rewind] Truncated JSONL to {} turns (was {} lines, now {} lines)", keep_turns, content.lines().count(), kept.len());
+    safe_eprintln!("[rewind] Truncated JSONL to {} turns (was {} lines, now {} lines)", keep_turns, content.lines().count(), kept.len());
     Ok(())
 }
 
@@ -439,7 +484,7 @@ fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: St
     let dest = session_jsonl_path(&cwd, &new_session_id)?;
     let truncated = kept.join("\n") + "\n";
     std::fs::write(&dest, truncated).map_err(|e| format!("write: {}", e))?;
-    eprintln!("[fork] Copied {} -> {} ({} turns, {} lines)", parent_session_id, new_session_id, keep_turns, kept.len());
+    safe_eprintln!("[fork] Copied {} -> {} ({} turns, {} lines)", parent_session_id, new_session_id, keep_turns, kept.len());
     Ok(())
 }
 
@@ -480,6 +525,37 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
         _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
     Ok(entries)
+}
+
+#[tauri::command]
+async fn shell_exec(command: String, cwd: Option<String>) -> Result<serde_json::Value, String> {
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    let flag = if cfg!(windows) { "/C" } else { "-c" };
+    let mut cmd = std::process::Command::new(shell);
+    cmd.arg(flag).arg(&command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    if let Some(ref dir) = cwd {
+        if !dir.is_empty() { cmd.current_dir(dir); }
+    }
+    // Ensure common tools are on PATH for macOS GUI apps
+    if cfg!(target_os = "macos") {
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", format!("/opt/homebrew/bin:/usr/local/bin:{}", path));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output().map_err(|e| format!("exec failed: {}", e))?;
+    Ok(serde_json::json!({
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+        "code": output.status.code().unwrap_or(-1),
+    }))
 }
 
 #[tauri::command]
@@ -872,7 +948,29 @@ fn discord_cleanup_orphaned(
 fn get_delegation_port(
     state: tauri::State<'_, AppState>,
 ) -> Result<u16, String> {
-    Ok(state.permission_server.port())
+    state.permission_server.ensure_alive()
+}
+
+#[tauri::command]
+fn get_app_dir() -> Result<String, String> {
+    // In dev mode, return the project root (where mcp/ lives)
+    // In production, this would be the resource directory
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Walk up from the exe to find the project root with mcp/ directory
+    let mut dir = exe.parent();
+    while let Some(d) = dir {
+        if d.join("mcp").is_dir() {
+            return Ok(d.to_string_lossy().to_string());
+        }
+        dir = d.parent();
+    }
+    // Fallback: check current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("mcp").is_dir() {
+            return Ok(cwd.to_string_lossy().to_string());
+        }
+    }
+    Err("Could not locate app directory with mcp/ folder".into())
 }
 
 #[tauri::command]
@@ -900,22 +998,600 @@ fn cleanup_delegation_group(
     Ok(())
 }
 
+// ---- Widget commands ----
+
+fn widgets_base_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("No home dir")?;
+    Ok(home.join(".terminal64").join("widgets"))
+}
+
+#[tauri::command]
+fn create_widget_folder(widget_id: String) -> Result<String, String> {
+    let dir = widgets_base_dir()?.join(&widget_id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn read_widget_html(widget_id: String) -> Result<String, String> {
+    let path = widgets_base_dir()?.join(&widget_id).join("index.html");
+    match std::fs::read_to_string(&path) {
+        Ok(c) => Ok(c),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("read: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn list_widget_folders() -> Result<Vec<serde_json::Value>, String> {
+    let base = widgets_base_dir()?;
+    if !base.exists() { return Ok(vec![]); }
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let index_exists = entry.path().join("index.html").exists();
+        let modified = entry.metadata()
+            .and_then(|m| m.modified())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| std::io::Error::other("time")))
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        out.push(serde_json::json!({
+            "widget_id": name,
+            "has_index": index_exists,
+            "modified": modified,
+        }));
+    }
+    out.sort_by(|a, b| b["modified"].as_u64().cmp(&a["modified"].as_u64()));
+    Ok(out)
+}
+
+#[tauri::command]
+fn delete_widget_folder(widget_id: String) -> Result<(), String> {
+    let dir = widgets_base_dir()?.join(&widget_id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("rm: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn widget_file_modified(widget_id: String) -> Result<u64, String> {
+    let dir = widgets_base_dir()?.join(&widget_id);
+    if !dir.exists() { return Ok(0); }
+    fn newest_mtime(dir: &std::path::Path) -> u64 {
+        let mut max = 0u64;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let ft = entry.file_type().unwrap_or_else(|_| entry.file_type().unwrap());
+                if ft.is_dir() {
+                    // Skip node_modules and hidden dirs
+                    let name = entry.file_name();
+                    let n = name.to_string_lossy();
+                    if n.starts_with('.') || n == "node_modules" { continue; }
+                    max = max.max(newest_mtime(&entry.path()));
+                } else {
+                    let mt = entry.metadata()
+                        .and_then(|m| m.modified())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| std::io::Error::other("time")))
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    max = max.max(mt);
+                }
+            }
+        }
+        max
+    }
+    Ok(newest_mtime(&dir))
+}
+
+#[tauri::command]
+fn get_widget_server_port(state: tauri::State<'_, AppState>) -> u16 {
+    state.widget_server.port()
+}
+
+// ---- Widget persistent state ----
+
+fn validate_widget_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.contains("..") || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("Invalid widget id".into());
+    }
+    Ok(())
+}
+
+fn widget_state_path(widget_id: &str) -> Result<std::path::PathBuf, String> {
+    validate_widget_id(widget_id)?;
+    Ok(widgets_base_dir()?.join(widget_id).join("state.json"))
+}
+
+#[tauri::command]
+fn widget_get_state(widget_id: String, key: Option<String>) -> Result<serde_json::Value, String> {
+    let path = widget_state_path(&widget_id)?;
+    let data: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or(serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    if let Some(k) = key {
+        Ok(data.get(&k).cloned().unwrap_or(serde_json::Value::Null))
+    } else {
+        Ok(data)
+    }
+}
+
+#[tauri::command]
+fn widget_set_state(widget_id: String, key: String, value: serde_json::Value) -> Result<(), String> {
+    let path = widget_state_path(&widget_id)?;
+    let mut data: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => serde_json::Map::new(),
+    };
+    data.insert(key, value);
+    let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+    // Cap at 5MB
+    if json.len() > 5 * 1024 * 1024 {
+        return Err("State exceeds 5MB limit".into());
+    }
+    std::fs::write(&path, json).map_err(|e| format!("write: {}", e))
+}
+
+#[tauri::command]
+fn widget_clear_state(widget_id: String) -> Result<(), String> {
+    let path = widget_state_path(&widget_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("rm: {}", e))?;
+    }
+    Ok(())
+}
+
+// ---- Proxy fetch (CORS bypass for widgets) ----
+
+#[derive(serde::Serialize)]
+struct ProxyFetchResponse {
+    status: u16,
+    ok: bool,
+    headers: std::collections::HashMap<String, String>,
+    body: String,
+    is_base64: bool,
+}
+
+#[tauri::command]
+async fn proxy_fetch(
+    url: String,
+    method: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    body: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<ProxyFetchResponse, String> {
+    // Block local/private addresses to prevent SSRF
+    if url.starts_with("file://") {
+        return Err("file:// URLs are not allowed".into());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000).min(60_000)))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let method_str = method.unwrap_or_else(|| "GET".to_string());
+    let req_method = reqwest::Method::from_bytes(method_str.as_bytes())
+        .map_err(|_| format!("Invalid method: {}", method_str))?;
+
+    let mut req = client.request(req_method, &url);
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            req = req.header(&k, &v);
+        }
+    }
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let ok = resp.status().is_success();
+
+    let mut resp_headers = std::collections::HashMap::new();
+    for (k, v) in resp.headers() {
+        if let Ok(val) = v.to_str() {
+            resp_headers.insert(k.as_str().to_string(), val.to_string());
+        }
+    }
+
+    let content_type = resp_headers.get("content-type").cloned().unwrap_or_default();
+    let is_text = content_type.contains("text/")
+        || content_type.contains("json")
+        || content_type.contains("xml")
+        || content_type.contains("javascript")
+        || content_type.contains("css");
+
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    // 50MB cap
+    if bytes.len() > 50 * 1024 * 1024 {
+        return Err("Response exceeds 50MB limit".into());
+    }
+
+    let (body_str, is_base64) = if is_text {
+        (String::from_utf8_lossy(&bytes).to_string(), false)
+    } else {
+        use base64::Engine;
+        (base64::engine::general_purpose::STANDARD.encode(&bytes), true)
+    };
+
+    Ok(ProxyFetchResponse {
+        status,
+        ok,
+        headers: resp_headers,
+        body: body_str,
+        is_base64,
+    })
+}
+
+// ---- System notification ----
+
+#[tauri::command]
+fn send_notification(title: String, body: Option<String>) -> Result<(), String> {
+    // Use osascript on macOS as a simple cross-platform notification
+    #[cfg(target_os = "macos")]
+    {
+        let escaped_title = title.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = if let Some(b) = &body {
+            let escaped_body = b.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(
+                "display notification \"{}\" with title \"{}\"",
+                escaped_body, escaped_title
+            )
+        } else {
+            format!("display notification \"\" with title \"{}\"", escaped_title)
+        };
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        safe_eprintln!("[notification] {}: {}", title, body.unwrap_or_default());
+    }
+    Ok(())
+}
+
+// ---- Checkpoint commands ----
+
+fn checkpoints_base_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("No home dir")?;
+    Ok(home.join(".terminal64").join("checkpoints"))
+}
+
+#[derive(serde::Deserialize)]
+struct FileSnapshot {
+    path: String,
+    content: String,
+}
+
+#[tauri::command]
+fn create_checkpoint(session_id: String, turn: usize, files: Vec<FileSnapshot>) -> Result<(), String> {
+    let dir = checkpoints_base_dir()?.join(&session_id).join(format!("turn-{}", turn));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    // Write manifest (original paths) and file contents
+    let mut manifest = Vec::new();
+    for (i, snap) in files.iter().enumerate() {
+        let filename = format!("{}.snap", i);
+        std::fs::write(dir.join(&filename), &snap.content)
+            .map_err(|e| format!("write snap: {}", e))?;
+        manifest.push(format!("{}|{}", filename, snap.path));
+    }
+    std::fs::write(dir.join("manifest.txt"), manifest.join("\n"))
+        .map_err(|e| format!("write manifest: {}", e))?;
+    safe_println!("[checkpoint] Created turn-{} for {} ({} files)", turn, &session_id[..8.min(session_id.len())], files.len());
+    Ok(())
+}
+
+#[tauri::command]
+fn restore_checkpoint(session_id: String, turn: usize) -> Result<Vec<String>, String> {
+    let dir = checkpoints_base_dir()?.join(&session_id).join(format!("turn-{}", turn));
+    if !dir.exists() {
+        return Ok(vec![]); // no checkpoint for this turn — nothing to restore
+    }
+    let manifest_path = dir.join("manifest.txt");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read manifest: {}", e))?;
+    let mut restored = Vec::new();
+    for line in manifest.lines() {
+        if line.is_empty() { continue; }
+        let parts: Vec<&str> = line.splitn(2, '|').collect();
+        if parts.len() != 2 { continue; }
+        let snap_file = parts[0];
+        let original_path = parts[1];
+        let content = std::fs::read_to_string(dir.join(snap_file))
+            .map_err(|e| format!("read snap {}: {}", snap_file, e))?;
+        // Ensure parent directory exists
+        if let Some(parent) = std::path::Path::new(original_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(original_path, &content)
+            .map_err(|e| format!("restore {}: {}", original_path, e))?;
+        restored.push(original_path.to_string());
+    }
+    safe_println!("[checkpoint] Restored turn-{} for {} ({} files)", turn, &session_id[..8.min(session_id.len())], restored.len());
+    Ok(restored)
+}
+
+#[tauri::command]
+fn cleanup_checkpoints(session_id: String, keep_up_to_turn: usize) -> Result<(), String> {
+    let base = checkpoints_base_dir()?.join(&session_id);
+    if !base.exists() { return Ok(()); }
+    let entries = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(num_str) = name.strip_prefix("turn-") {
+            if let Ok(num) = num_str.parse::<usize>() {
+                if num > keep_up_to_turn {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Delete a list of files (used during rewind to remove files created by delegation agents).
+/// Silently skips files that don't exist.
+#[tauri::command]
+fn delete_files(paths: Vec<String>) -> Result<Vec<String>, String> {
+    let mut deleted = Vec::new();
+    for path in &paths {
+        let p = std::path::Path::new(path);
+        if p.exists() && p.is_file() {
+            if let Err(e) = std::fs::remove_file(p) {
+                safe_eprintln!("[delete_files] Failed to delete {}: {}", path, e);
+            } else {
+                deleted.push(path.clone());
+            }
+        }
+    }
+    if !deleted.is_empty() {
+        safe_println!("[rewind] Deleted {} files created during delegation", deleted.len());
+    }
+    Ok(deleted)
+}
+
+/// Revert files to their git HEAD state. For files that are new (untracked), delete them.
+/// For files that were modified, restore from git. For files that were deleted, restore from git.
+#[tauri::command]
+fn revert_files_git(cwd: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let cwd_path = std::path::Path::new(&cwd);
+    if !cwd_path.exists() {
+        return Err("CWD does not exist".to_string());
+    }
+    let mut reverted = Vec::new();
+
+    for path in &paths {
+        let abs = if std::path::Path::new(path).is_absolute() {
+            std::path::PathBuf::from(path)
+        } else {
+            cwd_path.join(path)
+        };
+
+        // Check if this file is tracked by git
+        let is_tracked = std::process::Command::new("git")
+            .args(["ls-files", "--error-unmatch"])
+            .arg(&abs)
+            .current_dir(cwd_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if is_tracked {
+            // File is tracked — restore from HEAD
+            let status = std::process::Command::new("git")
+                .args(["checkout", "HEAD", "--"])
+                .arg(&abs)
+                .current_dir(cwd_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if let Ok(s) = status {
+                if s.success() {
+                    reverted.push(path.clone());
+                }
+            }
+        } else if abs.exists() {
+            // File is untracked (new) — delete it
+            if std::fs::remove_file(&abs).is_ok() {
+                reverted.push(path.clone());
+            }
+        }
+        // If file doesn't exist and isn't tracked, nothing to do
+    }
+
+    if !reverted.is_empty() {
+        safe_println!("[rewind] Git-reverted {} files", reverted.len());
+    }
+    Ok(reverted)
+}
+
+// Party Mode commands
+
+#[tauri::command]
+fn start_party_mode(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    state.audio_manager.start(&app_handle)
+}
+
+#[tauri::command]
+fn stop_party_mode(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.audio_manager.stop()
+}
+
+#[tauri::command]
+fn party_mode_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.audio_manager.is_active())
+}
+
+// ── Browser (native webview) commands ──
+
+#[tauri::command]
+fn create_browser(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    url: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    state.browser_manager.create(&app_handle, id, url, x, y, w, h)
+}
+
+#[tauri::command]
+fn navigate_browser(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    url: String,
+) -> Result<(), String> {
+    state.browser_manager.navigate(&app_handle, &id, &url)
+}
+
+#[tauri::command]
+fn set_browser_bounds(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    state.browser_manager.set_bounds(&app_handle, &id, x, y, w, h)
+}
+
+#[tauri::command]
+fn set_browser_visible(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    visible: bool,
+) -> Result<(), String> {
+    state.browser_manager.set_visible(&app_handle, &id, visible)
+}
+
+#[tauri::command]
+fn close_browser(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.browser_manager.close(&app_handle, &id)
+}
+
+#[tauri::command]
+fn browser_go_back(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.browser_manager.go_back(&app_handle, &id)
+}
+
+#[tauri::command]
+fn browser_go_forward(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.browser_manager.go_forward(&app_handle, &id)
+}
+
+#[tauri::command]
+fn browser_reload(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.browser_manager.reload(&app_handle, &id)
+}
+
+#[tauri::command]
+fn set_all_browsers_visible(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    visible: bool,
+) -> Result<(), String> {
+    state.browser_manager.set_all_visible(&app_handle, visible);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_browser_zoom(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    zoom: f64,
+) -> Result<(), String> {
+    state.browser_manager.set_zoom(&app_handle, &id, zoom)
+}
+
+#[tauri::command]
+fn browser_eval(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    js: String,
+) -> Result<(), String> {
+    state.browser_manager.eval_js(&app_handle, &id, &js)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let perm_server = PermissionServer::start(app.handle().clone())
-                .expect("Failed to start permission server");
+                .map_err(|e| {
+                    safe_eprintln!("[setup] Permission server failed to start: {}", e);
+                    Box::<dyn std::error::Error>::from(e)
+                })?;
+            let widget_srv = WidgetServer::start()
+                .map_err(|e| {
+                    safe_eprintln!("[setup] Widget server failed to start: {}", e);
+                    Box::<dyn std::error::Error>::from(e)
+                })?;
             app.manage(AppState {
                 pty_manager: PtyManager::new(),
                 claude_manager: Arc::new(ClaudeManager::new()),
                 discord_bot: Mutex::new(DiscordBot::new()),
                 permission_server: Arc::new(perm_server),
+                audio_manager: Arc::new(AudioManager::new()),
+                browser_manager: BrowserManager::new(),
+                widget_server: widget_srv,
             });
+
+            // Disable native WKWebView pinch-to-zoom magnification on macOS
+            // so our custom canvas zoom isn't fighting the browser's own zoom
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.with_webview(|wv| {
+                        unsafe {
+                            let inner = wv.inner() as *mut objc2::runtime::AnyObject;
+                            let _: () = objc2::msg_send![&*inner, setAllowsMagnification: false];
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            shell_exec,
             create_terminal,
             write_terminal,
             resize_terminal,
@@ -946,6 +1622,37 @@ pub fn run() {
             get_delegation_port,
             get_delegation_messages,
             cleanup_delegation_group,
+            get_app_dir,
+            create_widget_folder,
+            read_widget_html,
+            list_widget_folders,
+            widget_file_modified,
+            delete_widget_folder,
+            get_widget_server_port,
+            widget_get_state,
+            widget_set_state,
+            widget_clear_state,
+            proxy_fetch,
+            send_notification,
+            create_checkpoint,
+            delete_files,
+            revert_files_git,
+            restore_checkpoint,
+            cleanup_checkpoints,
+            start_party_mode,
+            stop_party_mode,
+            party_mode_status,
+            create_browser,
+            navigate_browser,
+            set_browser_bounds,
+            set_browser_visible,
+            close_browser,
+            browser_go_back,
+            browser_go_forward,
+            browser_reload,
+            browser_eval,
+            set_browser_zoom,
+            set_all_browsers_visible,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

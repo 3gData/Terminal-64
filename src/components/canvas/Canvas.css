@@ -15,8 +15,13 @@
 
 .canvas-content {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
   pointer-events: none;
+  z-index: 2;
 }
 
 .canvas-content > * {
@@ -24,9 +29,10 @@
 }
 
 .canvas-zoom-badge {
-  position: absolute;
+  position: fixed;
   bottom: 12px;
   right: 12px;
+  z-index: 9999;
   padding: 4px 10px;
   background: var(--bg-tertiary, #11111b);
   border: 1px solid var(--border, #313244);
@@ -35,6 +41,26 @@
   font-size: 11px;
   color: var(--fg-muted, #6c7086);
   pointer-events: none;
+}
+
+/* ---- Snap guides ---- */
+
+.snap-guide {
+  position: absolute;
+  pointer-events: none;
+  z-index: 9998; /* Below modals/overlays (900+), above terminals */
+}
+
+.snap-guide--vertical {
+  width: 1px;
+  background: rgba(137, 180, 250, 0.5);
+  box-shadow: 0 0 4px rgba(137, 180, 250, 0.3);
+}
+
+.snap-guide--horizontal {
+  height: 1px;
+  background: rgba(137, 180, 250, 0.5);
+  box-shadow: 0 0 4px rgba(137, 180, 250, 0.3);
 }
 
 .canvas-empty {

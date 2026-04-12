@@ -241,4 +241,5 @@ export interface DelegationGroup {
   createdAt: number;
   sharedContext?: string;
   collaborationEnabled: boolean;
+  parentPermissionMode?: PermissionMode;
 }

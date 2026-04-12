@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { DelegateTask, DelegateTaskStatus, DelegationGroup, DelegationStatus } from "../lib/types";
+import { DelegateTaskStatus, DelegationGroup, DelegationStatus } from "../lib/types";
 
 const STORAGE_KEY = "terminal64-delegations";
 
@@ -14,6 +14,7 @@ interface DelegationState {
     tasks: { description: string }[],
     mergeStrategy: "auto" | "manual",
     sharedContext?: string,
+    parentPermissionMode?: string,
   ) => DelegationGroup;
   setTaskSessionId: (groupId: string, taskId: string, sessionId: string) => void;
   updateTaskStatus: (groupId: string, taskId: string, status: DelegateTaskStatus, result?: string) => void;
@@ -73,7 +74,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
   sessionToGroup: buildSessionIndex(initialGroups),
   parentToGroup: buildParentIndex(initialGroups),
 
-  createGroup: (parentSessionId, tasks, mergeStrategy, sharedContext) => {
+  createGroup: (parentSessionId, tasks, mergeStrategy, sharedContext, parentPermissionMode) => {
     const group: DelegationGroup = {
       id: uuidv4(),
       parentSessionId,
@@ -88,6 +89,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       createdAt: Date.now(),
       sharedContext,
       collaborationEnabled: true,
+      parentPermissionMode: (parentPermissionMode as DelegationGroup["parentPermissionMode"]) || "auto",
     };
     set((s) => {
       const groups = { ...s.groups, [group.id]: group };
@@ -140,6 +142,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
         t.id === taskId ? { ...t, lastForwardedMessageId: messageId } : t,
       );
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
+      debouncedSave(groups);
       return { groups };
     });
   },

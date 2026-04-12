@@ -1,6 +1,9 @@
 import React, { useState } from "react";
 import { ChatMessage as ChatMessageType, ToolCall } from "../../lib/types";
 
+const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
+const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
+
 // Render inline markdown: bold, italic, bold+italic, inline code, links, strikethrough
 function renderInline(text: string, keyPrefix: string = ""): React.ReactNode[] {
   // Order matters: bold+italic first, then bold, italic, inline code, links, strikethrough
@@ -42,6 +45,62 @@ function renderInline(text: string, keyPrefix: string = ""): React.ReactNode[] {
     result.push(text.slice(lastIndex));
   }
   return result;
+}
+
+function DelegationPlanBadge({ block }: { block: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const tasks = block.match(/\[TASK\]\s*(.+)/g)?.map((t) => t.replace(/\[TASK\]\s*/, "")) || [];
+  const context = block.match(/\[CONTEXT\]\s*(.+)/)?.[1] || "";
+  return (
+    <div className="cc-delegation-badge">
+      <button className="cc-delegation-badge-header" onClick={() => setExpanded((v) => !v)}>
+        <span className="cc-delegation-badge-icon">◈</span>
+        <span className="cc-delegation-badge-text">Delegation plan — {tasks.length} agents</span>
+        <span className="cc-tc-expand">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && (
+        <div className="cc-delegation-badge-body">
+          {context && <p className="cc-delegation-badge-ctx">{context}</p>}
+          <ol className="cc-delegation-badge-tasks">
+            {tasks.map((t, i) => <li key={i}>{t}</li>)}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MergeResultCard({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const tasks: { name: string; status: string; result: string }[] = [];
+  let m;
+  const re = /## (.+?) \[(Completed|Failed|Cancelled)\]\n([\s\S]*?)(?=\n---|\n\nPlease review|$)/g;
+  while ((m = re.exec(content)) !== null) {
+    tasks.push({ name: m[1], status: m[2], result: m[3].trim() });
+  }
+  const completed = tasks.filter((t) => t.status === "Completed").length;
+  return (
+    <div className="cc-merge-card">
+      <button className="cc-merge-card-header" onClick={() => setExpanded((v) => !v)}>
+        <span className="cc-delegation-badge-icon">◈</span>
+        <span className="cc-delegation-badge-text">Delegation results — {completed}/{tasks.length} completed</span>
+        <span className="cc-tc-expand">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && (
+        <div className="cc-merge-card-body">
+          {tasks.map((t, i) => (
+            <div key={i} className={`cc-merge-task cc-merge-task--${t.status.toLowerCase()}`}>
+              <div className="cc-merge-task-header">
+                <span className={`cc-merge-task-dot cc-merge-task-dot--${t.status.toLowerCase()}`} />
+                <span className="cc-merge-task-name">{t.name}</span>
+              </div>
+              <pre className="cc-merge-task-result">{t.result}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function CopyBtn({ text }: { text: string }) {
@@ -96,7 +155,7 @@ export function renderContent(text: string) {
       const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
       if (headingMatch) {
         const level = headingMatch[1].length;
-        const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+        const Tag = `h${level}` as any;
         elements.push(<Tag key={key++} className={`cc-h cc-h${level}`}>{renderInline(headingMatch[2])}</Tag>);
         i++; continue;
       }
@@ -152,9 +211,68 @@ export function renderContent(text: string) {
         continue;
       }
 
+      // Tables — lines starting with |
+      if (trimmed.startsWith("|") && trimmed.includes("|", 1)) {
+        const tableLines: string[] = [];
+        while (i < lines.length && lines[i].trim().startsWith("|")) {
+          tableLines.push(lines[i].trim());
+          i++;
+        }
+        if (tableLines.length >= 2) {
+          const parseRow = (row: string) =>
+            row.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
+          const headers = parseRow(tableLines[0]);
+          // Check if second line is a separator (|---|---|)
+          const hasSep = /^\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$/.test(tableLines[1]);
+          const bodyStart = hasSep ? 2 : 1;
+
+          // Parse alignment from separator
+          const aligns: ("left" | "center" | "right" | undefined)[] = [];
+          if (hasSep) {
+            parseRow(tableLines[1]).forEach((cell) => {
+              const l = cell.startsWith(":");
+              const r = cell.endsWith(":");
+              if (l && r) aligns.push("center");
+              else if (r) aligns.push("right");
+              else if (l) aligns.push("left");
+              else aligns.push(undefined);
+            });
+          }
+
+          elements.push(
+            <div key={key++} className="cc-table-wrap">
+              <table className="cc-table">
+                <thead>
+                  <tr>
+                    {headers.map((h, j) => (
+                      <th key={j} style={aligns[j] ? { textAlign: aligns[j] } : undefined}>
+                        {renderInline(h)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {tableLines.slice(bodyStart).map((row, ri) => (
+                    <tr key={ri}>
+                      {parseRow(row).map((cell, ci) => (
+                        <td key={ci} style={aligns[ci] ? { textAlign: aligns[ci] } : undefined}>
+                          {renderInline(cell)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+          continue;
+        }
+      }
+
       // Regular paragraph — collect consecutive non-empty, non-special lines
       const paraLines: string[] = [];
-      while (i < lines.length && lines[i].trim() && !/^(#{1,4}\s|[-*+]\s|\d+[.)]\s|>\s?|(-{3,}|\*{3,}|_{3,})$)/.test(lines[i].trimStart())) {
+      while (i < lines.length && lines[i].trim() && !/^(#{1,4}\s|[-*+]\s|\d+[.)]\s|>\s?|\|.|(-{3,}|\*{3,}|_{3,})$)/.test(lines[i].trimStart())) {
         paraLines.push(lines[i]);
         i++;
       }
@@ -230,14 +348,16 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     );
   }
 
-  // Write — show content preview
+  // Write — show as diff (all new content) with click-to-open like Edit
   if (tc.name === "Write" && i.content) {
     const content = String(i.content);
     const preview = content.length > 500 ? content.slice(0, 500) + "\n..." : content;
     return (
       <div className="cc-tc-body">
-        <pre className="cc-tc-output"><CopyBtn text={content} />{preview}</pre>
-        {result && <pre className="cc-tc-result-text">{result}</pre>}
+        <div className="cc-tc-diff" onClick={() => onEditClick?.(tc.id, String(i.file_path || ""), "", content)} style={{ cursor: onEditClick ? "pointer" : undefined }}>
+          <div className="cc-tc-diff-add">{preview}</div>
+        </div>
+        {result && <pre className="cc-tc-output">{result}</pre>}
       </div>
     );
   }
@@ -285,10 +405,32 @@ function ToolCallCard({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: 
   );
 }
 
-export function ReadGroupCard({ tcs }: { tcs: ToolCall[] }) {
+const GROUPABLE_TOOLS = new Set(["Read", "Grep", "Glob", "WebSearch", "WebFetch"]);
+
+function groupLabel(tcs: ToolCall[]): { icon: string; name: string; details: string } {
+  const first = tcs[0]?.name;
+  if (tcs.every((tc) => tc.name === first)) {
+    switch (first) {
+      case "Read":
+        return { icon: "◉", name: `Read ${tcs.length} files`, details: tcs.map((tc) => shortPath(tc.input.file_path)).join(", ") };
+      case "Grep":
+        return { icon: "⊛", name: `${tcs.length} searches`, details: tcs.map((tc) => `/${tc.input.pattern || ""}/`).join(", ") };
+      case "Glob":
+        return { icon: "⊛", name: `${tcs.length} globs`, details: tcs.map((tc) => String(tc.input.pattern || "")).join(", ") };
+      case "WebSearch":
+        return { icon: "⌕", name: `${tcs.length} web searches`, details: tcs.map((tc) => String(tc.input.query || "")).join(", ") };
+      case "WebFetch":
+        return { icon: "↓", name: `Fetch ${tcs.length} URLs`, details: tcs.map((tc) => String(tc.input.url || "").slice(0, 40)).join(", ") };
+    }
+  }
+  return { icon: "⊛", name: `${tcs.length} lookups`, details: "" };
+}
+
+export function ToolGroupCard({ tcs }: { tcs: ToolCall[] }) {
   const [expanded, setExpanded] = useState(false);
   const allDone = tcs.every((tc) => tc.result !== undefined);
   const anyError = tcs.some((tc) => tc.isError);
+  const lbl = groupLabel(tcs);
 
   return (
     <div className={`cc-tc ${anyError ? "cc-tc--error" : ""}`}>
@@ -296,23 +438,28 @@ export function ReadGroupCard({ tcs }: { tcs: ToolCall[] }) {
         <span className={`cc-tc-status ${allDone ? (anyError ? "cc-tc-status--err" : "cc-tc-status--ok") : "cc-tc-status--pending"}`}>
           {allDone ? (anyError ? "✕" : "✓") : "⋯"}
         </span>
-        <span className="cc-tc-icon">◉</span>
-        <span className="cc-tc-name">Read {tcs.length} files</span>
-        <span className="cc-tc-detail">{tcs.map((tc) => shortPath(tc.input.file_path)).join(", ")}</span>
+        <span className="cc-tc-icon">{lbl.icon}</span>
+        <span className="cc-tc-name">{lbl.name}</span>
+        <span className="cc-tc-detail">{lbl.details}</span>
         <span className="cc-tc-expand">{expanded ? "▾" : "▸"}</span>
       </button>
       {expanded && (
         <div className="cc-tc-body">
-          {tcs.map((tc) => (
-            <div key={tc.id} className="cc-tc-group-item">
-              <div className="cc-tc-group-file">{shortPath(tc.input.file_path)}</div>
-            </div>
-          ))}
+          {tcs.map((tc) => {
+            const hdr = toolHeader(tc);
+            return (
+              <div key={tc.id} className="cc-tc-group-item">
+                <div className="cc-tc-group-file">{hdr.detail}</div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
+
+export { GROUPABLE_TOOLS };
 
 function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   message: ChatMessageType;
@@ -341,24 +488,34 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   );
 
   if (message.role === "user") {
+    const isMerge = message.content.startsWith(MERGE_PREFIX);
     return (
       <div className="cc-message cc-message--user">
         {menuBtn}
-        <div className="cc-bubble cc-bubble--user">
-          {message.content}
-        </div>
+        {isMerge ? (
+          <MergeResultCard content={message.content} />
+        ) : (
+          <div className="cc-bubble cc-bubble--user">
+            {message.content}
+          </div>
+        )}
       </div>
     );
   }
 
+  // Strip [DELEGATION_START]...[DELEGATION_END] blocks from assistant text
+  const delegationBlock = message.content?.match(DELEGATION_BLOCK_RE)?.[0];
+  const cleanContent = message.content ? message.content.replace(DELEGATION_BLOCK_RE, "").trim() : "";
+
   return (
     <div className="cc-message cc-message--assistant">
       {menuBtn}
-      {message.content && (
+      {cleanContent && (
         <div className="cc-bubble cc-bubble--assistant">
-          {renderContent(message.content)}
+          {renderContent(cleanContent)}
         </div>
       )}
+      {delegationBlock && <DelegationPlanBadge block={delegationBlock} />}
       {message.toolCalls && message.toolCalls.length > 0 && (
         <div className="cc-tc-list">
           {message.toolCalls.map((tc) => (

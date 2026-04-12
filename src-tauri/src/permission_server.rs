@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -29,22 +29,20 @@ pub struct DelegationMessage {
 }
 
 pub struct PermissionServer {
-    port: u16,
+    port: AtomicU16,
     secret: String,
+    alive: Arc<AtomicBool>,
+    app_handle: AppHandle,
     pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>,
-    pub(crate) session_map: Arc<Mutex<HashMap<String, String>>>, // run_token → session_id
-    settings_files: Arc<Mutex<HashMap<String, PathBuf>>>, // run_token → temp file path
-    pub(crate) delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>, // group_id → messages
+    pub(crate) session_map: Arc<Mutex<HashMap<String, String>>>,
+    settings_files: Arc<Mutex<HashMap<String, PathBuf>>>,
+    pub(crate) delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>,
 }
 
 impl PermissionServer {
     pub fn start(app_handle: AppHandle) -> Result<Self, String> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {}", e))?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let secret = random_token();
-
-        eprintln!("[perm-server] Listening on 127.0.0.1:{}", port);
-
+        let alive = Arc::new(AtomicBool::new(false));
         let pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let session_map: Arc<Mutex<HashMap<String, String>>> =
@@ -52,42 +50,121 @@ impl PermissionServer {
         let delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let s = secret.clone();
-        let p = pending.clone();
-        let sm = session_map.clone();
-        let dm = delegation_messages.clone();
+        let server = Self {
+            port: AtomicU16::new(0),
+            secret,
+            alive,
+            app_handle,
+            pending,
+            session_map,
+            settings_files: Arc::new(Mutex::new(HashMap::new())),
+            delegation_messages,
+        };
+        server.spawn_listener()?;
+        Ok(server)
+    }
+
+    fn spawn_listener(&self) -> Result<(), String> {
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {}", e))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        self.port.store(port, Ordering::SeqCst);
+        self.alive.store(true, Ordering::SeqCst);
+
+        safe_eprintln!("[perm-server] Listening on 127.0.0.1:{}", port);
+
+        let secret = self.secret.clone();
+        let pending = self.pending.clone();
+        let session_map = self.session_map.clone();
+        let delegation_messages = self.delegation_messages.clone();
+        let app_handle = self.app_handle.clone();
+        let alive = self.alive.clone();
 
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = match stream {
                     Ok(s) => s,
-                    Err(_) => continue,
+                    Err(e) => {
+                        safe_eprintln!("[perm-server] Accept error: {}", e);
+                        continue;
+                    }
                 };
-                let secret = s.clone();
-                let pending = p.clone();
-                let sessions = sm.clone();
+                let secret = secret.clone();
+                let pending = pending.clone();
+                let sessions = session_map.clone();
                 let app = app_handle.clone();
-                let deleg = dm.clone();
+                let deleg = delegation_messages.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = handle_connection(stream, &secret, &pending, &sessions, &app, &deleg) {
-                        eprintln!("[perm-server] Connection error: {}", e);
+                        safe_eprintln!("[perm-server] Connection error: {}", e);
                     }
                 });
             }
+            // If we exit the loop, the listener is dead
+            alive.store(false, Ordering::SeqCst);
+            safe_eprintln!("[perm-server] Listener thread exited — server is down");
         });
 
-        Ok(Self {
-            port,
-            secret,
-            pending,
-            session_map,
-            settings_files: Arc::new(Mutex::new(HashMap::new())),
-            delegation_messages,
-        })
+        Ok(())
     }
 
+    /// Check if the listener is alive; if not, attempt restart with exponential backoff.
+    /// Returns the current port on success.
+    pub fn ensure_alive(&self) -> Result<u16, String> {
+        if self.alive.load(Ordering::SeqCst) {
+            return Ok(self.port.load(Ordering::SeqCst));
+        }
+        safe_eprintln!("[perm-server] Server is down, attempting restart...");
+        let mut delay_ms = 100u64;
+        for attempt in 1..=5 {
+            match self.spawn_listener() {
+                Ok(()) => {
+                    let new_port = self.port.load(Ordering::SeqCst);
+                    safe_eprintln!("[perm-server] Restarted on port {} (attempt {})", new_port, attempt);
+                    // Re-register all existing sessions with the new port
+                    self.reregister_sessions();
+                    return Ok(new_port);
+                }
+                Err(e) => {
+                    safe_eprintln!("[perm-server] Restart attempt {} failed: {}", attempt, e);
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    delay_ms = (delay_ms * 2).min(5000);
+                }
+            }
+        }
+        Err("Permission server failed to restart after 5 attempts".into())
+    }
+
+    /// After a restart on a new port, re-write all temp settings files with the new URL.
+    fn reregister_sessions(&self) {
+        let new_port = self.port.load(Ordering::SeqCst);
+        let tokens: Vec<(String, String)> = self.session_map
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        for (run_token, session_id) in &tokens {
+            let url = format!("http://127.0.0.1:{}/hook/{}/{}", new_port, self.secret, run_token);
+            let settings = serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "",
+                        "hooks": [{ "type": "http", "url": url }]
+                    }]
+                }
+            });
+            if let Some(path) = self.settings_files.lock().unwrap_or_else(|e| e.into_inner()).get(run_token) {
+                if let Err(e) = std::fs::write(path, settings.to_string()) {
+                    safe_eprintln!("[perm-server] Failed to rewrite settings for session {}: {}", session_id, e);
+                }
+            }
+        }
+        if !tokens.is_empty() {
+            safe_eprintln!("[perm-server] Re-registered {} sessions on new port {}", tokens.len(), new_port);
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn port(&self) -> u16 {
-        self.port
+        self.port.load(Ordering::SeqCst)
     }
 
     pub fn cleanup_delegation_group(&self, group_id: &str) {
@@ -97,7 +174,11 @@ impl PermissionServer {
     }
 
     /// Get or create a settings file for a session. Reuses existing registration.
+    /// Auto-restarts the server if it's down.
     pub fn register_session(&self, session_id: &str) -> Result<(String, PathBuf), String> {
+        // Ensure the listener is alive before registering
+        self.ensure_alive()?;
+
         // Reuse existing token if session is already registered
         {
             let map = self.session_map.lock().map_err(|e| e.to_string())?;
@@ -111,9 +192,10 @@ impl PermissionServer {
         }
 
         let run_token = random_token();
+        let port = self.port.load(Ordering::SeqCst);
         let url = format!(
             "http://127.0.0.1:{}/hook/{}/{}",
-            self.port, self.secret, run_token
+            port, self.secret, run_token
         );
 
         let settings = serde_json::json!({
@@ -137,7 +219,7 @@ impl PermissionServer {
             .map_err(|e| e.to_string())?
             .insert(run_token.clone(), path.clone());
 
-        eprintln!(
+        safe_eprintln!(
             "[perm-server] Registered session {} with token {}",
             session_id,
             &run_token[..run_token.len().min(12)]
@@ -241,7 +323,7 @@ fn handle_connection(
             // Emit to frontend
             let _ = app_handle.emit("delegation-message", &del_msg);
 
-            eprintln!("[delegation] {} from {} in group {}: {}", msg_type, agent, &group_id[..group_id.len().min(8)], &message[..message.len().min(80)]);
+            safe_eprintln!("[delegation] {} from {} in group {}: {}", msg_type, agent, &group_id[..group_id.len().min(8)], &message[..message.len().min(80)]);
 
             send_http(&mut stream, 200, r#"{"ok":true}"#);
             return Ok(());
@@ -357,7 +439,7 @@ fn handle_connection(
     }
 
     let request_id = next_id();
-    eprintln!(
+    safe_eprintln!(
         "[perm-server] Permission request {} for {} in session {}: {}",
         request_id, tool_name, &session_id[..session_id.len().min(8)], tool_name
     );
@@ -385,13 +467,13 @@ fn handle_connection(
         Ok(decision) => decision,
         Err(_) => {
             pending.lock().map_err(|e| e.to_string())?.remove(&request_id);
-            eprintln!("[perm-server] Timeout for request {}", request_id);
+            safe_eprintln!("[perm-server] Timeout for request {}", request_id);
             (false, "Permission request timed out".to_string())
         }
     };
 
     let decision = if allow { "allow" } else { "deny" };
-    eprintln!("[perm-server] Resolved {}: {}", request_id, decision);
+    safe_eprintln!("[perm-server] Resolved {}: {}", request_id, decision);
 
     let resp = serde_json::json!({
         "hookSpecificOutput": {

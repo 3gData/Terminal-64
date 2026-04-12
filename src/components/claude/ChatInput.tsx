@@ -22,11 +22,9 @@ interface ChatInputProps {
   queueCount?: number;
   draftPrompt?: string;
   onDraftChange?: (text: string) => void;
-  contextUsed?: number;
-  contextMax?: number;
 }
 
-export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, contextUsed, contextMax }: ChatInputProps) {
+export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange }: ChatInputProps) {
   const [text, setText] = useState(draftPrompt || "");
   const [elapsed, setElapsed] = useState("");
 
@@ -371,21 +369,6 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
             <span className="cc-perm-hint">(shift+tab to cycle)</span>
           </span>
         ) : null}
-        {(contextMax ?? 0) > 0 && (contextUsed ?? 0) > 0 && (() => {
-          const pct = Math.min(100, ((contextUsed ?? 0) / (contextMax ?? 1)) * 100);
-          const compactPct = 80; // auto-compaction threshold
-          const usedK = Math.round((contextUsed ?? 0) / 1000);
-          const maxK = Math.round((contextMax ?? 0) / 1000);
-          return (
-            <div className="cc-context-bar-wrap" title={`Context: ${usedK}k / ${maxK}k tokens (${pct.toFixed(0)}%) · Auto-compact at ${compactPct}%`}>
-              <span className="cc-context-label">{usedK}k/{maxK}k</span>
-              <div className="cc-context-bar">
-                <div className="cc-context-fill" style={{ width: `${pct}%` }} />
-                <div className="cc-context-compact-tick" style={{ left: `${compactPct}%` }} />
-              </div>
-            </div>
-          );
-        })()}
       </div>
     </div>
   );

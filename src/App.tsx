@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { v4 as uuidv4 } from "uuid";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import Canvas from "./components/canvas/Canvas";
@@ -7,18 +6,20 @@ import CommandPalette from "./components/command-palette/CommandPalette";
 import SettingsPanel from "./components/settings/SettingsPanel";
 import PopOutTerminal from "./components/canvas/PopOutTerminal";
 import ClaudeDialog from "./components/canvas/ClaudeDialog";
+import WidgetDialog from "./components/widget/WidgetDialog";
 import { useTheme } from "./hooks/useTheme";
 import { useKeybindings } from "./hooks/useKeybindings";
 import { useClaudeEvents } from "./hooks/useClaudeEvents";
 import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
+import { usePartyMode } from "./hooks/usePartyMode";
+import { PartyEqualizer, PartyEdgeGlow } from "./components/party/PartyOverlay";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
-import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages } from "./lib/tauriApi";
+import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible } from "./lib/tauriApi";
 import { useDelegationStore } from "./stores/delegationStore";
 import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
-import { usePanelStore } from "./stores/panelStore";
 import { checkForUpdate, UpdateInfo } from "./lib/updater";
 import "./App.css";
 
@@ -32,11 +33,19 @@ function App() {
   const [isMaximized, setIsMaximized] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [claudeDialogOpen, setClaudeDialogOpen] = useState(false);
+  const [widgetDialogOpen, setWidgetDialogOpen] = useState(false);
 
   useTheme();
   useKeybindings();
   useClaudeEvents();
   useDelegationOrchestrator();
+  usePartyMode();
+
+  // Hide all native browser webviews when any overlay is open (they render above DOM)
+  const anyOverlayOpen = settingsOpen || paletteOpen || claudeDialogOpen || widgetDialogOpen;
+  useEffect(() => {
+    setAllBrowsersVisible(!anyOverlayOpen).catch(() => {});
+  }, [anyOverlayOpen]);
 
   // Check for updates on startup
   useEffect(() => {
@@ -86,7 +95,6 @@ function App() {
   useEffect(() => {
     const unlisten = appWindow.onCloseRequested(() => {
       useCanvasStore.getState().saveSession();
-      usePanelStore.getState().saveSession();
       flushClaudeSave();
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -105,13 +113,6 @@ function App() {
       label: "New Terminal",
       category: "Terminal",
       execute: () => useCanvasStore.getState().addTerminal(),
-    });
-
-    registerCommand({
-      id: "panel.new",
-      label: "New Panel",
-      category: "Panels",
-      execute: () => usePanelStore.getState().addPanel(),
     });
 
     registerCommand({
@@ -189,7 +190,7 @@ function App() {
       {/* Header */}
       <div className="header">
         <div className="header-brand" data-tauri-drag-region>
-          <img src="/icons/32x32.png" alt="64" className="brand-icon" />
+          <img src="/icons/32x32.png" alt="Terminal 64" className="brand-icon" />
         </div>
 
         <button
@@ -215,15 +216,17 @@ function App() {
         </button>
 
         <button
-          className="header-action header-action--panel"
-          onClick={() => usePanelStore.getState().addPanel()}
-          title="New Panel"
+          className="header-action header-action--widget"
+          onClick={() => setWidgetDialogOpen(true)}
+          title="Widgets"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.2"/>
-            <path d="M6 4V8M4 6H8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+            <rect x="1" y="1" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.1"/>
+            <rect x="7" y="1" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.1"/>
+            <rect x="1" y="7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.1"/>
+            <rect x="7" y="7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.1"/>
           </svg>
-          <span>Panel</span>
+          <span>Widget</span>
         </button>
 
         <div className="header-drag" data-tauri-drag-region />
@@ -259,17 +262,17 @@ function App() {
         </button>
 
         <div className="window-controls">
-          <button className="window-btn window-btn--minimize" onClick={handleMinimize}>
+          <button className="window-btn window-btn--minimize" onClick={handleMinimize} title="Minimize">
             <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor" /></svg>
           </button>
-          <button className="window-btn window-btn--maximize" onClick={handleMaximize}>
+          <button className="window-btn window-btn--maximize" onClick={handleMaximize} title={isMaximized ? "Restore" : "Maximize"}>
             {isMaximized ? (
               <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 3V9H8V3H2ZM3 0H10V7H9V1H3V0Z" fill="currentColor" /></svg>
             ) : (
               <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" fill="none" strokeWidth="1" /></svg>
             )}
           </button>
-          <button className="window-btn window-btn--close" onClick={handleClose}>
+          <button className="window-btn window-btn--close" onClick={handleClose} title="Close">
             <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>
           </button>
         </div>
@@ -277,6 +280,9 @@ function App() {
 
       {/* Canvas */}
       <Canvas />
+
+      {/* Party mode edge glow — fixed overlay on top */}
+      <PartyEdgeGlow />
 
       {/* Overlays */}
       <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} />
@@ -324,6 +330,10 @@ function App() {
             }).catch((err) => console.warn("[session] Failed to load history from disk:", err));
           }
         }}
+      />
+      <WidgetDialog
+        isOpen={widgetDialogOpen}
+        onClose={() => setWidgetDialogOpen(false)}
       />
     </div>
   );
