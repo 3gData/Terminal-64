@@ -7,3 +7,4 @@ src-tauri/gen/
 .vscode/
 .DS_Store
 **/.DS_Store
+.mcp.json
