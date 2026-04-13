@@ -121,14 +121,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
       useClaudeStore.getState().setCwd(sessionId, cwd);
     }
   }, [sessionId, createSession, cwd]);
-  useEffect(() => {
-    const t64Commands: SlashCommand[] = [
-      { name: "loop", description: "Run a prompt on a loop (e.g. /loop 5m improve the code)", usage: "/loop [interval] <prompt> — default 10m. /loop stop to cancel.", source: "Terminal 64" },
-      { name: "delegate", description: "Split work into parallel sub-sessions", usage: "/delegate <prompt> — Claude plans the task split, spawns agents with MCP team chat.", source: "Terminal 64" },
-    ];
-    listSlashCommands().then((cmds) => setSlashCommands([...t64Commands, ...cmds])).catch(() => setSlashCommands(t64Commands));
+  const t64Commands = useRef<SlashCommand[]>([
+    { name: "loop", description: "Run a prompt on a loop (e.g. /loop 5m improve the code)", usage: "/loop [interval] <prompt> — default 10m. /loop stop to cancel.", source: "Terminal 64" },
+    { name: "delegate", description: "Split work into parallel sub-sessions", usage: "/delegate <prompt> — Claude plans the task split, spawns agents with MCP team chat.", source: "Terminal 64" },
+    { name: "reload-plugins", description: "Reload slash commands, skills, and MCP servers", usage: "/reload-plugins — re-fetches all available commands and MCP configs.", source: "Terminal 64" },
+  ]);
+  const reloadCommands = useCallback(() => {
+    listSlashCommands().then((cmds) => setSlashCommands([...t64Commands.current, ...cmds])).catch(() => setSlashCommands(t64Commands.current));
     listMcpServers(cwd).then(setConfigMcpServers).catch(() => {});
-  }, []);
+  }, [cwd]);
+  useEffect(() => { reloadCommands(); }, [reloadCommands]);
   // Apply persisted font on mount (once per app, harmless if called multiple times)
   useEffect(() => {
     document.documentElement.style.setProperty("--claude-font", fontStack(useSettingsStore.getState().claudeFont || "system"));
@@ -435,6 +437,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         return;
       }
 
+      // Handle /reload-plugins — refresh frontend command list + pass through to Claude CLI
+      if (/^\/reload-plugins\b/i.test(text)) {
+        reloadCommands();
+        addUserMessage(sessionId, text);
+        await actualSend(text, permissionOverride);
+        // Re-fetch after CLI has had time to reload
+        setTimeout(reloadCommands, 3000);
+        return;
+      }
+
       // Handle /delegate command — inject skill context so Claude plans the split
       const delegateMatch = text.match(/^\/delegate\s+([\s\S]+)/i);
       if (delegateMatch) {
@@ -494,7 +506,7 @@ Rules:
       emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
       await actualSend(prompt, permissionOverride);
     },
-    [sessionId, attachedFiles, addUserMessage, actualSend]
+    [sessionId, attachedFiles, addUserMessage, actualSend, reloadCommands]
   );
 
   const handleCancel = useCallback(() => { cancelClaude(sessionId).catch(() => {}); }, [sessionId]);
