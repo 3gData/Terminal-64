@@ -36,16 +36,17 @@ export default function PopOutTerminal() {
   }, []);
 
   useEffect(() => {
-    const unlisten = appWindow.onCloseRequested(async (e) => {
+    let unlistenFn: (() => void) | undefined;
+    appWindow.onCloseRequested(async (e) => {
       e.preventDefault();
       if (existingTerminalId) {
-        await emit("terminal-pop-back", { terminalId: existingTerminalId });
+        await emit("terminal-pop-back", { terminalId: existingTerminalId, borderColor });
       } else {
         closeTerminal(terminalId).catch(() => {});
       }
       await appWindow.destroy();
-    });
-    return () => { unlisten.then((fn) => fn()); };
+    }).then((fn) => { unlistenFn = fn; });
+    return () => { unlistenFn?.(); };
   }, [terminalId]);
 
   const handleMinimize = () => appWindow.minimize();

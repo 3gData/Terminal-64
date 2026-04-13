@@ -146,8 +146,8 @@ export async function truncateSessionJsonlByMessages(sessionId: string, cwd: str
   return invoke("truncate_session_jsonl_by_messages", { sessionId, cwd, keepMessages });
 }
 
-export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepTurns: number): Promise<void> {
-  return invoke("fork_session_jsonl", { parentSessionId, newSessionId, cwd, keepTurns });
+export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepMessages: number): Promise<void> {
+  return invoke("fork_session_jsonl", { parentSessionId, newSessionId, cwd, keepMessages });
 }
 
 // Discord bot commands

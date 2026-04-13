@@ -238,6 +238,7 @@ function buildGuides(snapped: Rect, others: Rect[], didX: boolean, didY: boolean
 
 function verticalGuide(pos: number, rect: Rect, others: Rect[]): SnapGuide[] {
   const matching = others.filter(o => Math.abs(o.x - pos) < 1 || Math.abs(o.x + o.width - pos) < 1);
+  if (matching.length === 0) return [{ orientation: "vertical", position: pos, start: rect.y, end: rect.y + rect.height }];
   const minY = Math.min(rect.y, ...matching.map(o => o.y));
   const maxY = Math.max(rect.y + rect.height, ...matching.map(o => o.y + o.height));
   return [{ orientation: "vertical", position: pos, start: minY, end: maxY }];
@@ -245,6 +246,7 @@ function verticalGuide(pos: number, rect: Rect, others: Rect[]): SnapGuide[] {
 
 function horizontalGuide(pos: number, rect: Rect, others: Rect[]): SnapGuide[] {
   const matching = others.filter(o => Math.abs(o.y - pos) < 1 || Math.abs(o.y + o.height - pos) < 1);
+  if (matching.length === 0) return [{ orientation: "horizontal", position: pos, start: rect.x, end: rect.x + rect.width }];
   const minX = Math.min(rect.x, ...matching.map(o => o.x));
   const maxX = Math.max(rect.x + rect.width, ...matching.map(o => o.x + o.width));
   return [{ orientation: "horizontal", position: pos, start: minX, end: maxX }];

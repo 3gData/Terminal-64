@@ -269,8 +269,8 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
         return;
       }
     }
-    set((s) => ({
-      sessions: {
+    set((s) => {
+      const sessions = {
         ...s.sessions,
         [sessionId]: {
           sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "", streamingStartedAt: null, lastEventAt: null,
@@ -278,8 +278,10 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
           pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "",
           promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [],
         },
-      },
-    }));
+      };
+      if (!ephemeral) debouncedSave();
+      return { sessions };
+    });
   },
 
   removeSession: (sessionId: string) => {
@@ -401,6 +403,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
+      debouncedSave();
       return { sessions: updateSession(s.sessions, sessionId, { totalTokens: session.totalTokens + tokens }) };
     });
   },
@@ -549,6 +552,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session || session.draftPrompt === text) return s;
+      debouncedSave();
       return { sessions: updateSession(s.sessions, sessionId, { draftPrompt: text }) };
     });
   },
@@ -622,10 +626,9 @@ export function flushSave() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   saveToStorage(useClaudeStore.getState().sessions);
 }
+const visibilityHandler = () => { if (document.visibilityState === "hidden") flushSave(); };
 if (typeof window !== "undefined") {
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flushSave();
-  });
+  document.addEventListener("visibilitychange", visibilityHandler);
   window.addEventListener("beforeunload", flushSave);
   // Periodic safety-net save every 5 seconds — only fires when state has changed
   const saveIntervalId = setInterval(() => {
@@ -637,6 +640,8 @@ if (typeof window !== "undefined") {
   if (hot) {
     hot.dispose(() => {
       clearInterval(saveIntervalId);
+      document.removeEventListener("visibilitychange", visibilityHandler);
+      window.removeEventListener("beforeunload", flushSave);
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     });
   }

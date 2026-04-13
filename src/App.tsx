@@ -177,10 +177,15 @@ function App() {
   // Listen for popped-out terminals coming back
   useEffect(() => {
     let unlistenFn: (() => void) | undefined;
-    listen<{ terminalId: string }>(
+    listen<{ terminalId: string; borderColor?: string }>(
       "terminal-pop-back",
       (event) => {
-        useCanvasStore.getState().popIn(event.payload.terminalId);
+        const store = useCanvasStore.getState();
+        store.popIn(event.payload.terminalId);
+        if (event.payload.borderColor) {
+          const term = store.terminals.find((t) => t.terminalId === event.payload.terminalId);
+          if (term) store.setBorderColor(term.id, event.payload.borderColor);
+        }
       }
     ).then((fn) => { unlistenFn = fn; });
     return () => { unlistenFn?.(); };

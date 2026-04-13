@@ -762,15 +762,62 @@ fn is_real_user_message(val: &serde_json::Value) -> bool {
     false
 }
 
+/// Collect JSONL lines keeping exactly `keep_messages` visible messages
+/// (counting both user + assistant the same way load_session_history does).
+fn collect_jsonl_lines_by_messages<'a>(content: &'a str, keep_messages: usize) -> Vec<&'a str> {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut visible_count: usize = 0;
+    let mut done = false;
+
+    for line in content.lines() {
+        if line.trim().is_empty() { continue; }
+        if done {
+            let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => break };
+            if val["type"].as_str().unwrap_or("") == "user" && !is_real_user_message(&val) {
+                kept.push(line);
+                continue;
+            }
+            break;
+        }
+        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => { kept.push(line); continue; } };
+        let rec_type = val["type"].as_str().unwrap_or("");
+        if rec_type == "user" && is_real_user_message(&val) {
+            visible_count += 1;
+            if visible_count > keep_messages { break; }
+        } else if rec_type == "assistant" {
+            if let Some(content_arr) = val["message"]["content"].as_array() {
+                let has_text = content_arr.iter().any(|b|
+                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                );
+                let has_tools = content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use"));
+                if has_text || has_tools {
+                    visible_count += 1;
+                    if visible_count > keep_messages { break; }
+                }
+            }
+        }
+        kept.push(line);
+        if visible_count == keep_messages && rec_type == "assistant" {
+            if let Some(content_arr) = val["message"]["content"].as_array() {
+                if content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use")) {
+                    done = true;
+                    continue;
+                }
+            }
+        }
+    }
+    kept
+}
+
 #[tauri::command]
-fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: String, keep_turns: usize) -> Result<(), String> {
+fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: String, keep_messages: usize) -> Result<(), String> {
     let src = session_jsonl_path(&cwd, &parent_session_id)?;
     let content = std::fs::read_to_string(&src).map_err(|e| format!("read: {}", e))?;
-    let kept = collect_jsonl_lines_up_to_turns(&content, keep_turns);
+    let kept = collect_jsonl_lines_by_messages(&content, keep_messages);
     let dest = session_jsonl_path(&cwd, &new_session_id)?;
     let truncated = kept.join("\n") + "\n";
     std::fs::write(&dest, truncated).map_err(|e| format!("write: {}", e))?;
-    safe_eprintln!("[fork] Copied {} -> {} ({} turns, {} lines)", parent_session_id, new_session_id, keep_turns, kept.len());
+    safe_eprintln!("[fork] Copied {} -> {} ({} messages, {} lines)", parent_session_id, new_session_id, keep_messages, kept.len());
     Ok(())
 }
 
@@ -1298,7 +1345,7 @@ fn create_mcp_config_file(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let filename = format!("{}.json", uuid::Uuid::new_v4());
     let path = dir.join(&filename);
-    std::fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     safe_eprintln!("[mcp] Created config file: {}", path.display());
     Ok(path.to_string_lossy().to_string())
 }
@@ -1421,7 +1468,7 @@ fn widget_file_modified(widget_id: String) -> Result<u64, String> {
         let mut max = 0u64;
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                let ft = entry.file_type().unwrap_or_else(|_| entry.file_type().unwrap());
+                let ft = match entry.file_type() { Ok(ft) => ft, Err(_) => continue };
                 if ft.is_dir() {
                     // Skip node_modules and hidden dirs
                     let name = entry.file_name();
@@ -1545,7 +1592,12 @@ async fn proxy_fetch(
                     || o[0] == 0                                    // 0.0.0.0/8
                 }
                 std::net::IpAddr::V6(v6) => {
-                    v6 == std::net::Ipv6Addr::LOCALHOST             // ::1
+                    v6.is_loopback()                                    // ::1
+                    || v6.is_unspecified()                              // ::
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80           // fe80::/10 link-local
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00           // fc00::/7 unique-local
+                    || (v6.segments()[0] & 0xff00) == 0xff00           // ff00::/8 multicast
+                    || v6.segments()[0..6] == [0,0,0,0,0,0xffff]       // ::ffff:0:0/96 IPv4-mapped
                 }
             };
             if is_blocked {
@@ -1725,8 +1777,8 @@ fn restore_checkpoint(session_id: String, turn: usize) -> Result<Vec<String>, St
         let snap_file = parts[0];
         let original_path = parts[1];
         // Block path traversal in crafted manifests
-        if original_path.contains("..") {
-            return Err(format!("restore_checkpoint blocked: path traversal in '{}'", original_path));
+        if original_path.contains("..") || snap_file.contains("..") {
+            return Err(format!("restore_checkpoint blocked: path traversal detected"));
         }
         let content = std::fs::read_to_string(dir.join(snap_file))
             .map_err(|e| format!("read snap {}: {}", snap_file, e))?;

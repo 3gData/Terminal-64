@@ -32,7 +32,13 @@ export async function rewritePromptStream(
   });
 
   // Now start the rewrite
-  rewriteId = await invoke("rewrite_prompt", { prompt });
+  try {
+    rewriteId = await invoke("rewrite_prompt", { prompt });
+  } catch (e) {
+    unChunk();
+    unDone();
+    throw e;
+  }
 
   // Replay any events that arrived before we had the ID
   for (const evt of pending) {

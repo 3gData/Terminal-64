@@ -483,14 +483,16 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           useClaudeStore.getState().createSession(sid, sessName || "Widget Session");
           if (sessPrompt) {
             setTimeout(() => {
+              useClaudeStore.getState().addUserMessage(sid, sessPrompt);
+              useClaudeStore.getState().incrementPromptCount(sid);
               createClaudeSession({
                 session_id: sid,
                 cwd: sessCwd || ".",
                 prompt: sessPrompt,
                 permission_mode: "auto",
-              }).catch(() => {});
-              useClaudeStore.getState().addUserMessage(sid, sessPrompt);
-              useClaudeStore.getState().incrementPromptCount(sid);
+              }).catch((err) => {
+                useClaudeStore.getState().setError(sid, `Failed to start session: ${err}`);
+              });
             }, 300);
           }
           post({ type: "t64:session-spawned", payload: { id: csId, sessionId: sid } });

@@ -37,6 +37,10 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     return () => { if (draftTimer.current) clearTimeout(draftTimer.current); };
   }, [text, onDraftChange]);
 
+  useEffect(() => {
+    return () => { if (blurTimer.current) clearTimeout(blurTimer.current); };
+  }, []);
+
   // Thinking timer — ticks every second while streaming
   useEffect(() => {
     if (!isStreaming || !streamingStartedAt) { setElapsed(""); return; }
@@ -67,6 +71,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
   const [fileIdx, setFileIdx] = useState(0);
   const [atStart, setAtStart] = useState(-1); // cursor position of the @
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const slashRef = useRef<HTMLDivElement>(null);
@@ -176,7 +181,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         }
         if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
           e.preventDefault();
-          selectFile(fileResults[fileIdx]);
+          if (fileIdx < fileResults.length) selectFile(fileResults[fileIdx]);
           return;
         }
         if (e.key === "Escape") {
@@ -200,7 +205,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         }
         if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
           e.preventDefault();
-          selectCommand(filteredCommands[selectedIdx]);
+          if (selectedIdx < filteredCommands.length) selectCommand(filteredCommands[selectedIdx]);
           return;
         }
         if (e.key === "Escape") {
@@ -210,12 +215,18 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         }
       }
 
+      if (e.key === "Escape" && isStreaming) {
+        e.preventDefault();
+        onCancel();
+        return;
+      }
+
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         handleSend();
       }
     },
-    [handleSend, showSlash, filteredCommands, selectedIdx, selectCommand, showFiles, fileResults, fileIdx, selectFile]
+    [handleSend, showSlash, filteredCommands, selectedIdx, selectCommand, showFiles, fileResults, fileIdx, selectFile, isStreaming, onCancel]
   );
 
   // Auto-resize textarea
@@ -323,7 +334,8 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
           autoCorrect="off"
           spellCheck={false}
           onBlur={() => {
-            setTimeout(() => { setShowSlash(false); setShowFiles(false); }, 200);
+            if (blurTimer.current) clearTimeout(blurTimer.current);
+            blurTimer.current = setTimeout(() => { setShowSlash(false); setShowFiles(false); }, 200);
           }}
         />
         {sessionName && (

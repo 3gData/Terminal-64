@@ -226,7 +226,7 @@ export async function performMerge(groupId: string) {
 
   const parentSession = useClaudeStore.getState().sessions[group.parentSessionId];
   if (!parentSession) {
-    delStore.setGroupStatus(groupId, "merged");
+    delStore.setGroupStatus(groupId, "active");
     return;
   }
 

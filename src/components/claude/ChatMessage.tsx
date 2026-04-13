@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { ChatMessage as ChatMessageType, ToolCall } from "../../lib/types";
 
 const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
@@ -7,7 +7,7 @@ const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
 // Render inline markdown: bold, italic, bold+italic, inline code, links, strikethrough
 function renderInline(text: string, keyPrefix: string = ""): React.ReactNode[] {
   // Order matters: bold+italic first, then bold, italic, inline code, links, strikethrough
-  const pattern = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
+  const pattern = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`([^`]+)`|\[([^\]]+)\]\(((?:[^()]+|\([^()]*\))+)\))/g;
   const result: React.ReactNode[] = [];
   let lastIndex = 0;
   let match;
@@ -126,14 +126,15 @@ function CopyBtn({ text }: { text: string }) {
 export function renderContent(text: string) {
   if (!text) return null;
 
-  // Split on fenced code blocks first (preserve them intact)
-  const segments = text.split(/(```[\s\S]*?```)/g);
+  // Split on fenced code blocks first (closed or unclosed at end of stream)
+  const segments = text.split(/(```[\s\S]*?```|```[\s\S]*$)/g);
   const elements: React.ReactNode[] = [];
   let key = 0;
 
   for (const segment of segments) {
-    if (segment.startsWith("```") && segment.endsWith("```")) {
-      const inner = segment.slice(3, -3);
+    if (segment.startsWith("```")) {
+      const closed = segment.endsWith("```") && segment.length > 3;
+      const inner = closed ? segment.slice(3, -3) : segment.slice(3);
       const nl = inner.indexOf("\n");
       const code = nl >= 0 ? inner.slice(nl + 1) : inner;
       const lang = nl >= 0 ? inner.slice(0, nl).trim() : "";
@@ -205,12 +206,14 @@ export function renderContent(text: string) {
       // Ordered list
       if (/^\d+[.)]\s/.test(trimmed)) {
         const items: string[] = [];
+        const startMatch = trimmed.match(/^(\d+)[.)]\s/);
+        const startNum = startMatch ? parseInt(startMatch[1], 10) : 1;
         while (i < lines.length && /^\d+[.)]\s/.test(lines[i].trimStart())) {
           items.push(lines[i].trimStart().replace(/^\d+[.)]\s/, ""));
           i++;
         }
         elements.push(
-          <ol key={key++} className="cc-list">
+          <ol key={key++} className="cc-list" start={startNum}>
             {items.map((item, j) => <li key={j}>{renderInline(item)}</li>)}
           </ol>
         );
@@ -465,6 +468,24 @@ export function ToolGroupCard({ tcs }: { tcs: ToolCall[] }) {
 
 export { GROUPABLE_TOOLS };
 
+function buildCopyText(message: ChatMessageType): string {
+  if (message.role === "user") {
+    return message.content || "";
+  }
+  // Assistant: text content + tool call summaries
+  const textPart = message.content?.replace(DELEGATION_BLOCK_RE, "").trim() || "";
+  const parts: string[] = [];
+  if (textPart) parts.push(textPart);
+  if (message.toolCalls && message.toolCalls.length > 0) {
+    const toolLines = message.toolCalls.map((tc) => {
+      const hdr = toolHeader(tc);
+      return `[${hdr.title}] ${hdr.detail}`.trim();
+    });
+    parts.push(toolLines.join("\n"));
+  }
+  return parts.join("\n\n");
+}
+
 function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   message: ChatMessageType;
   onRewind?: (messageId: string, content: string) => void;
@@ -472,6 +493,15 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   onEditClick?: (tcId: string, filePath: string, oldStr: string, newStr: string) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    const text = buildCopyText(message);
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+    setMenuOpen(false);
+  };
 
   const menuEl = menuOpen && (
     <div className="cc-ctx-menu" onMouseLeave={() => setMenuOpen(false)}>
@@ -480,6 +510,9 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
       </button>
       <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onFork?.(message.id); }}>
         <span className="cc-ctx-icon">⑂</span> Fork
+      </button>
+      <button className="cc-ctx-item" onClick={handleCopy}>
+        <span className="cc-ctx-icon">{copied ? "✓" : "⎘"}</span> {copied ? "Copied" : "Copy"}
       </button>
     </div>
   );
@@ -509,8 +542,13 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   }
 
   // Strip [DELEGATION_START]...[DELEGATION_END] blocks from assistant text
-  const delegationBlock = message.content?.match(DELEGATION_BLOCK_RE)?.[0];
-  const cleanContent = message.content ? message.content.replace(DELEGATION_BLOCK_RE, "").trim() : "";
+  const { delegationBlock, cleanContent } = useMemo(() => {
+    if (!message.content) return { delegationBlock: undefined, cleanContent: "" };
+    return {
+      delegationBlock: message.content.match(DELEGATION_BLOCK_RE)?.[0],
+      cleanContent: message.content.replace(DELEGATION_BLOCK_RE, "").trim(),
+    };
+  }, [message.content]);
 
   return (
     <div className="cc-message cc-message--assistant">

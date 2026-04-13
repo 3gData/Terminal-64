@@ -29,17 +29,15 @@ export default function TextEditor({ onSend, onClose }: TextEditorProps) {
     ta.style.height = Math.max(36, ta.scrollHeight) + "px";
   }, [text]);
 
-  // Save a snapshot to history
+  // Save a snapshot to history (uses functional updaters to avoid stale closures)
   const pushVersion = useCallback(
     (newText: string) => {
-      setHistory((h) => {
-        // Trim any forward history if we branched
-        const trimmed = h.slice(0, historyIdx + 1);
-        return [...trimmed, newText];
+      setHistoryIdx((idx) => {
+        setHistory((h) => [...h.slice(0, idx + 1), newText]);
+        return idx + 1;
       });
-      setHistoryIdx((i) => i + 1);
     },
-    [historyIdx]
+    []
   );
 
   const canUndo = historyIdx > 0;
@@ -81,11 +79,10 @@ export default function TextEditor({ onSend, onClose }: TextEditorProps) {
         setText(result);
       });
       // Save the rewritten result as the latest version
-      setHistory((h) => {
-        const trimmed = h.slice(0, historyIdx + 2); // +2 because pushVersion already incremented
-        return [...trimmed, result];
+      setHistoryIdx((idx) => {
+        setHistory((h) => [...h.slice(0, idx + 1), result]);
+        return idx + 1;
       });
-      setHistoryIdx((i) => i + 1);
     } catch (err: any) {
       setError(err.message || "Rewrite failed");
       setText(original);
@@ -93,7 +90,7 @@ export default function TextEditor({ onSend, onClose }: TextEditorProps) {
       setRewriting(false);
       textareaRef.current?.focus();
     }
-  }, [text, rewriting, pushVersion, historyIdx]);
+  }, [text, rewriting, pushVersion]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

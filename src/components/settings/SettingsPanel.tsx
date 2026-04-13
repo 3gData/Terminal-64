@@ -105,7 +105,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           const fenceMatch = json.match(/```(?:json)?\s*([\s\S]*?)```/);
           if (fenceMatch) json = fenceMatch[1].trim();
           const theme = JSON.parse(json) as ThemeDefinition;
-          if (theme.name && theme.ui && theme.terminal) {
+          const requiredUi = ["bg","bgSecondary","bgTertiary","fg","fgSecondary","fgMuted","border","accent","accentHover","tabActiveBg","tabInactiveBg","tabActiveFg","tabInactiveFg","tabHoverBg","scrollbar","scrollbarHover"] as const;
+          if (theme.name && theme.ui && theme.terminal && requiredUi.every((k) => (theme.ui as any)[k])) {
             addTheme(theme);
             setTheme(theme.name);
             setSetting({ theme: theme.name });
@@ -237,7 +238,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               <div className="sp-qp-list">
                 {quickPastes.map((qp) => (
                   <div key={qp.id} className="sp-qp-item">
-                    <span className="sp-qp-text">{qp.command}</span>
+                    <span className="sp-qp-text" title={qp.command}>{qp.command}</span>
                     <button className="sp-qp-del" onClick={() => removeQuickPaste(qp.id)} title="Remove">×</button>
                   </div>
                 ))}

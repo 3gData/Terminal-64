@@ -11,8 +11,8 @@
   height: 100%;
 }
 
-*:focus,
-*:focus-visible {
+.xterminal *:focus,
+.xterminal *:focus-visible {
   outline: none !important;
 }
 

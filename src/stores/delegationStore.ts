@@ -157,6 +157,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
         t.id === taskId ? { ...t, lastAction: action, lastActionAt: Date.now() } : t,
       );
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
+      debouncedSave(groups);
       return { groups };
     });
   },

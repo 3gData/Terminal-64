@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState, useEffect, useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, CanvasTerminal } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
@@ -62,12 +63,17 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
     };
   }, []);
 
-  // Close color picker on outside click
+  // Close color picker on outside click or Escape
   useEffect(() => {
     if (!showColors) return;
-    const handler = () => setShowColors(false);
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
+    const clickHandler = () => setShowColors(false);
+    const keyHandler = (e: KeyboardEvent) => { if (e.key === "Escape") setShowColors(false); };
+    window.addEventListener("click", clickHandler);
+    window.addEventListener("keydown", keyHandler);
+    return () => {
+      window.removeEventListener("click", clickHandler);
+      window.removeEventListener("keydown", keyHandler);
+    };
   }, [showColors]);
 
   const handleHeaderMouseDown = useCallback(
@@ -248,8 +254,11 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   const isSharedChat = term.panelType === "shared-chat";
   const isWidget = term.panelType === "widget";
   const isBrowser = term.panelType === "browser";
-  const claudeSessionName = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.name : undefined);
-  const claudeCwd = useClaudeStore((s) => isClaude ? s.sessions[term.terminalId]?.cwd : undefined);
+  const { claudeSessionName, claudeCwd } = useClaudeStore(useShallow((s) => {
+    if (!isClaude) return { claudeSessionName: undefined, claudeCwd: undefined };
+    const sess = s.sessions[term.terminalId];
+    return { claudeSessionName: sess?.name, claudeCwd: sess?.cwd };
+  }));
 
   const claudeTitle = (() => {
     const name = claudeSessionName || "Unnamed Session";

@@ -470,9 +470,10 @@ export function useClaudeEvents() {
     return () => {
       cancelled = true;
       clearInterval(fallbackFlush);
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+      flushPendingText();
       unsubStore();
       unlistenEvent?.(); unlistenDone?.(); unlistenDiscord?.(); unlistenPerm?.();
-      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
       pendingText.clear();
       pendingBlocks.clear();
       assistantFinalized.clear();

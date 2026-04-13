@@ -729,11 +729,15 @@ async fn create_session_channel(
 }
 
 fn split_msg(text: &str, max: usize) -> Vec<String> {
+    if max == 0 { return vec![text.to_string()]; }
     if text.len() <= max { return vec![text.to_string()]; }
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        let end = (start + max).min(text.len());
+        let mut end = (start + max).min(text.len());
+        // Ensure we don't split in the middle of a multi-byte UTF-8 character
+        while end > start && !text.is_char_boundary(end) { end -= 1; }
+        if end == start { end = start + 1; while end < text.len() && !text.is_char_boundary(end) { end += 1; } }
         let split = if end < text.len() { text[start..end].rfind('\n').map(|i| start + i + 1).unwrap_or(end) } else { end };
         chunks.push(text[start..split].to_string());
         start = split;

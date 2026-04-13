@@ -109,6 +109,11 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
   const [searching, setSearching] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Clean up search timer on unmount
+  useEffect(() => {
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+  }, []);
+
   // Load root directory on mount
   useEffect(() => {
     listDirectory(cwd).then(setEntries).catch(() => setError(true));

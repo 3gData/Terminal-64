@@ -208,13 +208,22 @@ export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: C
   );
 }
 
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function cwdMatch(a: string | undefined, b: string): boolean {
+  if (!a || !b) return true;
+  return normPath(a) === normPath(b);
+}
+
 function getNamedSessions(liveSessions: Record<string, any>, cwd: string): { id: string; name: string; messageCount: number }[] {
   const results: { id: string; name: string; messageCount: number }[] = [];
   const seen = new Set<string>();
 
   // Live sessions
   for (const [id, s] of Object.entries(liveSessions)) {
-    if (s.name && (!cwd || !s.cwd || s.cwd === cwd)) {
+    if (s.name && cwdMatch(s.cwd, cwd)) {
       results.push({ id, name: s.name, messageCount: s.messages?.length || 0 });
       seen.add(id);
     }
@@ -226,7 +235,7 @@ function getNamedSessions(liveSessions: Record<string, any>, cwd: string): { id:
     if (raw) {
       const data = JSON.parse(raw);
       for (const [id, session] of Object.entries(data as Record<string, any>)) {
-        if (session.name && !seen.has(id) && (!cwd || !session.cwd || session.cwd === cwd)) {
+        if (session.name && !seen.has(id) && cwdMatch(session.cwd, cwd)) {
           results.push({ id, name: session.name, messageCount: session.messages?.length || 0 });
         }
       }

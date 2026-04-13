@@ -30,7 +30,14 @@ export default function Canvas() {
     zoom: s.zoom,
     snapGuides: s.snapGuides,
   })));
-  const claudeSessions = useClaudeStore((s) => s.sessions);
+  // Only extract cwds to avoid re-rendering on every message/streaming update
+  const claudeCwds = useClaudeStore(useShallow((s) => {
+    const out: Record<string, string> = {};
+    for (const [id, sess] of Object.entries(s.sessions)) {
+      if (sess.cwd) out[id] = sess.cwd;
+    }
+    return out;
+  }));
   // Actions are stable refs — no need for shallow comparison
   const pan = useCanvasStore((s) => s.pan);
   const addTerminal = useCanvasStore((s) => s.addTerminal);
@@ -49,7 +56,7 @@ export default function Canvas() {
       // Match any claude panel whose cwd contains this widget's folder
       const widgetPath = `/.terminal64/widgets/${w.widgetId}`;
       for (const c of claudes) {
-        const cwd = claudeSessions[c.terminalId]?.cwd || c.cwd;
+        const cwd = claudeCwds[c.terminalId] || c.cwd;
         if (!cwd || !cwd.replace(/\\/g, "/").includes(widgetPath)) continue;
 
         const fc = { x: w.x + w.width / 2, y: w.y + w.height / 2 };
@@ -64,7 +71,7 @@ export default function Canvas() {
       }
     }
     return lines;
-  }, [terminals, claudeSessions]);
+  }, [terminals, claudeCwds]);
 
   // Center view on terminals on first mount
   useEffect(() => {
@@ -110,15 +117,22 @@ export default function Canvas() {
     let gestureStartZoom = 1;
 
     // --- macOS WebKit gesture events (pinch-to-zoom on trackpad) ---
+    let gestureTimeout: ReturnType<typeof setTimeout> | null = null;
+    const resetGestureTimeout = () => {
+      if (gestureTimeout !== null) clearTimeout(gestureTimeout);
+      gestureTimeout = setTimeout(() => { gesturing = false; }, 500);
+    };
     const onGestureStart = (e: any) => {
       e.preventDefault();
       if ((e.target as HTMLElement)?.closest?.(".floating-terminal")) return;
       gesturing = true;
       gestureStartZoom = useCanvasStore.getState().zoom;
+      resetGestureTimeout();
     };
     const onGestureChange = (e: any) => {
       e.preventDefault();
       if (!gesturing) return;
+      resetGestureTimeout();
       const rect = el.getBoundingClientRect();
       const cx = (e.clientX ?? rect.width / 2) - rect.left;
       const cy = (e.clientY ?? rect.height / 2) - rect.top;
@@ -127,6 +141,7 @@ export default function Canvas() {
     };
     const onGestureEnd = (e: any) => {
       e.preventDefault();
+      if (gestureTimeout !== null) clearTimeout(gestureTimeout);
       gesturing = false;
     };
 
@@ -160,6 +175,7 @@ export default function Canvas() {
     el.addEventListener("gestureend", onGestureEnd, { passive: false } as any);
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => {
+      if (gestureTimeout !== null) clearTimeout(gestureTimeout);
       el.removeEventListener("gesturestart", onGestureStart);
       el.removeEventListener("gesturechange", onGestureChange);
       el.removeEventListener("gestureend", onGestureEnd);
@@ -172,6 +188,7 @@ export default function Canvas() {
       ref={canvasRef}
       className="canvas"
       onMouseDown={handleMouseDown}
+      onDoubleClick={(e) => { if (e.target === canvasRef.current) addTerminal(); }}
       style={{
         backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
         backgroundPosition: `${panX % (24 * zoom)}px ${panY % (24 * zoom)}px`,

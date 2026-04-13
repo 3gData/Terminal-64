@@ -37,6 +37,11 @@ export default function CommandPalette({ isOpen, onClose }: CommandPaletteProps)
     setSelectedIndex(0);
   }, [query]);
 
+  useEffect(() => {
+    const el = document.querySelector(".command-palette-item.selected");
+    el?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex]);
+
   const execute = useCallback(
     (qp: QuickPaste) => {
       if (!activeTerminalId) return;

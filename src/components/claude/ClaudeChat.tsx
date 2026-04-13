@@ -168,6 +168,12 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     if (atBottom) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [session?.messages?.length]);
+  // Auto-scroll to permission prompt when it appears
+  useEffect(() => {
+    if (!session?.pendingPermission) return;
+    const el = messagesEndRef.current?.parentElement;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [session?.pendingPermission]);
   // For streaming, scroll instantly (only if at bottom — check position directly to avoid stale ref)
   useEffect(() => {
     if (!session?.streamingText) return;
@@ -675,8 +681,7 @@ Rules:
     if (forkedMessages.length > 0) {
       store.loadFromDisk(newPanel.terminalId, forkedMessages);
       // Copy parent JSONL (truncated to fork point) so --resume works with full context
-      const keepTurns = forkedMessages.filter(m => m.role === "user").length;
-      forkSessionJsonl(sessionId, newPanel.terminalId, effectiveCwd, keepTurns)
+      forkSessionJsonl(sessionId, newPanel.terminalId, effectiveCwd, forkedMessages.length)
         .catch((err) => console.warn("[fork] Failed to copy JSONL:", err));
     }
     store.setCwd(newPanel.terminalId, effectiveCwd);
@@ -884,7 +889,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               const userMcp = mcpServers.filter((s: any) => s.name !== "terminal-64");
               const hasError = mcpServers.some((s: any) => s.status === "failed" || s.status === "error");
               return (
-                <button className={`cc-dropdown-trigger cc-mcp-btn ${userMcp.length > 0 ? "cc-mcp-btn--active" : ""} ${hasError ? "cc-mcp-btn--error" : ""}`} onClick={() => { setShowMcpDrop((v) => !v); setShowModelDrop(false); setShowEffortDrop(false); }}>
+                <button className={`cc-dropdown-trigger cc-mcp-btn ${userMcp.length > 0 ? "cc-mcp-btn--active" : ""} ${hasError ? "cc-mcp-btn--error" : ""}`} onClick={() => { if (!showMcpDrop && effectiveCwd) listMcpServers(effectiveCwd).then(setConfigMcpServers).catch(() => {}); setShowMcpDrop((v) => !v); setShowModelDrop(false); setShowEffortDrop(false); }}>
                   MCP{userMcp.length > 0 ? ` (${userMcp.length})` : ""}<span className="cc-chevron">▾</span>
                 </button>
               );
@@ -931,7 +936,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
 
           {/* Effort dropdown */}
           <div className="cc-dropdown-wrap" onClick={(e) => e.stopPropagation()}>
-            <button className="cc-dropdown-trigger" onClick={() => { setShowEffortDrop((v) => !v); setShowModelDrop(false); }}>
+            <button className="cc-dropdown-trigger" onClick={() => { setShowEffortDrop((v) => !v); setShowModelDrop(false); setShowMcpDrop(false); }}>
               {currentEffort.label}<span className="cc-chevron">▾</span>
             </button>
             {showEffortDrop && (
@@ -1128,9 +1133,11 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               let lastUserTs: number | null = null;
               while (i < msgs.length) {
                 const msg = msgs[i];
-                // Insert "Finished after X" divider between turns
+                // Insert "Finished after X" divider after a completed turn
+                // Measures from user prompt to last assistant message (actual work time)
                 if (msg.role === "user" && lastUserTs !== null && i > 0 && msgs[i - 1].role === "assistant") {
-                  const dur = msg.timestamp - lastUserTs;
+                  const lastAssistantTs = msgs[i - 1].timestamp;
+                  const dur = lastAssistantTs - lastUserTs;
                   if (dur > 2000) {
                     const secs = Math.floor(dur / 1000);
                     const label = secs >= 60
@@ -1346,7 +1353,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                 {attachedFiles.length > 0 && (
                   <div className="cc-attached-files">
                     {attachedFiles.map((f, i) => (
-                      <div key={f} className="cc-file-chip">
+                      <div key={`${i}-${f}`} className="cc-file-chip">
                         <span className="cc-file-name">{f.split(/[/\\]/).pop()}</span>
                         <button className="cc-file-remove" onClick={() => setAttachedFiles((p) => p.filter((_, j) => j !== i))}>×</button>
                       </div>

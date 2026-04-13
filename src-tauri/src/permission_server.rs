@@ -260,7 +260,8 @@ fn handle_connection(
         .set_read_timeout(Some(Duration::from_secs(10)))
         .ok();
 
-    // Read headers
+    // Read headers (cap at 16KB to prevent DoS)
+    const MAX_HEADER_SIZE: usize = 16 * 1024;
     let mut reader = std::io::BufReader::new(&stream);
     let mut headers = String::new();
     loop {
@@ -268,6 +269,9 @@ fn handle_connection(
         match reader.read_line(&mut line) {
             Ok(0) => return Err("connection closed".into()),
             Ok(_) => {
+                if headers.len() + line.len() > MAX_HEADER_SIZE {
+                    return Err("headers too large".into());
+                }
                 headers.push_str(&line);
                 if line == "\r\n" || line == "\n" {
                     break;
@@ -302,13 +306,15 @@ fn handle_connection(
             return Ok(());
         }
 
-        // Parse Content-Length
+        // Parse Content-Length (cap at 1MB to prevent DoS)
+        const MAX_BODY: usize = 1024 * 1024;
         let content_length: usize = headers
             .lines()
             .find(|l| l.to_lowercase().starts_with("content-length:"))
             .and_then(|l| l.split(':').nth(1))
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(MAX_BODY);
 
         if method == "POST" && (path == "/delegation/message" || path == "/delegation/complete") {
             let mut body = vec![0u8; content_length];
@@ -393,13 +399,15 @@ fn handle_connection(
     }
     let run_token = parts[3].to_string();
 
-    // Parse Content-Length
+    // Parse Content-Length (cap at 1MB to prevent DoS)
+    const MAX_BODY: usize = 1024 * 1024;
     let content_length: usize = headers
         .lines()
         .find(|l| l.to_lowercase().starts_with("content-length:"))
         .and_then(|l| l.split(':').nth(1))
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(MAX_BODY);
 
     // Read body
     let mut body = vec![0u8; content_length];

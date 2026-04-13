@@ -210,7 +210,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
   const initial = getInitialState();
 
   // Auto-save only when dirty
-  setInterval(() => {
+  const saveIntervalId = setInterval(() => {
     if (dirty) {
       try {
         useCanvasStore.getState().saveSession();
@@ -218,6 +218,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       } catch {}
     }
   }, AUTO_SAVE_INTERVAL_MS);
+
+  // Clean up on HMR to avoid stacking intervals
+  if ((import.meta as any).hot) {
+    (import.meta as any).hot.dispose(() => clearInterval(saveIntervalId));
+  }
 
   const markDirty = () => { dirty = true; };
 
@@ -437,6 +442,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           t.id === id ? { ...t, poppedOut: true } : t
         ),
       }));
+      markDirty();
     },
 
     popIn: (terminalId: string) => {
@@ -492,6 +498,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       }
       const contentW = maxX - minX;
       const contentH = maxY - minY;
+      if (contentW <= 0 || contentH <= 0) return;
       const pad = 40; // padding around content
       const zoom = Math.max(0.1, Math.min(1, Math.min(
         (viewportW - pad * 2) / contentW,

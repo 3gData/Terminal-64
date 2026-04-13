@@ -90,6 +90,9 @@
   font-size: 12.5px;
   font-family: 'Cascadia Code', Consolas, monospace;
   color: var(--fg-secondary, #bac2de);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .qp-command {

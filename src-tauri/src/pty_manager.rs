@@ -121,7 +121,7 @@ impl PtyManager {
                     if total_bytes == n {
                         safe_eprintln!("[pty] First read: {} bytes for {}", n, terminal_id);
                     }
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let data = String::from_utf8_lossy(&buf[..n]).into_owned();
                     let result = app_handle.emit(
                         "terminal-output",
                         TerminalOutput {

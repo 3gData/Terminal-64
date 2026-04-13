@@ -315,23 +315,20 @@ export default function XTerminal({
           return;
         }
         fitAddonRef.current.fit();
-        lastSizeRef.current = {
-          cols: termRef.current.cols,
-          rows: termRef.current.rows,
-        };
-        resizeTerminal(
-          terminalId,
-          termRef.current.cols,
-          termRef.current.rows
-        ).catch(() => {});
+        const cols = termRef.current.cols;
+        const rows = termRef.current.rows;
+        if (cols < 1 || rows < 1) return;
+        lastSizeRef.current = { cols, rows };
+        resizeTerminal(terminalId, cols, rows).catch(() => {});
       }, 50);
     });
     observer.observe(containerRef.current);
 
-    setTimeout(() => term.focus(), 50);
+    const focusTimer = setTimeout(() => { if (!disposed) term.focus(); }, 50);
 
     return () => {
       disposed = true;
+      clearTimeout(focusTimer);
       initializedRef.current = false;
       observer.disconnect();
       clearTimeout(resizeTimeout);
