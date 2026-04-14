@@ -5,13 +5,14 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useThemeStore } from "../../stores/themeStore";
-import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, writeFile, loadSessionHistory, mapHistoryMessages, truncateSessionJsonl, truncateSessionJsonlByMessages, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, revertFilesGit, deleteFiles, shellExec, ensureT64Mcp, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage } from "../../lib/tauriApi";
+import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, writeFile, loadSessionHistory, mapHistoryMessages, truncateSessionJsonl, truncateSessionJsonlByMessages, findRewindUuid, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, revertFilesGit, deleteFiles, shellExec, ensureT64Mcp, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage } from "../../lib/tauriApi";
 import { SlashCommand, PermissionMode, McpServer } from "../../lib/types";
 import { rewritePromptStream } from "../../lib/ai";
 import ChatMessage, { toolHeader, renderContent, ToolGroupCard, GROUPABLE_TOOLS } from "./ChatMessage";
 import Editor from "@monaco-editor/react";
 import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
+import { CLAUDE_BUILTIN_COMMANDS } from "../../lib/claudeSlashCommands";
 import ChatInput from "./ChatInput";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { endDelegation } from "../../hooks/useDelegationOrchestrator";
@@ -155,7 +156,21 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     { name: "reload-plugins", description: "Reload slash commands, skills, and MCP servers", usage: "/reload-plugins — re-fetches all available commands and MCP configs.", source: "Terminal 64" },
   ]);
   const reloadCommands = useCallback(() => {
-    listSlashCommands().then((cmds) => setSlashCommands([...t64Commands.current, ...cmds])).catch(() => setSlashCommands(t64Commands.current));
+    listSlashCommands().then((cmds) => {
+      const merged = [...t64Commands.current, ...cmds];
+      const seen = new Set(merged.map((c) => c.name));
+      for (const bc of CLAUDE_BUILTIN_COMMANDS) {
+        if (!seen.has(bc.name)) merged.push(bc);
+      }
+      setSlashCommands(merged);
+    }).catch(() => {
+      const merged = [...t64Commands.current];
+      const seen = new Set(merged.map((c) => c.name));
+      for (const bc of CLAUDE_BUILTIN_COMMANDS) {
+        if (!seen.has(bc.name)) merged.push(bc);
+      }
+      setSlashCommands(merged);
+    });
     listMcpServers(cwd).then(setConfigMcpServers).catch(() => {});
   }, [cwd]);
   useEffect(() => { reloadCommands(); }, [reloadCommands]);
@@ -411,10 +426,25 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         }
         // Use --resume if session was ever started (survives rewind/cancel),
         // otherwise create new. Falls back to the other on failure.
-        console.log("[send] Sending prompt:", { started, sessionId, cwd: effectiveCwd, promptPreview: prompt.slice(0, 80) });
-        if (started) {
+        // After rewind, pass --resume-session-at to slice conversation at the rewind point
+        // (one-shot: cleared after use so subsequent prompts resume normally).
+        const resumeAtUuid = sess?.resumeAtUuid || undefined;
+        if (resumeAtUuid) {
+          useClaudeStore.getState().setResumeAtUuid(sessionId, null);
+        }
+        // Fork support: use --fork-session <parentId> with --resume on first prompt
+        const forkParent = sess?.forkParentSessionId || undefined;
+        if (forkParent) {
+          useClaudeStore.getState().setForkParentSessionId(sessionId, null);
+        }
+        console.log("[send] Sending prompt:", { started, sessionId, cwd: effectiveCwd, resumeAtUuid, forkParent, promptPreview: prompt.slice(0, 80) });
+        if (forkParent && !started) {
+          // Forked session: use --resume with --fork-session to let CLI handle the fork
+          await sendClaudePrompt({ ...req, cwd: effectiveCwd, fork_session: forkParent });
+          console.log("[send] sendClaudePrompt with --fork-session succeeded");
+        } else if (started) {
           try {
-            await sendClaudePrompt({ ...req, cwd: effectiveCwd });
+            await sendClaudePrompt({ ...req, cwd: effectiveCwd, resume_session_at: resumeAtUuid });
             console.log("[send] sendClaudePrompt (--resume) succeeded");
           } catch (resumeErr) {
             console.log("[send] sendClaudePrompt failed, falling back to createClaudeSession:", resumeErr);
@@ -627,21 +657,20 @@ Rules:
         lastKeptMsg: updatedSess?.messages[updatedSess.messages.length - 1]?.content?.slice(0, 80),
       });
 
-      // Truncate JSONL by exact message count (matches load_session_history's visible message counting)
+      // Instead of destructively truncating the JSONL, find the UUID of the last
+      // message we want to keep and store it.  The next --resume will pass
+      // --resume-session-at <uuid> so Claude CLI slices its own parentUuid chain
+      // correctly (matching how Claude's own /rewind works: append-only JSONL).
       try {
-        const result = await truncateSessionJsonlByMessages(sessionId, rewindCwd, keepMessages);
-        console.log("[rewind] JSONL truncation SUCCESS:", result);
-
-        // Verify: if the truncation didn't actually remove anything, warn loudly
-        if (result.original_bytes === result.new_bytes) {
-          console.warn("[rewind] WARNING: JSONL file size unchanged! Truncation may not have removed anything.", result);
-        }
+        const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
+        console.log("[rewind] Found rewind UUID:", uuid, "for keepMessages:", keepMessages);
+        useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
       } catch (err) {
-        console.error("[rewind] JSONL truncation FAILED:", err, { sessionId, rewindCwd, keepMessages });
-        // Fallback: try turn-based truncation
+        console.error("[rewind] findRewindUuid FAILED, falling back to JSONL truncation:", err);
+        // Fallback: destructive truncation (legacy path)
         try {
-          await truncateSessionJsonl(sessionId, rewindCwd, keepTurns);
-          console.log("[rewind] Fallback turn-based truncation succeeded");
+          const result = await truncateSessionJsonlByMessages(sessionId, rewindCwd, keepMessages);
+          console.log("[rewind] Fallback JSONL truncation:", result);
         } catch (err2) {
           console.error("[rewind] Fallback truncation also FAILED:", err2);
         }
@@ -745,9 +774,9 @@ Rules:
     store.createSession(newPanel.terminalId);
     if (forkedMessages.length > 0) {
       store.loadFromDisk(newPanel.terminalId, forkedMessages);
-      // Copy parent JSONL (truncated to fork point) so --resume works with full context
-      forkSessionJsonl(sessionId, newPanel.terminalId, effectiveCwd, forkedMessages.length)
-        .catch((err) => console.warn("[fork] Failed to copy JSONL:", err));
+      // Use --fork-session to let the CLI handle forking from the parent session
+      store.setForkParentSessionId(newPanel.terminalId, sessionId);
+      console.log("[fork] Set forkParentSessionId on new session:", sessionId);
     }
     store.setCwd(newPanel.terminalId, effectiveCwd);
   }, [sessionId, effectiveCwd]);
@@ -908,6 +937,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             prompt: initialPrompt,
             permission_mode: "bypass_all",
             mcp_config: mcpConfigPath || undefined,
+            no_session_persistence: true,
           }).catch((err) => {
             console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
             delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
@@ -965,7 +995,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         <button className={`cc-filetree-toggle ${showFileTree ? "cc-filetree-toggle--open" : ""}`} onClick={() => setShowFileTree((v) => !v)} title="Toggle file browser">
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 1L7 5L3 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </button>
-        <div className="cc-topbar-left">
+        <div className="cc-topbar-center">
           {/* MCP servers — t64 built-in excluded from count but shown in dropdown */}
           <div className="cc-dropdown-wrap" onClick={(e) => e.stopPropagation()}>
             {(() => {
@@ -987,12 +1017,22 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                     const isError = status === "failed" || status === "error";
                     const isConnected = status === "connected";
                     const isBuiltIn = s.name === "terminal-64";
+                    const toolCount = s.toolCount ?? s.tools?.length;
                     return (
                       <div key={s.name} className={`cc-mcp-item ${isBuiltIn ? "cc-mcp-item--builtin" : ""}`}>
                         <span className={`cc-mcp-dot ${isError ? "cc-mcp-dot--error" : isConnected ? "cc-mcp-dot--ok" : "cc-mcp-dot--idle"}`} />
                         <div className="cc-mcp-info">
                           <span className="cc-mcp-name">{isBuiltIn ? "T64" : s.name}</span>
-                          <span className="cc-mcp-meta">{status}{isBuiltIn ? " · built-in" : ""}{s.transport ? ` · ${s.transport}` : ""}{s.scope ? ` · ${s.scope}` : ""}</span>
+                          <span className="cc-mcp-meta">
+                            {status}
+                            {isBuiltIn ? " · built-in" : ""}
+                            {s.transport ? ` · ${s.transport}` : ""}
+                            {s.scope ? ` · ${s.scope}` : ""}
+                            {toolCount != null ? ` · ${toolCount} tool${toolCount !== 1 ? "s" : ""}` : ""}
+                          </span>
+                          {isError && s.error && (
+                            <span className="cc-mcp-error">{s.error}</span>
+                          )}
                         </div>
                       </div>
                     );
@@ -1032,10 +1072,11 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             )}
           </div>
 
+
         </div>
 
         <div className="cc-topbar-right">
-          {session.contextMax > 0 && session.contextUsed > 0 && (() => {
+          {session.contextMax > 0 && (() => {
             const ctxPct = Math.round((session.contextUsed / session.contextMax) * 100);
             return (
               <>
@@ -1251,6 +1292,16 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                   }
                 }
                 elements.push(<ChatMessage key={msg.id} message={msg} onRewind={handleRewind} onFork={handleFork} onEditClick={handleEditClick} />);
+                // Show compact divider right after any /compact user message
+                if (msg.role === "user" && /^\/compact\b/i.test(msg.content || "")) {
+                  // If this is the last /compact and compaction is still in progress, show live status
+                  const isLastCompact = !msgs.slice(i + 1).some((m: any) => m.role === "user" && /^\/compact\b/i.test(m.content || ""));
+                  if (isLastCompact && session.autoCompactStatus !== "idle") {
+                    elements.push(<CompactDivider key={`compact-${msg.id}`} status={session.autoCompactStatus} startedAt={session.autoCompactStartedAt} />);
+                  } else {
+                    elements.push(<CompactDivider key={`compact-${msg.id}`} status="done" startedAt={null} />);
+                  }
+                }
                 i++;
               }
               if (!session.isStreaming && lastUserTs !== null && msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
@@ -1342,9 +1393,6 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               <div className="cc-message cc-message--error">
                 <div className="cc-error">{session.error}</div>
               </div>
-            )}
-            {session.autoCompactStatus !== "idle" && (
-              <CompactDivider status={session.autoCompactStatus} startedAt={session.autoCompactStartedAt} />
             )}
             <div ref={messagesEndRef} />
           </div>

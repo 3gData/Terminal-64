@@ -4,6 +4,7 @@ import { readFileBase64 } from "../../lib/tauriApi";
 
 const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
 const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
+const SLASH_CMD_RE = /^\/([a-zA-Z0-9_-]+)\s*([\s\S]*)$/;
 
 // Image paste support
 const IMAGE_EXTS = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i;
@@ -98,6 +99,20 @@ function renderInline(text: string, keyPrefix: string = ""): React.ReactNode[] {
     result.push(text.slice(lastIndex));
   }
   return result;
+}
+
+function SkillCommandBadge({ name, args }: { name: string; args: string }) {
+  return (
+    <div className="cc-skill-badge">
+      <span className="cc-skill-badge-icon">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+        </svg>
+      </span>
+      <span className="cc-skill-badge-name">/{name}</span>
+      {args && <span className="cc-skill-badge-args">{args}</span>}
+    </div>
+  );
 }
 
 function DelegationPlanBadge({ block }: { block: string }) {
@@ -427,6 +442,22 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     );
   }
 
+  // Skill tool — show skill name and loaded content
+  if (tc.name === "Skill") {
+    const skillName = i.skill ? String(i.skill) : "unknown";
+    const skillArgs = i.args ? String(i.args) : "";
+    return (
+      <div className="cc-tc-body">
+        <div className="cc-skill-loaded">
+          <span className="cc-skill-loaded-label">Loaded skill</span>
+          <code className="cc-skill-loaded-name">/{skillName}</code>
+          {skillArgs && <span className="cc-skill-loaded-args">{skillArgs}</span>}
+        </div>
+        {result && <pre className="cc-tc-output cc-skill-output">{result}</pre>}
+      </div>
+    );
+  }
+
   // Default — show input JSON and result
   return (
     <div className="cc-tc-body">
@@ -574,11 +605,15 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   if (message.role === "user") {
     const content = message.content || "";
     const isMerge = content.startsWith(MERGE_PREFIX);
+    const slashMatch = content.match(SLASH_CMD_RE);
+    const isSlashCmd = slashMatch && !isMerge;
     return (
       <div className="cc-message cc-message--user">
         {menuBtn}
         {isMerge ? (
           <MergeResultCard content={content} />
+        ) : isSlashCmd ? (
+          <SkillCommandBadge name={slashMatch[1]} args={slashMatch[2].trim()} />
         ) : content ? (
           <div className="cc-bubble cc-bubble--user">
             {renderUserContent(content)}

@@ -30,12 +30,25 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
   const [text, setText] = useState(draftPrompt || "");
   const [elapsed, setElapsed] = useState("");
 
+  // Sync external draft changes (e.g. from skill library "Use Skill" button)
+  const lastExternalDraft = useRef(draftPrompt || "");
+  useEffect(() => {
+    if (draftPrompt !== undefined && draftPrompt !== lastExternalDraft.current && draftPrompt !== text) {
+      setText(draftPrompt);
+      lastExternalDraft.current = draftPrompt;
+      textareaRef.current?.focus();
+    }
+  }, [draftPrompt]);
+
   // Save draft prompt debounced
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!onDraftChange) return;
     if (draftTimer.current) clearTimeout(draftTimer.current);
-    draftTimer.current = setTimeout(() => onDraftChange(text), 1000);
+    draftTimer.current = setTimeout(() => {
+      onDraftChange(text);
+      lastExternalDraft.current = text;
+    }, 1000);
     return () => { if (draftTimer.current) clearTimeout(draftTimer.current); };
   }, [text, onDraftChange]);
 

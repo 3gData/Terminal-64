@@ -45,6 +45,11 @@ export interface QueuedPrompt {
 export interface McpServerStatus {
   name: string;
   status: string;
+  error?: string;
+  transport?: string;
+  scope?: string;
+  tools?: { name: string; description?: string }[];
+  toolCount?: number;
 }
 
 export interface ClaudeSession {
@@ -76,6 +81,8 @@ export interface ClaudeSession {
   modifiedFiles: string[];
   autoCompactStatus: "idle" | "compacting" | "done"; // auto-compact lifecycle
   autoCompactStartedAt: number | null; // timestamp when compacting began
+  resumeAtUuid: string | null; // JSONL UUID for --resume-session-at after rewind (one-shot, cleared after use)
+  forkParentSessionId: string | null; // parent session ID for --fork-session (one-shot, cleared after use)
 }
 
 export interface ActiveLoop {
@@ -124,6 +131,8 @@ interface ClaudeState {
   resetModifiedFiles: (sessionId: string) => void;
   deleteSession: (sessionId: string) => void;
   setAutoCompactStatus: (sessionId: string, status: "idle" | "compacting" | "done") => void;
+  setResumeAtUuid: (sessionId: string, uuid: string | null) => void;
+  setForkParentSessionId: (sessionId: string, parentId: string | null) => void;
   truncateFromMessage: (sessionId: string, messageId: string) => void;
 }
 
@@ -166,6 +175,8 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
         tasks: s.tasks,
         totalCost: s.totalCost,
         totalTokens: s.totalTokens,
+        contextUsed: s.contextUsed,
+        contextMax: s.contextMax,
         promptCount: s.promptCount,
         name: s.name,
         cwd: s.cwd,
@@ -187,6 +198,8 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
           tasks: s.tasks,
           totalCost: s.totalCost,
           totalTokens: s.totalTokens,
+          contextUsed: s.contextUsed,
+          contextMax: s.contextMax,
           promptCount: s.promptCount,
           name: s.name,
           cwd: s.cwd,
@@ -219,8 +232,8 @@ function loadSession(sessionId: string): ClaudeSession | null {
       model: saved.model || "",
       totalCost: saved.totalCost || 0,
       totalTokens: saved.totalTokens || 0,
-      contextUsed: 0,
-      contextMax: 0,
+      contextUsed: saved.contextUsed || 0,
+      contextMax: saved.contextMax || 0,
       error: null,
       promptCount: saved.promptCount || saved.messages.filter((m: any) => m.role === "user").length,
       planModeActive: false,
@@ -237,6 +250,8 @@ function loadSession(sessionId: string): ClaudeSession | null {
       modifiedFiles: [],
       autoCompactStatus: "idle",
       autoCompactStartedAt: null,
+      resumeAtUuid: null,
+      forkParentSessionId: null,
     };
   } catch {
     return null;
@@ -281,7 +296,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
           sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "", streamingStartedAt: null, lastEventAt: null,
           model: "", totalCost: 0, totalTokens: 0, contextUsed: 0, contextMax: 0, error: null, promptCount: 0, planModeActive: false,
           pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "",
-          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [], autoCompactStatus: "idle" as const, autoCompactStartedAt: null,
+          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [], autoCompactStatus: "idle" as const, autoCompactStartedAt: null, resumeAtUuid: null, forkParentSessionId: null,
         },
       };
       if (!ephemeral) debouncedSave();
@@ -612,6 +627,14 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       autoCompactStatus: status,
       autoCompactStartedAt: status === "compacting" ? Date.now() : s.sessions[sessionId]?.autoCompactStartedAt ?? null,
     }) }));
+  },
+
+  setResumeAtUuid: (sessionId, uuid) => {
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { resumeAtUuid: uuid }) }));
+  },
+
+  setForkParentSessionId: (sessionId, parentId) => {
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, { forkParentSessionId: parentId }) }));
   },
 
   // Truncate conversation from a specific message (for rewind)

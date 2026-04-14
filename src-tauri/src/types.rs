@@ -34,6 +34,9 @@ pub struct CreateClaudeRequest {
     pub effort: Option<String>,
     pub channel_server: Option<String>,
     pub mcp_config: Option<String>,
+    pub max_turns: Option<u32>,
+    pub max_budget_usd: Option<f64>,
+    pub no_session_persistence: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +49,11 @@ pub struct SendClaudePromptRequest {
     pub effort: Option<String>,
     pub disallowed_tools: Option<String>,
     pub channel_server: Option<String>,
+    pub resume_session_at: Option<String>,
+    pub max_turns: Option<u32>,
+    pub max_budget_usd: Option<f64>,
+    pub no_session_persistence: Option<bool>,
+    pub fork_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +88,14 @@ pub struct McpServer {
     pub transport: String,
     pub command: String,
     pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::HashMap<String, String>>,
 }
 
 // Party Mode audio types

@@ -43,24 +43,11 @@ const HIDDEN_TOOLS = new Set([
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
 ]);
 
-// Context window sizes per model family (tokens)
-const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  "claude-opus-4-6": 1_000_000,
-  "claude-sonnet-4-6": 1_000_000,
-  "claude-opus-4-5": 200_000,
-  "claude-sonnet-4-5": 200_000,
-  "claude-haiku-4-5": 200_000,
-};
-
-function getContextWindowForModel(model: string): number {
-  // Exact match first
-  if (MODEL_CONTEXT_WINDOWS[model]) return MODEL_CONTEXT_WINDOWS[model];
-  // Prefix match (handles dated suffixes like claude-opus-4-6-20260301)
-  for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
-    if (model.startsWith(key)) return value;
-  }
-  // Fallback: 4.6 models → 1M, everything else → 200k
-  if (model.includes("4-6") || model.includes("4.6")) return 1_000_000;
+// Default context window — the CLI's `result` event provides the real value
+// via modelUsage.contextWindow. This is just a fallback until the first
+// result arrives.  200k is the standard window; extended-context sessions
+// will self-correct once the CLI reports the actual size.
+function getContextWindowForModel(_model: string): number {
   return 200_000;
 }
 
@@ -79,6 +66,7 @@ interface PendingBlock {
   type: string;
   name?: string;
   inputJson: string; // accumulate input_json_delta chunks
+  parentToolUseId?: string;
 }
 const pendingBlocks = new Map<string, PendingBlock[]>();
 // Track whether the assistant event already finalized for this turn
@@ -158,7 +146,7 @@ function processContentArray(
       }
 
       if (!HIDDEN_TOOLS.has(name)) {
-        toolCalls.push({ id: block.id, name, input });
+        toolCalls.push({ id: block.id, name, input, parentToolUseId: block.parentToolUseId });
       }
     }
   }
@@ -202,6 +190,16 @@ export function useClaudeEvents() {
           return;
         }
 
+        // Unwrap stream_event envelope — Claude CLI wraps raw streaming API
+        // events (content_block_start, content_block_delta, etc.) inside a
+        // { type: "stream_event", event: {...}, parent_tool_use_id?: "..." }
+        // wrapper. Extract the inner event so existing handlers process it.
+        let streamParentToolUseId: string | undefined;
+        if (parsed.type === "stream_event" && parsed.event) {
+          streamParentToolUseId = parsed.parent_tool_use_id;
+          parsed = parsed.event;
+        }
+
         const type = parsed.type;
 
         // Safety net: if we receive events while isStreaming is false, the process is
@@ -221,12 +219,25 @@ export function useClaudeEvents() {
           const model = parsed.model || "";
           store.setModel(session_id, model);
           store.setStreaming(session_id, true);
-          store.setContextUsage(session_id, 0, getContextWindowForModel(model));
+          // Only update contextMax — preserve existing contextUsed so the
+          // topbar badge doesn't vanish between turns.
+          const prevUsed = store.sessions[session_id]?.contextUsed || 0;
+          store.setContextUsage(session_id, prevUsed, getContextWindowForModel(model));
           if (Array.isArray(parsed.mcp_servers)) {
-            store.setMcpServers(session_id, parsed.mcp_servers.map((s: any) => ({
-              name: String(s.name || ""),
-              status: String(s.status || "unknown"),
-            })));
+            store.setMcpServers(session_id, parsed.mcp_servers.map((s: any) => {
+              const tools = Array.isArray(s.tools) ? s.tools.map((t: any) => ({
+                name: String(t.name || ""),
+                ...(t.description ? { description: String(t.description) } : {}),
+              })) : undefined;
+              return {
+                name: String(s.name || ""),
+                status: String(s.status || "unknown"),
+                ...(s.error ? { error: String(s.error) } : {}),
+                ...(s.type || s.transport ? { transport: String(s.type || s.transport) } : {}),
+                ...(s.scope ? { scope: String(s.scope) } : {}),
+                ...(tools ? { tools, toolCount: tools.length } : {}),
+              };
+            }));
           }
           return;
         }
@@ -237,7 +248,7 @@ export function useClaudeEvents() {
           const cb = parsed.content_block;
           if (cb?.type === "tool_use" && cb.id && cb.name) {
             const blocks = pendingBlocks.get(session_id) || [];
-            blocks.push({ id: cb.id, type: "tool_use", name: cb.name, inputJson: "" });
+            blocks.push({ id: cb.id, type: "tool_use", name: cb.name, inputJson: "", parentToolUseId: streamParentToolUseId });
             pendingBlocks.set(session_id, blocks);
           }
           return;
@@ -320,7 +331,7 @@ export function useClaudeEvents() {
                   if (b.type === "tool_use") {
                     let input = {};
                     try { input = JSON.parse(b.inputJson || "{}"); } catch { /* partial JSON */ }
-                    content.push({ type: "tool_use", id: b.id, name: b.name, input });
+                    content.push({ type: "tool_use", id: b.id, name: b.name, input, parentToolUseId: b.parentToolUseId });
                   }
                 }
               }
@@ -412,10 +423,11 @@ export function useClaudeEvents() {
               }
             }
           }
-          if (totalIn > 0) {
-            store.setContextUsage(session_id, totalIn, ctxMax);
-          } else if (sess && sess.totalTokens > 0) {
-            store.setContextUsage(session_id, Math.round(sess.totalTokens * 0.65), ctxMax);
+          // Only update ctxMax here — the `assistant` event already set the
+          // correct per-turn contextUsed.  The `result` event's usage is
+          // cumulative across the session which would overcount.
+          if (ctxMax !== (sess?.contextMax || 0)) {
+            store.setContextUsage(session_id, sess?.contextUsed || 0, ctxMax);
           }
           // Auto-compact check (fresh read — prior set() calls have settled)
           const freshSess = useClaudeStore.getState().sessions[session_id];
@@ -449,12 +461,6 @@ export function useClaudeEvents() {
             }
           } else if (freshSess?.autoCompactStatus === "compacting") {
             useClaudeStore.getState().setAutoCompactStatus(session_id, "done");
-            setTimeout(() => {
-              const cur = useClaudeStore.getState().sessions[session_id];
-              if (cur?.autoCompactStatus === "done") {
-                useClaudeStore.getState().setAutoCompactStatus(session_id, "idle");
-              }
-            }, 5000);
           }
 
           if (parsed.is_error && parsed.result) store.setError(session_id, parsed.result);

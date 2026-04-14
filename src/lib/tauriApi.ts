@@ -146,7 +146,11 @@ export async function truncateSessionJsonlByMessages(sessionId: string, cwd: str
   return invoke("truncate_session_jsonl_by_messages", { sessionId, cwd, keepMessages });
 }
 
-export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepMessages: number): Promise<void> {
+export async function findRewindUuid(sessionId: string, cwd: string, keepMessages: number): Promise<string> {
+  return invoke("find_rewind_uuid", { sessionId, cwd, keepMessages });
+}
+
+export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepMessages: number): Promise<string> {
   return invoke("fork_session_jsonl", { parentSessionId, newSessionId, cwd, keepMessages });
 }
 
@@ -244,6 +248,11 @@ export async function createMcpConfigFile(
   });
 }
 
+/** Get the fully-resolved node binary path from the backend. */
+export async function getNodePath(): Promise<string> {
+  return invoke("get_node_path");
+}
+
 /** Ensure the T64 MCP server entry exists in .mcp.json for the given cwd.
  *  Uses the backend's resolve_node_path() so the full node binary path is written
  *  (bare "node" fails when Claude CLI inherits Tauri's limited PATH). */
@@ -264,10 +273,11 @@ export async function setT64DelegationEnv(
   agentLabel = "Agent",
 ): Promise<void> {
   const appDir = await getAppDir();
+  const nodePath = await getNodePath();
   const scriptPath = `${appDir}/mcp/t64-server.mjs`;
   const mcpPath = `${cwd}/.mcp.json`;
 
-  console.log("[delegation] setT64DelegationEnv:", { cwd, mcpPath, scriptPath, delegationPort, groupId });
+  console.log("[delegation] setT64DelegationEnv:", { cwd, mcpPath, scriptPath, nodePath, delegationPort, groupId });
 
   const config: Record<string, any> = {};
   try {
@@ -279,7 +289,7 @@ export async function setT64DelegationEnv(
   if (!config.mcpServers) config.mcpServers = {};
 
   config.mcpServers["terminal-64"] = {
-    command: "node",
+    command: nodePath,
     args: [scriptPath],
     env: {
       T64_DELEGATION_PORT: String(delegationPort),
@@ -311,6 +321,7 @@ export async function setT64DelegationEnv(
  */
 export async function clearT64DelegationEnv(cwd: string): Promise<void> {
   const appDir = await getAppDir();
+  const nodePath = await getNodePath();
   const scriptPath = `${appDir}/mcp/t64-server.mjs`;
   const mcpPath = `${cwd}/.mcp.json`;
 
@@ -323,7 +334,7 @@ export async function clearT64DelegationEnv(cwd: string): Promise<void> {
   if (!entry?.env) return;
 
   // Reset to base config (no env)
-  config.mcpServers["terminal-64"] = { command: "node", args: [scriptPath] };
+  config.mcpServers["terminal-64"] = { command: nodePath, args: [scriptPath] };
   await writeFile(mcpPath, JSON.stringify(config, null, 2));
 }
 
@@ -410,6 +421,10 @@ export async function updateSkillMeta(
     description: description ?? null,
     tags: tags ?? null,
   });
+}
+
+export async function readSkillContent(skillId: string): Promise<string> {
+  return invoke("read_skill_content", { skillId });
 }
 
 export async function getSkillCreatorPath(): Promise<string> {

@@ -220,19 +220,50 @@
 .cc-topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 4px 6px;
   background: var(--bg-secondary, #181825);
   border-bottom: 1px solid var(--border, #313244);
   flex-shrink: 0;
   gap: 4px;
+  position: relative;
+  z-index: 10;
 }
 
-.cc-topbar-left {
+.cc-topbar-center {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex-shrink: 0;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.cc-topbar-input {
+  width: 56px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--border, #45475a);
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(30,30,46,0.6));
+  color: var(--fg, #cdd6f4);
+  font-size: 10px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.cc-topbar-input::placeholder {
+  color: var(--fg-muted, #6c7086);
+  opacity: 0.7;
+}
+.cc-topbar-input:focus {
+  border-color: var(--accent, #cba6f7);
+}
+/* Hide number spinners */
+.cc-topbar-input::-webkit-inner-spin-button,
+.cc-topbar-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .cc-topbar-right {
@@ -240,6 +271,9 @@
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  margin-left: auto;
+  position: relative;
+  z-index: 1;
 }
 
 .cc-refresh-btn {
@@ -361,6 +395,7 @@
 .cc-mcp-info { display: flex; flex-direction: column; min-width: 0; }
 .cc-mcp-name { font-family: 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--fg-secondary, #bac2de); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cc-mcp-meta { font-size: 9px; color: var(--fg-muted, #6c7086); }
+.cc-mcp-error { font-size: 9px; color: #f38ba8; margin-top: 2px; word-break: break-word; }
 .cc-mcp-item--builtin { opacity: 0.6; }
 
 /* Permission badge moved to status line below input */
@@ -2354,4 +2389,77 @@
   border-radius: 3px;
   font-size: 0.9em;
   color: var(--fg-muted, #6c7086);
+}
+
+/* ---- Skill command badge (user messages) ---- */
+.cc-skill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(137, 220, 235, 0.08);
+  border: 1px solid rgba(137, 220, 235, 0.2);
+}
+
+.cc-skill-badge-icon {
+  display: flex;
+  align-items: center;
+  color: #89dceb;
+  flex-shrink: 0;
+}
+
+.cc-skill-badge-name {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: #89dceb;
+}
+
+.cc-skill-badge-args {
+  font-size: 12px;
+  color: var(--fg-secondary, #bac2de);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Skill tool call body ---- */
+.cc-skill-loaded {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: rgba(137, 220, 235, 0.06);
+  border: 1px solid rgba(137, 220, 235, 0.12);
+  margin-bottom: 4px;
+}
+
+.cc-skill-loaded-label {
+  font-size: 11px;
+  color: var(--fg-muted, #6c7086);
+  flex-shrink: 0;
+}
+
+.cc-skill-loaded-name {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #89dceb;
+}
+
+.cc-skill-loaded-args {
+  font-size: 11px;
+  color: var(--fg-secondary, #bac2de);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc-skill-output {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 11px;
 }

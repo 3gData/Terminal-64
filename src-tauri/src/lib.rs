@@ -828,15 +828,80 @@ fn collect_jsonl_lines_by_messages<'a>(content: &'a str, keep_messages: usize) -
 }
 
 #[tauri::command]
-fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: String, keep_messages: usize) -> Result<(), String> {
+fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: String, keep_messages: usize) -> Result<String, String> {
     let src = session_jsonl_path(&cwd, &parent_session_id)?;
-    let content = std::fs::read_to_string(&src).map_err(|e| format!("read: {}", e))?;
-    let kept = collect_jsonl_lines_by_messages(&content, keep_messages);
     let dest = session_jsonl_path(&cwd, &new_session_id)?;
-    let truncated = kept.join("\n") + "\n";
-    std::fs::write(&dest, truncated).map_err(|e| format!("write: {}", e))?;
-    safe_eprintln!("[fork] Copied {} -> {} ({} messages, {} lines)", parent_session_id, new_session_id, keep_messages, kept.len());
-    Ok(())
+    // Copy the full JSONL to preserve the parentUuid chain
+    std::fs::copy(&src, &dest).map_err(|e| format!("copy: {}", e))?;
+    // Find the UUID at the fork point so the frontend can use --resume-session-at
+    let content = std::fs::read_to_string(&dest).map_err(|e| format!("read: {}", e))?;
+    let mut visible_count: usize = 0;
+    let mut last_uuid = String::new();
+    for line in content.lines() {
+        if line.trim().is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let rec_type = val["type"].as_str().unwrap_or("");
+        if rec_type == "user" && is_real_user_message(&val) {
+            visible_count += 1;
+            if visible_count > keep_messages { break; }
+            if let Some(u) = val["uuid"].as_str() { last_uuid = u.to_string(); }
+        } else if rec_type == "assistant" {
+            if let Some(content_arr) = val["message"]["content"].as_array() {
+                let has_text = content_arr.iter().any(|b|
+                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                );
+                let has_tools = content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use"));
+                if has_text || has_tools {
+                    visible_count += 1;
+                    if visible_count > keep_messages { break; }
+                    if let Some(u) = val["uuid"].as_str() { last_uuid = u.to_string(); }
+                }
+            }
+        }
+    }
+    safe_eprintln!("[fork] Copied full JSONL {} -> {} (fork at msg {}, uuid={})", parent_session_id, new_session_id, keep_messages, &last_uuid);
+    Ok(last_uuid)
+}
+
+/// Given a session JSONL and a visible-message count, return the JSONL UUID of the
+/// last visible message at that position. Used for `--resume-session-at` instead of
+/// destructively truncating the file.
+#[tauri::command]
+fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Result<String, String> {
+    let path = session_jsonl_path(&cwd, &session_id)?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let mut visible_count: usize = 0;
+    let mut last_uuid = String::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let rec_type = val["type"].as_str().unwrap_or("");
+
+        if rec_type == "user" && is_real_user_message(&val) {
+            visible_count += 1;
+            if visible_count > keep_messages { break; }
+            if let Some(u) = val["uuid"].as_str() { last_uuid = u.to_string(); }
+        } else if rec_type == "assistant" {
+            if let Some(content_arr) = val["message"]["content"].as_array() {
+                let has_text = content_arr.iter().any(|b|
+                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                );
+                let has_tools = content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use"));
+                if has_text || has_tools {
+                    visible_count += 1;
+                    if visible_count > keep_messages { break; }
+                    if let Some(u) = val["uuid"].as_str() { last_uuid = u.to_string(); }
+                }
+            }
+        }
+    }
+
+    if last_uuid.is_empty() {
+        return Err(format!("No visible message found at position {} in {}", keep_messages, path.display()));
+    }
+    safe_eprintln!("[rewind] find_rewind_uuid: keep_messages={} found uuid={} (visible_count={})", keep_messages, &last_uuid, visible_count);
+    Ok(last_uuid)
 }
 
 fn parse_timestamp(ts: &str) -> f64 {
@@ -923,6 +988,35 @@ fn write_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn parse_mcp_server(name: &str, cfg: &serde_json::Value, scope: &str) -> McpServer {
+    let transport = cfg.get("type").or(cfg.get("transport"))
+        .and_then(|v| v.as_str()).unwrap_or("stdio").to_string();
+    let url = cfg.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let command = cfg.get("command").and_then(|v| v.as_str())
+        .or(url.as_deref())
+        .unwrap_or("").to_string();
+    let args = cfg.get("args").and_then(|v| v.as_array()).map(|arr|
+        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+    );
+    let env = cfg.get("env").and_then(|v| v.as_object()).map(|obj| {
+        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()
+    });
+    let headers = cfg.get("headers").and_then(|v| v.as_object()).map(|obj| {
+        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()
+    });
+    McpServer {
+        name: name.to_string(),
+        transport,
+        command,
+        scope: scope.to_string(),
+        url,
+        args,
+        env,
+        headers,
+    }
+}
+
+#[tauri::command]
 fn list_mcp_servers(cwd: String) -> Result<Vec<McpServer>, String> {
     let mut servers = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -935,15 +1029,7 @@ fn list_mcp_servers(cwd: String) -> Result<Vec<McpServer>, String> {
                     if let Some(obj) = val.get("mcpServers").and_then(|v| v.as_object()) {
                         for (name, cfg) in obj {
                             if seen.insert(name.clone()) {
-                                servers.push(McpServer {
-                                    name: name.clone(),
-                                    transport: cfg.get("type").or(cfg.get("transport"))
-                                        .and_then(|v| v.as_str()).unwrap_or("stdio").to_string(),
-                                    command: cfg.get("command").and_then(|v| v.as_str())
-                                        .or_else(|| cfg.get("url").and_then(|v| v.as_str()))
-                                        .unwrap_or("").to_string(),
-                                    scope: "user".to_string(),
-                                });
+                                servers.push(parse_mcp_server(name, cfg, "user"));
                             }
                         }
                     }
@@ -958,15 +1044,7 @@ fn list_mcp_servers(cwd: String) -> Result<Vec<McpServer>, String> {
             if let Some(obj) = val.get("mcpServers").and_then(|v| v.as_object()) {
                 for (name, cfg) in obj {
                     if seen.insert(name.clone()) {
-                        servers.push(McpServer {
-                            name: name.clone(),
-                            transport: cfg.get("type").or(cfg.get("transport"))
-                                .and_then(|v| v.as_str()).unwrap_or("stdio").to_string(),
-                            command: cfg.get("command").and_then(|v| v.as_str())
-                                .or_else(|| cfg.get("url").and_then(|v| v.as_str()))
-                                .unwrap_or("").to_string(),
-                            scope: "project".to_string(),
-                        });
+                        servers.push(parse_mcp_server(name, cfg, "project"));
                     }
                 }
             }
@@ -1228,6 +1306,25 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
         }
     }
 
+    // Scan Terminal 64 skill library (~/.terminal64/skills/)
+    let t64_skills = home.join(".terminal64").join("skills");
+    if t64_skills.exists() {
+        if let Ok(entries) = std::fs::read_dir(&t64_skills) {
+            for entry in entries.flatten() {
+                let skill_path = entry.path();
+                if skill_path.is_dir() {
+                    let skill_md = skill_path.join("SKILL.md");
+                    if skill_md.exists() {
+                        if let Some(mut cmd) = parse_skill_md(&skill_md, &skill_path) {
+                            cmd.source = "Terminal 64".to_string();
+                            commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Deduplicate by name (keep first occurrence — builtins first, then cache, then marketplace)
     commands.sort_by(|a, b| a.name.cmp(&b.name));
     commands.dedup_by(|a, b| a.name == b.name);
@@ -1366,6 +1463,11 @@ fn create_mcp_config_file(
     std::fs::write(&path, serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     safe_eprintln!("[mcp] Created config file: {}", path.display());
     Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_node_path() -> String {
+    resolve_node_path().to_string()
 }
 
 #[tauri::command]
@@ -1786,6 +1888,17 @@ fn update_skill_meta(skill_id: String, description: Option<String>, tags: Option
 }
 
 #[tauri::command]
+fn read_skill_content(skill_id: String) -> Result<String, String> {
+    let dir = skills_base_dir()?.join(&skill_id);
+    let skill_md = dir.join("SKILL.md");
+    if skill_md.exists() {
+        std::fs::read_to_string(&skill_md).map_err(|e| format!("read: {}", e))
+    } else {
+        Err("SKILL.md not found".to_string())
+    }
+}
+
+#[tauri::command]
 fn get_skill_creator_path(app_handle: tauri::AppHandle) -> Result<String, String> {
     // Production: bundled in resource dir
     if let Ok(res_dir) = app_handle.path().resource_dir() {
@@ -1898,6 +2011,45 @@ fn ensure_skills_plugin() -> Result<(), String> {
                 ep.insert(plugin_key.to_string(), serde_json::json!(true));
                 std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap())
                     .map_err(|e| format!("write settings: {}", e))?;
+            }
+        }
+    }
+
+    // Sync symlinks: ~/.claude/skills/{name} -> ~/.terminal64/skills/{name}
+    // This is the path Claude CLI actually resolves for /skill-name commands
+    let claude_skills_dir = home.join(".claude").join("skills");
+    std::fs::create_dir_all(&claude_skills_dir).ok();
+    if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+        for entry in entries.flatten() {
+            let src = entry.path();
+            if !src.is_dir() { continue; }
+            let name = match src.file_name() {
+                Some(n) => n.to_owned(),
+                None => continue,
+            };
+            let dest = claude_skills_dir.join(&name);
+            // Check if symlink already points to the right place
+            match std::fs::read_link(&dest) {
+                Ok(target) if target == src => continue, // already correct
+                Ok(_) => { std::fs::remove_file(&dest).ok(); } // wrong target
+                Err(_) if dest.exists() => continue, // real dir exists, don't clobber
+                Err(_) => {} // doesn't exist, create it
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&src, &dest).ok();
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir(&src, &dest).ok();
+        }
+    }
+
+    // Clean up stale symlinks in ~/.claude/skills/ that point into ~/.terminal64/skills/ but no longer exist
+    if let Ok(entries) = std::fs::read_dir(&claude_skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(target) = std::fs::read_link(&path) {
+                if target.starts_with(&skills_dir) && !target.exists() {
+                    std::fs::remove_file(&path).ok();
+                }
             }
         }
     }
@@ -2450,6 +2602,7 @@ pub fn run() {
             load_session_history,
             truncate_session_jsonl,
             truncate_session_jsonl_by_messages,
+            find_rewind_uuid,
             fork_session_jsonl,
             read_file,
             write_file,
@@ -2460,6 +2613,7 @@ pub fn run() {
             get_delegation_messages,
             cleanup_delegation_group,
             get_app_dir,
+            get_node_path,
             ensure_t64_mcp,
             create_mcp_config_file,
             create_widget_folder,
@@ -2500,6 +2654,7 @@ pub fn run() {
             list_skills,
             delete_skill,
             update_skill_meta,
+            read_skill_content,
             get_skill_creator_path,
             ensure_skills_plugin,
         ])

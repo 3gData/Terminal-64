@@ -544,6 +544,9 @@ async fn run_gateway(
                                         model: None, effort: None,
                                         disallowed_tools: discord_blocked.clone(),
                                         channel_server: None,
+                                        resume_session_at: None,
+                                        max_turns: None, max_budget_usd: None,
+                                        no_session_persistence: None, fork_session: None,
                                     }, None, None) {
                                         Ok(()) => Ok(()),
                                         Err(e) => {
@@ -556,6 +559,8 @@ async fn run_gateway(
                                                 model: None, effort: None,
                                                 channel_server: None,
                                                 mcp_config: None,
+                                                max_turns: None, max_budget_usd: None,
+                                                no_session_persistence: None,
                                             }, None, None)
                                         }
                                     }
@@ -569,6 +574,8 @@ async fn run_gateway(
                                         model: None, effort: None,
                                         channel_server: None,
                                         mcp_config: None,
+                                        max_turns: None, max_budget_usd: None,
+                                        no_session_persistence: None,
                                     }, None, None) {
                                         Ok(()) => Ok(()),
                                         Err(e) => {
@@ -581,6 +588,9 @@ async fn run_gateway(
                                                 model: None, effort: None,
                                                 disallowed_tools: discord_blocked.clone(),
                                                 channel_server: None,
+                                                resume_session_at: None,
+                                                max_turns: None, max_budget_usd: None,
+                                                no_session_persistence: None, fork_session: None,
                                             }, None, None)
                                         }
                                     }

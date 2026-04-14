@@ -157,6 +157,9 @@ export interface CreateClaudeRequest {
   effort?: string;
   channel_server?: string;
   mcp_config?: string;
+  max_turns?: number;
+  max_budget_usd?: number;
+  no_session_persistence?: boolean;
 }
 
 export interface SendClaudePromptRequest {
@@ -168,6 +171,11 @@ export interface SendClaudePromptRequest {
   effort?: string;
   disallowed_tools?: string;
   channel_server?: string;
+  resume_session_at?: string;
+  max_turns?: number;
+  max_budget_usd?: number;
+  no_session_persistence?: boolean;
+  fork_session?: string;
 }
 
 export interface ClaudeEvent {
@@ -196,6 +204,15 @@ export interface McpServer {
   transport: string;
   command: string;
   scope: string;
+  url?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+}
+
+export interface McpTool {
+  name: string;
+  description?: string;
 }
 
 export interface ToolCall {
@@ -204,6 +221,7 @@ export interface ToolCall {
   input: Record<string, unknown>;
   result?: string;
   isError?: boolean;
+  parentToolUseId?: string;
 }
 
 export interface ChatMessage {

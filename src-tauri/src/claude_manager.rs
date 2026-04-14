@@ -81,6 +81,11 @@ fn build_command(
     settings_path: &Option<String>,
     channel_server: &Option<String>,
     mcp_config: &Option<String>,
+    resume_session_at: &Option<String>,
+    max_turns: &Option<u32>,
+    max_budget_usd: &Option<f64>,
+    no_session_persistence: &Option<bool>,
+    fork_session: &Option<String>,
 ) -> Command {
     let claude_bin = resolve_claude_path();
     let mut cmd = Command::new(&claude_bin);
@@ -90,28 +95,12 @@ fn build_command(
         .arg("--include-partial-messages")
         .arg(session_flag).arg(session_value);
 
-    // Safe tools that should never require permission
-    const SAFE_TOOLS: &str = "Read,Glob,Grep,LS,WebSearch,WebFetch,TodoRead,TodoWrite,Agent,EnterPlanMode,ExitPlanMode,TaskCreate,TaskUpdate,TaskGet,TaskList,TaskStop,ToolSearch";
-
     match permission_mode {
         "bypass_all" => { cmd.arg("--permission-mode").arg("bypassPermissions"); }
-        "accept_edits" => {
-            cmd.arg("--permission-mode").arg("acceptEdits");
-            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
-        }
-        "plan" => {
-            cmd.arg("--permission-mode").arg("plan");
-            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
-        }
-        "auto" => {
-            cmd.arg("--permission-mode").arg("auto");
-            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
-        }
-        _ => {
-            // Default mode: ask for writes/bash, but reads are always free
-            cmd.arg("--permission-mode").arg("default");
-            cmd.arg("--allowedTools").arg(SAFE_TOOLS);
-        }
+        "accept_edits" => { cmd.arg("--permission-mode").arg("acceptEdits"); }
+        "plan" => { cmd.arg("--permission-mode").arg("plan"); }
+        "auto" => { cmd.arg("--permission-mode").arg("auto"); }
+        _ => { cmd.arg("--permission-mode").arg("default"); }
     }
 
     if let Some(m) = model {
@@ -136,6 +125,29 @@ fn build_command(
         if !mc.is_empty() {
             cmd.arg("--mcp-config").arg(mc);
             cmd.arg("--strict-mcp-config");
+        }
+    }
+
+    // Rewind support: tell Claude CLI to slice conversation at a specific message UUID
+    if let Some(uuid) = resume_session_at {
+        if !uuid.is_empty() {
+            cmd.arg("--resume-session-at").arg(uuid);
+        }
+    }
+
+    // Session limit flags
+    if let Some(turns) = max_turns {
+        cmd.arg("--max-turns").arg(turns.to_string());
+    }
+    if let Some(budget) = max_budget_usd {
+        cmd.arg("--max-budget-usd").arg(budget.to_string());
+    }
+    if let Some(true) = no_session_persistence {
+        cmd.arg("--no-session-persistence");
+    }
+    if let Some(parent_id) = fork_session {
+        if !parent_id.is_empty() {
+            cmd.arg("--fork-session").arg(parent_id);
         }
     }
 
@@ -284,16 +296,18 @@ impl ClaudeManager {
         safe_eprintln!("[claude] Creating session id={} cwd={} mcp_config={:?}", req.session_id, req.cwd, req.mcp_config.as_deref().map(|s| &s[..s.len().min(80)]));
         let cmd = build_command(
             "--session-id", &req.session_id, &req.prompt,
-            &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path, &channel_server, &req.mcp_config,
+            &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path, &channel_server, &req.mcp_config, &None,
+            &req.max_turns, &req.max_budget_usd, &req.no_session_persistence, &None,
         );
         spawn_and_stream(&self.instances, app_handle, req.session_id, cmd)
     }
 
     pub fn send_prompt(&self, app_handle: &AppHandle, req: SendClaudePromptRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
-        safe_eprintln!("[claude] Sending prompt to session {} (cwd: {})", req.session_id, req.cwd);
+        safe_eprintln!("[claude] Sending prompt to session {} (cwd: {}) resume_session_at={:?}", req.session_id, req.cwd, req.resume_session_at);
         let cmd = build_command(
             "--resume", &req.session_id, &req.prompt,
-            &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path, &channel_server, &None,
+            &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path, &channel_server, &None, &req.resume_session_at,
+            &req.max_turns, &req.max_budget_usd, &req.no_session_persistence, &req.fork_session,
         );
         spawn_and_stream(&self.instances, app_handle, req.session_id, cmd)
     }

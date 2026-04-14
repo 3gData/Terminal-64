@@ -146,7 +146,7 @@ impl PermissionServer {
             let url = format!("http://127.0.0.1:{}/hook/{}/{}", new_port, self.secret, run_token);
             let settings = serde_json::json!({
                 "hooks": {
-                    "PreToolUse": [{
+                    "PermissionRequest": [{
                         "matcher": "",
                         "hooks": [{ "type": "http", "url": url }]
                     }]
@@ -205,7 +205,7 @@ impl PermissionServer {
 
         let settings = serde_json::json!({
             "hooks": {
-                "PreToolUse": [{
+                "PermissionRequest": [{
                     "matcher": "",
                     "hooks": [{ "type": "http", "url": url }]
                 }]
@@ -425,29 +425,6 @@ fn handle_connection(
         .to_string();
     let tool_input = parsed["tool_input"].clone();
 
-    // Auto-approve safe/internal tools without prompting the user
-    const AUTO_ALLOW: &[&str] = &[
-        "Read", "Glob", "Grep", "LS", "WebSearch", "WebFetch", "TodoRead", "TodoWrite",
-        "Agent", "EnterPlanMode", "ExitPlanMode", "TaskCreate", "TaskUpdate", "TaskGet",
-        "TaskList", "TaskStop", "NotebookEdit", "ToolSearch",
-    ];
-    // Auto-approve writes to .claude/plans/ (plan files)
-    let is_plan_file = tool_input["file_path"].as_str()
-        .map(|p| p.contains(".claude/plans") || p.contains(".claude\\plans"))
-        .unwrap_or(false);
-
-    if AUTO_ALLOW.contains(&tool_name.as_str()) || is_plan_file {
-        let resp = serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": "Auto-approved by Terminal 64"
-            }
-        });
-        send_http(&mut stream, 200, &resp.to_string());
-        return Ok(());
-    }
-
     // Look up session
     let session_id = sessions
         .lock()
@@ -460,7 +437,7 @@ fn handle_connection(
         // Unknown token — deny by default (fail-closed)
         let resp = serde_json::json!({
             "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
+                "hookEventName": "PermissionRequest",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": "Unknown session — denied for safety"
             }
@@ -508,7 +485,7 @@ fn handle_connection(
 
     let resp = serde_json::json!({
         "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
+            "hookEventName": "PermissionRequest",
             "permissionDecision": decision,
             "permissionDecisionReason": reason
         }
