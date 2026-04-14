@@ -17,6 +17,7 @@ import { useDelegationStore } from "../../stores/delegationStore";
 import { endDelegation } from "../../hooks/useDelegationOrchestrator";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { v4 as uuidv4 } from "uuid";
+import { formatDuration } from "../../lib/constants";
 import "./ClaudeChat.css";
 
 let monacoThemeForBg = "";
@@ -62,6 +63,30 @@ interface ClaudeChatProps {
   isActive: boolean;
 }
 
+function CompactDivider({ status, startedAt }: { status: "compacting" | "done"; startedAt: number | null }) {
+  const [elapsed, setElapsed] = useState("");
+  useEffect(() => {
+    if (!startedAt) return;
+    const tick = () => setElapsed(formatDuration(Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    if (status === "compacting") {
+      const id = setInterval(tick, 1000);
+      return () => clearInterval(id);
+    }
+  }, [status, startedAt]);
+
+  return (
+    <div className={`cc-turn-divider cc-compact-divider ${status === "done" ? "cc-compact-divider--done" : ""}`}>
+      {status === "compacting" && <span className="cc-compact-spinner" />}
+      {status === "done" && <span className="cc-compact-check">&#x2713;</span>}
+      <span className="cc-turn-divider-text">
+        {status === "compacting" ? `Compacting context` : `Compacted`}
+        {elapsed && ` · ${elapsed}`}
+      </span>
+    </div>
+  );
+}
+
 export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }: ClaudeChatProps) {
   const session = useClaudeStore((s) => s.sessions[sessionId]);
   const createSession = useClaudeStore((s) => s.createSession);
@@ -95,6 +120,8 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     }
     return 0; // default: Default (ask for everything)
   });
+  const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
+  const autoCompactThreshold = useSettingsStore((s) => s.autoCompactThreshold);
   const [showModelDrop, setShowModelDrop] = useState(false);
   const [showEffortDrop, setShowEffortDrop] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
@@ -226,37 +253,45 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
 
   // If streaming ends while plan mode is still active, Claude didn't call ExitPlanMode —
   // treat this as plan completion so the action bar appears.
-  // Also trigger planFinished if a plan file was written/detected during the turn.
+  // Also trigger planFinished if a plan file was written during THIS turn.
   const wasStreaming = useRef(false);
+  const planShownThisTurn = useRef(false);
   useEffect(() => {
     if (!session) return;
     if (session.isStreaming) {
       wasStreaming.current = true;
+      planShownThisTurn.current = false;
     } else if (wasStreaming.current) {
       wasStreaming.current = false;
       if (session.planModeActive) {
         // Auto-exit plan mode since the turn ended
         useClaudeStore.getState().setPlanMode(sessionId, false);
-      } else if (planContent && !planFinished) {
-        // Plan file was written but EnterPlanMode/ExitPlanMode were never called —
-        // still show the action bar so user can build/delegate
+      } else if (planContent && !planFinished && !planShownThisTurn.current) {
+        // Plan file was written this turn — show the action bar once
+        planShownThisTurn.current = true;
         setPlanFinished(true);
       }
     }
   }, [session?.isStreaming, session?.planModeActive, sessionId, planContent, planFinished]);
 
-  // Detect plan files from tool calls
+  // Detect plan files from tool calls — only scan messages added since last user prompt
+  const planScanFrom = useRef(0);
   useEffect(() => {
     if (!session) return;
     const msgs = session.messages;
+    // Find the last user message index to know where the current turn started
+    let turnStart = planScanFrom.current;
     for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") { turnStart = i; break; }
+    }
+    planScanFrom.current = turnStart;
+    for (let i = msgs.length - 1; i >= turnStart; i--) {
       const msg = msgs[i];
       if (msg.role === "assistant" && msg.toolCalls) {
         for (const tc of msg.toolCalls) {
           if ((tc.name === "Write" || tc.name === "Edit" || tc.name === "Read") && tc.input.file_path) {
             const fp = String(tc.input.file_path);
             if (fp.includes(".claude/plans/") || fp.includes(".claude\\plans\\")) {
-              // Found a plan file — show its content from the tool result
               if (tc.name === "Read" && tc.result) {
                 setPlanContent(tc.result);
               } else if ((tc.name === "Write" || tc.name === "Edit") && tc.input.content) {
@@ -482,10 +517,11 @@ Rules:
         return;
       }
 
-      // Clear plan-finished banner whenever the user sends anything
-      if (planFinished) {
+      // Clear plan state whenever the user sends a regular prompt
+      if (planFinished || planContent) {
         setPlanFinished(false);
         setShowPlanViewer(false);
+        setPlanContent(null);
       }
 
       let prompt = text;
@@ -504,6 +540,11 @@ Rules:
         useClaudeStore.getState().enqueuePrompt(sessionId, prompt);
         setQueueExpanded(true);
         return;
+      }
+
+      // Show compact divider when user sends /compact manually
+      if (/^\/compact\b/i.test(prompt)) {
+        useClaudeStore.getState().setAutoCompactStatus(sessionId, "compacting");
       }
 
       addUserMessage(sessionId, prompt);
@@ -992,9 +1033,15 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         </div>
 
         <div className="cc-topbar-right">
-          {session.totalTokens > 0 && (
-            <span className="cc-topbar-cost">{session.totalTokens >= 1000 ? `${(session.totalTokens / 1000).toFixed(1)}k` : session.totalTokens} tk</span>
-          )}
+          {session.contextMax > 0 && session.contextUsed > 0 && (() => {
+            const ctxPct = Math.round((session.contextUsed / session.contextMax) * 100);
+            return (
+              <>
+                <span className={`cc-topbar-cost ${ctxPct >= 80 ? "cc-topbar-cost--warn" : ""}`}>Context {ctxPct}%</span>
+                {autoCompactEnabled && <span className="cc-topbar-compact-hint">Auto compact at {autoCompactThreshold}%</span>}
+              </>
+            );
+          })()}
           {hasSideContent && (
             <button
               className={`cc-panel-toggle ${sidePanelOpen ? "cc-panel-toggle--active" : ""}`}
@@ -1173,19 +1220,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               let lastUserTs: number | null = null;
               while (i < msgs.length) {
                 const msg = msgs[i];
-                // Insert "Finished after X" divider after a completed turn
-                // Measures from user prompt to last assistant message (actual work time)
                 if (msg.role === "user" && lastUserTs !== null && i > 0 && msgs[i - 1].role === "assistant") {
-                  const lastAssistantTs = msgs[i - 1].timestamp;
-                  const dur = lastAssistantTs - lastUserTs;
+                  const dur = msgs[i - 1].timestamp - lastUserTs;
                   if (dur > 2000) {
-                    const secs = Math.floor(dur / 1000);
-                    const label = secs >= 60
-                      ? `${Math.floor(secs / 60)}m ${secs % 60 ? `${secs % 60}s` : ""}`
-                      : `${secs}s`;
                     elements.push(
                       <div key={`fin-${i}`} className="cc-turn-divider">
-                        <span className="cc-turn-divider-text">Finished after {label}</span>
+                        <span className="cc-turn-divider-text">Finished after {formatDuration(Math.floor(dur / 1000))}</span>
                       </div>
                     );
                   }
@@ -1210,6 +1250,16 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                 }
                 elements.push(<ChatMessage key={msg.id} message={msg} onRewind={handleRewind} onFork={handleFork} onEditClick={handleEditClick} />);
                 i++;
+              }
+              if (!session.isStreaming && lastUserTs !== null && msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+                const dur = msgs[msgs.length - 1].timestamp - lastUserTs;
+                if (dur > 2000) {
+                  elements.push(
+                    <div key="fin-tail" className="cc-turn-divider">
+                      <span className="cc-turn-divider-text">Finished after {formatDuration(Math.floor(dur / 1000))}</span>
+                    </div>
+                  );
+                }
               }
               return elements;
             })()}
@@ -1290,6 +1340,9 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               <div className="cc-message cc-message--error">
                 <div className="cc-error">{session.error}</div>
               </div>
+            )}
+            {session.autoCompactStatus !== "idle" && (
+              <CompactDivider status={session.autoCompactStatus} startedAt={session.autoCompactStartedAt} />
             )}
             <div ref={messagesEndRef} />
           </div>

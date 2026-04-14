@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useThemeStore } from "../../stores/themeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { startDiscordBot, stopDiscordBot, discordBotStatus, generateTheme, onThemeGenChunk, onThemeGenDone } from "../../lib/tauriApi";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsPanel.css";
 
 import { FONT_OPTIONS, fontStack } from "../../lib/fonts";
@@ -65,6 +66,15 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const partyIntensity = useSettingsStore((s) => s.partyIntensity);
 
   const addTheme = useThemeStore((s) => s.addTheme);
+
+  // Background
+  const backgroundImage = useSettingsStore((s) => s.backgroundImage);
+  const backgroundOpacity = useSettingsStore((s) => s.backgroundOpacity);
+  const showGrid = useSettingsStore((s) => s.showGrid);
+
+  // Auto-Compact
+  const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
+  const autoCompactThreshold = useSettingsStore((s) => s.autoCompactThreshold);
 
   const discordToken = useSettingsStore((s) => s.discordBotToken);
   const discordServerId = useSettingsStore((s) => s.discordServerId);
@@ -228,6 +238,89 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               </label>
               <Toggle checked={snapToGrid} onChange={(v) => setSetting({ snapToGrid: v })} />
             </div>
+          </Section>
+
+          {/* Background */}
+          <Section label="Background" icon="▦">
+            <div className="sp-row">
+              <label className="sp-label">Show Grid</label>
+              <Toggle checked={showGrid} onChange={(v) => setSetting({ showGrid: v })} />
+            </div>
+
+            <div className="sp-row sp-row--col">
+              <label className="sp-label">Background Image</label>
+              <div className="sp-bg-picker">
+                <button
+                  className="sp-btn"
+                  onClick={async () => {
+                    const file = await openDialog({
+                      title: "Choose background image",
+                      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"] }],
+                    });
+                    if (file) setSetting({ backgroundImage: file });
+                  }}
+                >
+                  Choose...
+                </button>
+                {backgroundImage && (
+                  <button className="sp-btn sp-btn--danger sp-btn--small" onClick={() => setSetting({ backgroundImage: "" })}>
+                    Clear
+                  </button>
+                )}
+              </div>
+              {backgroundImage && (
+                <span className="sp-hint sp-bg-path">{backgroundImage.split(/[/\\]/).pop()}</span>
+              )}
+            </div>
+
+            {backgroundImage && (
+              <div className="sp-row sp-row--col">
+                <div className="sp-row">
+                  <label className="sp-label">Image Opacity</label>
+                  <span className="sp-value">{Math.round(backgroundOpacity * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  className="sp-range"
+                  min={1}
+                  max={100}
+                  value={Math.round(backgroundOpacity * 100)}
+                  onChange={(e) => setSetting({ backgroundOpacity: Number(e.target.value) / 100 })}
+                />
+              </div>
+            )}
+          </Section>
+
+          {/* Claude */}
+          <Section label="Claude" icon="⬡">
+            <div className="sp-row">
+              <label className="sp-label">
+                Auto-Compact
+                <span className="sp-hint-inline">Send /compact when context is high</span>
+              </label>
+              <Toggle checked={autoCompactEnabled} onChange={(v) => setSetting({ autoCompactEnabled: v })} />
+            </div>
+
+            {autoCompactEnabled && (
+              <div className="sp-sub">
+                <div className="sp-row sp-row--col">
+                  <div className="sp-row">
+                    <label className="sp-label">Threshold</label>
+                    <span className="sp-value">{autoCompactThreshold}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    className="sp-range"
+                    min={10}
+                    max={95}
+                    step={5}
+                    value={autoCompactThreshold}
+                    onChange={(e) => setSetting({ autoCompactThreshold: Number(e.target.value) })}
+                  />
+                  <span className="sp-hint">Triggers /compact when context usage exceeds this percentage</span>
+                </div>
+              </div>
+            )}
           </Section>
 
           {/* Quick Pastes */}

@@ -355,6 +355,24 @@
   border-color: rgba(243, 139, 168, 0.4);
 }
 
+.sp-btn--small {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.sp-bg-picker {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sp-bg-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
 /* ---- Sub-settings (nested group) ---- */
 
 .sp-sub {

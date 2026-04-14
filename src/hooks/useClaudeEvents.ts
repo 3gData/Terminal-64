@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { onClaudeEvent, onClaudeDone, cancelClaude } from "../lib/tauriApi";
+import { onClaudeEvent, onClaudeDone, cancelClaude, sendClaudePrompt } from "../lib/tauriApi";
 import { useClaudeStore } from "../stores/claudeStore";
+import { useSettingsStore } from "../stores/settingsStore";
 import { ToolCall } from "../lib/types";
 
 const sessionToolMaps = new Map<string, Map<string, string>>();
@@ -41,6 +42,35 @@ const HIDDEN_TOOLS = new Set([
   "EnterPlanMode", "ExitPlanMode",
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
 ]);
+
+// Context window sizes per model family (tokens)
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "claude-opus-4-6": 1_000_000,
+  "claude-sonnet-4-6": 1_000_000,
+  "claude-opus-4-5": 200_000,
+  "claude-sonnet-4-5": 200_000,
+  "claude-haiku-4-5": 200_000,
+};
+
+function getContextWindowForModel(model: string): number {
+  // Exact match first
+  if (MODEL_CONTEXT_WINDOWS[model]) return MODEL_CONTEXT_WINDOWS[model];
+  // Prefix match (handles dated suffixes like claude-opus-4-6-20260301)
+  for (const [key, value] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+    if (model.startsWith(key)) return value;
+  }
+  // Fallback: 4.6 models → 1M, everything else → 200k
+  if (model.includes("4-6") || model.includes("4.6")) return 1_000_000;
+  return 200_000;
+}
+
+/** Sum all input token fields to get total context usage for a turn */
+function totalInputTokens(usage: any): number {
+  if (!usage) return 0;
+  return (usage.input_tokens || 0)
+    + (usage.cache_creation_input_tokens || 0)
+    + (usage.cache_read_input_tokens || 0);
+}
 
 // Per-session pending content blocks — tracks tool calls from content_block_start
 // events so we can finalize even if the synthetic "assistant" event never arrives.
@@ -188,9 +218,10 @@ export function useClaudeEvents() {
         }
 
         if (type === "system" && parsed.subtype === "init") {
-          store.setModel(session_id, parsed.model || "");
+          const model = parsed.model || "";
+          store.setModel(session_id, model);
           store.setStreaming(session_id, true);
-          store.setContextUsage(session_id, 0, 200000);
+          store.setContextUsage(session_id, 0, getContextWindowForModel(model));
           if (Array.isArray(parsed.mcp_servers)) {
             store.setMcpServers(session_id, parsed.mcp_servers.map((s: any) => ({
               name: String(s.name || ""),
@@ -252,10 +283,11 @@ export function useClaudeEvents() {
 
         if (type === "assistant") {
           const msgUsage = parsed.message?.usage || parsed.usage;
-          if (msgUsage?.input_tokens) {
+          const totalIn = totalInputTokens(msgUsage);
+          if (totalIn > 0) {
             const sess = store.sessions[session_id];
-            const ctxMax = sess?.contextMax || 200000;
-            store.setContextUsage(session_id, msgUsage.input_tokens, ctxMax);
+            const ctxMax = sess?.contextMax || getContextWindowForModel(sess?.model || "");
+            store.setContextUsage(session_id, totalIn, ctxMax);
           }
 
           // Try both parsed.message.content and parsed.content as fallback
@@ -302,11 +334,11 @@ export function useClaudeEvents() {
 
         // message_delta: may contain usage info at end of turn
         if (type === "message_delta") {
-          const usage = parsed.usage;
-          if (usage?.input_tokens) {
+          const totalIn = totalInputTokens(parsed.usage);
+          if (totalIn > 0) {
             const sess = store.sessions[session_id];
-            const ctxMax = sess?.contextMax || 200000;
-            store.setContextUsage(session_id, usage.input_tokens, ctxMax);
+            const ctxMax = sess?.contextMax || getContextWindowForModel(sess?.model || "");
+            store.setContextUsage(session_id, totalIn, ctxMax);
           }
           return;
         }
@@ -365,16 +397,66 @@ export function useClaudeEvents() {
         if (type === "result") {
           store.setStreaming(session_id, false);
           if (parsed.total_cost_usd) store.addCost(session_id, parsed.total_cost_usd);
-          const input_tokens = parsed.usage?.input_tokens || parsed.input_tokens || 0;
-          const output_tokens = parsed.usage?.output_tokens || parsed.output_tokens || 0;
-          if (input_tokens || output_tokens) store.addTokens(session_id, input_tokens + output_tokens);
+          const resultUsage = parsed.usage || {};
+          const totalIn = totalInputTokens(resultUsage);
+          const output_tokens = resultUsage.output_tokens || parsed.output_tokens || 0;
+          if (totalIn || output_tokens) store.addTokens(session_id, totalIn + output_tokens);
+
           const sess = store.sessions[session_id];
-          const ctxMax = sess?.contextMax || 200000;
-          if (input_tokens > 0) {
-            store.setContextUsage(session_id, input_tokens, ctxMax);
+          let ctxMax = sess?.contextMax || getContextWindowForModel(sess?.model || "");
+          if (parsed.modelUsage) {
+            for (const modelData of Object.values(parsed.modelUsage) as any[]) {
+              if (modelData?.contextWindow && modelData.contextWindow > 0) {
+                ctxMax = modelData.contextWindow;
+                break;
+              }
+            }
+          }
+          if (totalIn > 0) {
+            store.setContextUsage(session_id, totalIn, ctxMax);
           } else if (sess && sess.totalTokens > 0) {
             store.setContextUsage(session_id, Math.round(sess.totalTokens * 0.65), ctxMax);
           }
+          // Auto-compact check (fresh read — prior set() calls have settled)
+          const freshSess = useClaudeStore.getState().sessions[session_id];
+          const settings = useSettingsStore.getState();
+          if (
+            settings.autoCompactEnabled &&
+            freshSess &&
+            freshSess.autoCompactStatus === "idle" &&
+            freshSess.contextMax > 0 &&
+            freshSess.contextUsed > 0 &&
+            !parsed.is_error
+          ) {
+            const pct = (freshSess.contextUsed / freshSess.contextMax) * 100;
+            if (pct >= settings.autoCompactThreshold) {
+              useClaudeStore.getState().setAutoCompactStatus(session_id, "compacting");
+              setTimeout(() => {
+                const s = useClaudeStore.getState().sessions[session_id];
+                if (!s || s.isStreaming) return;
+                useClaudeStore.getState().addUserMessage(session_id, "/compact");
+                useClaudeStore.getState().setStreaming(session_id, true);
+                sendClaudePrompt({
+                  session_id,
+                  cwd: s.cwd || ".",
+                  prompt: "/compact",
+                  permission_mode: "auto",
+                }).catch((err) => {
+                  useClaudeStore.getState().setError(session_id, `Auto-compact failed: ${err}`);
+                  useClaudeStore.getState().setAutoCompactStatus(session_id, "idle");
+                });
+              }, 500);
+            }
+          } else if (freshSess?.autoCompactStatus === "compacting") {
+            useClaudeStore.getState().setAutoCompactStatus(session_id, "done");
+            setTimeout(() => {
+              const cur = useClaudeStore.getState().sessions[session_id];
+              if (cur?.autoCompactStatus === "done") {
+                useClaudeStore.getState().setAutoCompactStatus(session_id, "idle");
+              }
+            }, 5000);
+          }
+
           if (parsed.is_error && parsed.result) store.setError(session_id, parsed.result);
           // Clean up any leftover pending state
           pendingBlocks.delete(session_id);

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { listSkills, createSkillFolder, deleteSkill, createClaudeSession, shellExec, SkillInfo } from "../../lib/tauriApi";
+import { listSkills, createSkillFolder, deleteSkill, createClaudeSession, shellExec, getSkillCreatorPath, ensureSkillsPlugin, SkillInfo } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -58,8 +58,12 @@ After creating the skill, suggest relevant tags for categorization (e.g. "game-d
 
 **Start by asking the user what skill they want to create.**`;
 
-function buildSkillPrompt(skillFolderPath: string): string {
-  return SKILL_CREATOR_PROMPT + `\n\n**Important:** The skill files (SKILL.md, scripts/, references/, etc.) must be written to: \`${skillFolderPath}\`\nYour working directory is the user's project — use it to understand context, read code, and explore the codebase. But the actual skill output goes in the path above.`;
+function buildSkillPrompt(skillFolderPath: string, skillCreatorPath?: string): string {
+  let prompt = SKILL_CREATOR_PROMPT + `\n\n**Important:** The skill files (SKILL.md, scripts/, references/, etc.) must be written to: \`${skillFolderPath}\`\nYour working directory is the user's project — use it to understand context, read code, and explore the codebase. But the actual skill output goes in the path above.`;
+  if (skillCreatorPath) {
+    prompt += `\n\n## Skill Creator Toolkit\n\nThe full skill-creator toolkit is available at: \`${skillCreatorPath}/\`\n\nIt contains:\n- \`SKILL.md\` — Full skill creation guide (read this for detailed workflow)\n- \`agents/\` — Subagent instructions (grader.md, comparator.md, analyzer.md)\n- \`scripts/\` — Python utilities: \`quick_validate.py\`, \`package_skill.py\`, \`run_eval.py\`, \`aggregate_benchmark.py\`, \`improve_description.py\`, \`run_loop.py\`\n- \`eval-viewer/\` — \`generate_review.py\` + \`viewer.html\` for reviewing test results\n- \`references/schemas.md\` — JSON schemas for evals, grading, benchmarks\n- \`assets/eval_review.html\` — Trigger eval review template\n\nRead the full SKILL.md at that path for the complete workflow including eval, benchmarking, and description optimization.`;
+  }
+  return prompt;
 }
 
 interface SkillDialogProps {
@@ -116,10 +120,11 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
     setCreating(true);
     try {
       const skillFolderPath = await createSkillFolder(id);
+      const skillCreatorPath = await getSkillCreatorPath().catch(() => undefined);
       const skillName = name.trim();
       const projectDir = dir.trim();
       addRecentDir(projectDir);
-      const prompt = buildSkillPrompt(skillFolderPath);
+      const prompt = buildSkillPrompt(skillFolderPath, skillCreatorPath);
       // Open Claude session with CWD = project directory (not the skill folder)
       useCanvasStore.getState().addClaudeTerminal(projectDir, false, `Skill: ${skillName}`);
       const terminals = useCanvasStore.getState().terminals;

@@ -1711,6 +1711,127 @@ fn update_skill_meta(skill_id: String, description: Option<String>, tags: Option
     Ok(())
 }
 
+#[tauri::command]
+fn get_skill_creator_path(app_handle: tauri::AppHandle) -> Result<String, String> {
+    // Production: bundled in resource dir
+    if let Ok(res_dir) = app_handle.path().resource_dir() {
+        let bundled = res_dir.join("skill-creator");
+        if bundled.join("SKILL.md").exists() {
+            return Ok(bundled.to_string_lossy().to_string());
+        }
+    }
+    // Dev mode: relative to project root
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut dir = exe.parent();
+    for _ in 0..10 {
+        if let Some(d) = dir {
+            let candidate = d.join("src-tauri/resources/skill-creator");
+            if candidate.join("SKILL.md").exists() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
+            dir = d.parent();
+        }
+    }
+    Err("skill-creator not found".into())
+}
+
+#[tauri::command]
+fn ensure_skills_plugin() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("No home dir")?;
+    let skills_dir = home.join(".terminal64").join("skills");
+    std::fs::create_dir_all(&skills_dir).map_err(|e| format!("mkdir skills: {}", e))?;
+
+    // Create the T64 plugin directory in Claude's plugin system
+    let plugin_dir = home
+        .join(".claude/plugins/marketplaces/claude-plugins-official/plugins/terminal-64-skills");
+    let claude_plugin_dir = plugin_dir.join(".claude-plugin");
+    std::fs::create_dir_all(&claude_plugin_dir).map_err(|e| format!("mkdir plugin: {}", e))?;
+
+    let manifest_path = claude_plugin_dir.join("plugin.json");
+    if !manifest_path.exists() {
+        let manifest = serde_json::json!({
+            "name": "terminal-64-skills",
+            "version": "1.0.0",
+            "description": "Skills created and managed by Terminal 64's skill library.",
+            "author": {
+                "name": "Terminal 64",
+                "email": "noreply@terminal64.app"
+            },
+            "keywords": ["terminal-64", "skills"]
+        });
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
+            .map_err(|e| format!("write manifest: {}", e))?;
+    }
+
+    let symlink_target = plugin_dir.join("skills");
+    let needs_symlink = match std::fs::read_link(&symlink_target) {
+        Ok(target) => target != skills_dir,
+        Err(_) => true,
+    };
+    if needs_symlink {
+        if symlink_target.is_symlink() || symlink_target.exists() {
+            if symlink_target.is_symlink() || !symlink_target.is_dir() {
+                std::fs::remove_file(&symlink_target).ok();
+            } else {
+                std::fs::remove_dir_all(&symlink_target).ok();
+            }
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&skills_dir, &symlink_target)
+            .map_err(|e| format!("symlink: {}", e))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&skills_dir, &symlink_target)
+            .map_err(|e| format!("symlink: {}", e))?;
+    }
+
+    // Ensure plugin is registered in installed_plugins.json
+    let installed_path = home.join(".claude/plugins/installed_plugins.json");
+    let plugin_key = "terminal-64-skills@claude-plugins-official";
+    let mut installed: serde_json::Value = if installed_path.exists() {
+        let content = std::fs::read_to_string(&installed_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({"version": 2, "plugins": {}}))
+    } else {
+        serde_json::json!({"version": 2, "plugins": {}})
+    };
+    if let Some(plugins) = installed.get_mut("plugins").and_then(|p| p.as_object_mut()) {
+        if !plugins.contains_key(plugin_key) {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            plugins.insert(plugin_key.to_string(), serde_json::json!([{
+                "scope": "user",
+                "installPath": plugin_dir.to_string_lossy(),
+                "version": "1.0.0",
+                "installedAt": now,
+                "lastUpdated": now
+            }]));
+            std::fs::write(&installed_path, serde_json::to_string_pretty(&installed).unwrap())
+                .map_err(|e| format!("write installed_plugins: {}", e))?;
+        }
+    }
+
+    // Ensure plugin is enabled in settings.json
+    let settings_path = home.join(".claude/settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(obj) = settings.as_object_mut() {
+        let enabled = obj.entry("enabledPlugins")
+            .or_insert(serde_json::json!({}));
+        if let Some(ep) = enabled.as_object_mut() {
+            if !ep.contains_key(plugin_key) {
+                ep.insert(plugin_key.to_string(), serde_json::json!(true));
+                std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap())
+                    .map_err(|e| format!("write settings: {}", e))?;
+            }
+        }
+    }
+
+    safe_eprintln!("[skills] Plugin bridge installed at {}", plugin_dir.display());
+    Ok(())
+}
+
 // ---- Proxy fetch (CORS bypass for widgets) ----
 
 #[derive(serde::Serialize)]
@@ -2304,6 +2425,8 @@ pub fn run() {
             list_skills,
             delete_skill,
             update_skill_meta,
+            get_skill_creator_path,
+            ensure_skills_plugin,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

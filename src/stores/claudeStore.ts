@@ -74,6 +74,8 @@ export interface ClaudeSession {
   ephemeral: boolean; // if true, skip localStorage persistence (delegation children)
   mcpServers: McpServerStatus[];
   modifiedFiles: string[];
+  autoCompactStatus: "idle" | "compacting" | "done"; // auto-compact lifecycle
+  autoCompactStartedAt: number | null; // timestamp when compacting began
 }
 
 export interface ActiveLoop {
@@ -121,6 +123,7 @@ interface ClaudeState {
   addModifiedFiles: (sessionId: string, paths: string[]) => void;
   resetModifiedFiles: (sessionId: string) => void;
   deleteSession: (sessionId: string) => void;
+  setAutoCompactStatus: (sessionId: string, status: "idle" | "compacting" | "done") => void;
   truncateFromMessage: (sessionId: string, messageId: string) => void;
 }
 
@@ -146,9 +149,9 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
       if (raw) existing = JSON.parse(raw);
     } catch {}
 
-    // Remove unnamed sessions that are no longer in memory
+    // Remove sessions that are no longer in memory if they're unnamed or delegation children
     for (const id of Object.keys(existing)) {
-      if (!existing[id]?.name && !sessions[id]) {
+      if (!sessions[id] && (!existing[id]?.name || existing[id]?.name?.startsWith("[D] "))) {
         delete existing[id];
       }
     }
@@ -232,6 +235,8 @@ function loadSession(sessionId: string): ClaudeSession | null {
       ephemeral: false,
       mcpServers: [],
       modifiedFiles: [],
+      autoCompactStatus: "idle",
+      autoCompactStartedAt: null,
     };
   } catch {
     return null;
@@ -276,7 +281,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
           sessionId, messages: [], tasks: [], isStreaming: false, streamingText: "", streamingStartedAt: null, lastEventAt: null,
           model: "", totalCost: 0, totalTokens: 0, contextUsed: 0, contextMax: 0, error: null, promptCount: 0, planModeActive: false,
           pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "",
-          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [],
+          promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [], autoCompactStatus: "idle" as const, autoCompactStartedAt: null,
         },
       };
       if (!ephemeral) debouncedSave();
@@ -288,9 +293,9 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const removed = s.sessions[sessionId];
       const { [sessionId]: _, ...rest } = s.sessions;
-      // Only delete from localStorage if the session has no name (unnamed = disposable)
-      // Named sessions stay in localStorage so they can be reopened later
-      if (!removed?.name) {
+      // Delete from localStorage if unnamed or ephemeral (delegation children)
+      // Named non-ephemeral sessions stay so they can be reopened later
+      if (!removed?.name || removed?.ephemeral) {
         try {
           const raw = localStorage.getItem(STORAGE_KEY);
           if (raw) { const d = JSON.parse(raw); delete d[sessionId]; localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
@@ -600,6 +605,13 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       } catch {}
       return { sessions: rest };
     });
+  },
+
+  setAutoCompactStatus: (sessionId, status) => {
+    set((s) => ({ sessions: updateSession(s.sessions, sessionId, {
+      autoCompactStatus: status,
+      autoCompactStartedAt: status === "compacting" ? Date.now() : s.sessions[sessionId]?.autoCompactStartedAt ?? null,
+    }) }));
   },
 
   // Truncate conversation from a specific message (for rewind)

@@ -1,7 +1,9 @@
-import { useCallback, useRef, useEffect, useMemo } from "react";
+import { useCallback, useRef, useEffect, useMemo, useState } from "react";
 import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useShallow } from "zustand/react/shallow";
+import { readFileBase64 } from "../../lib/tauriApi";
 import FloatingTerminal from "./FloatingTerminal";
 import { PartyEqualizer } from "../party/PartyOverlay";
 import "./Canvas.css";
@@ -23,13 +25,12 @@ function edgePoint(
 }
 
 export default function Canvas() {
-  const { terminals, panX, panY, zoom, snapGuides } = useCanvasStore(useShallow((s) => ({
+  const { terminals, snapGuides } = useCanvasStore(useShallow((s) => ({
     terminals: s.terminals,
-    panX: s.panX,
-    panY: s.panY,
-    zoom: s.zoom,
     snapGuides: s.snapGuides,
   })));
+  // Read zoom for non-transform uses (badge); pan/zoom for transforms are applied via direct DOM writes below
+  const zoom = useCanvasStore((s) => s.zoom);
   // Only extract cwds to avoid re-rendering on every message/streaming update
   const claudeCwds = useClaudeStore(useShallow((s) => {
     const out: Record<string, string> = {};
@@ -43,6 +44,47 @@ export default function Canvas() {
   const addTerminal = useCanvasStore((s) => s.addTerminal);
 
   const canvasRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  const backgroundImage = useSettingsStore((s) => s.backgroundImage);
+  const backgroundOpacity = useSettingsStore((s) => s.backgroundOpacity);
+  const showGrid = useSettingsStore((s) => s.showGrid);
+  const [bgDataUrl, setBgDataUrl] = useState<string | null>(null);
+
+  // Load background image as data URL when path changes
+  useEffect(() => {
+    if (!backgroundImage) { setBgDataUrl(null); return; }
+    let cancelled = false;
+    const ext = backgroundImage.split(".").pop()?.toLowerCase() || "png";
+    const mimeMap: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml" };
+    readFileBase64(backgroundImage).then((b64) => {
+      if (!cancelled) setBgDataUrl(`data:${mimeMap[ext] || "image/png"};base64,${b64}`);
+    }).catch(() => { if (!cancelled) setBgDataUrl(null); });
+    return () => { cancelled = true; };
+  }, [backgroundImage]);
+
+  // Direct DOM writes for pan/zoom — avoids React reconciliation jitter
+  useEffect(() => {
+    const apply = (panX: number, panY: number, z: number) => {
+      const canvas = canvasRef.current;
+      const content = contentRef.current;
+      if (!canvas || !content) return;
+      if (showGrid) {
+        const gridSize = Math.round(24 * z);
+        canvas.style.backgroundImage = "";
+        canvas.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+        canvas.style.backgroundPosition = `${Math.round(panX % gridSize)}px ${Math.round(panY % gridSize)}px`;
+      } else {
+        canvas.style.backgroundImage = "none";
+      }
+      content.style.transform = `translate(${panX}px, ${panY}px) scale(${z})`;
+    };
+    // Apply initial state
+    const { panX, panY, zoom: z } = useCanvasStore.getState();
+    apply(panX, panY, z);
+    // Subscribe to store changes — fires synchronously on every set()
+    return useCanvasStore.subscribe((s) => apply(s.panX, s.panY, s.zoom));
+  }, [showGrid]);
 
   // Dynamically compute widget↔chat links by matching cwd to widget folder
   const linkLines = useMemo(() => {
@@ -186,19 +228,22 @@ export default function Canvas() {
   return (
     <div
       ref={canvasRef}
-      className="canvas"
+      className={`canvas ${showGrid ? "" : "canvas--no-grid"}`}
       onMouseDown={handleMouseDown}
-      style={{
-        backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
-        backgroundPosition: `${panX % (24 * zoom)}px ${panY % (24 * zoom)}px`,
-      }}
     >
+      {bgDataUrl && (
+        <div
+          className="canvas-bg-image"
+          style={{
+            backgroundImage: `url(${bgDataUrl})`,
+            opacity: backgroundOpacity,
+          }}
+        />
+      )}
       <div
+        ref={contentRef}
         className="canvas-content"
-        style={{
-          transform: `translate(${panX}px, ${panY}px) scale(${zoom})`,
-          transformOrigin: "0 0",
-        }}
+        style={{ transformOrigin: "0 0" }}
       >
         {/* Animated dotted lines between linked panels (CSS divs, not SVG — WebKit clips SVG) */}
         {linkLines.map((l) => (

@@ -139,8 +139,8 @@ fn build_command(
         }
     }
 
-    // Prompt must be the last positional argument, after all flags
-    cmd.arg(prompt);
+    // "--" ensures prompt is never misinterpreted as a flag
+    cmd.arg("--").arg(prompt);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
 

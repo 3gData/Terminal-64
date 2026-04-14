@@ -13,6 +13,20 @@
   background-position: 12px 12px;
 }
 
+.canvas--no-grid {
+  background-image: none !important;
+}
+
+.canvas-bg-image {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
 .canvas-content {
   position: absolute;
   top: 0;
@@ -22,6 +36,7 @@
   overflow: visible;
   pointer-events: none;
   z-index: 2;
+  will-change: transform;
 }
 
 .canvas-content > *:not(.canvas-link-line) {

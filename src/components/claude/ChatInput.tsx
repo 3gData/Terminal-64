@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { SlashCommand } from "../../lib/types";
 import { searchFiles } from "../../lib/tauriApi";
+import { formatDuration } from "../../lib/constants";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
@@ -45,11 +46,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
   // Thinking timer — ticks every second while streaming
   useEffect(() => {
     if (!isStreaming || !streamingStartedAt) { setElapsed(""); return; }
-    const tick = () => {
-      const secs = Math.floor((Date.now() - streamingStartedAt) / 1000);
-      if (secs < 60) setElapsed(`${secs}s`);
-      else setElapsed(`${Math.floor(secs / 60)}m ${secs % 60}s`);
-    };
+    const tick = () => setElapsed(formatDuration(Math.floor((Date.now() - streamingStartedAt) / 1000)));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);

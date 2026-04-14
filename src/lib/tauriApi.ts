@@ -408,6 +408,14 @@ export async function updateSkillMeta(
   });
 }
 
+export async function getSkillCreatorPath(): Promise<string> {
+  return invoke("get_skill_creator_path");
+}
+
+export async function ensureSkillsPlugin(): Promise<void> {
+  return invoke("ensure_skills_plugin");
+}
+
 // Proxy fetch (CORS bypass for widgets)
 
 export interface ProxyFetchResponse {

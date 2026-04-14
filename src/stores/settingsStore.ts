@@ -27,6 +27,11 @@ export interface Settings {
   partyEqualizerDance: boolean;
   partyEqualizerRotation: boolean;
   partyIntensity: number;
+  autoCompactEnabled: boolean;
+  autoCompactThreshold: number; // 0-100, percentage of context window
+  backgroundImage: string; // absolute file path or empty
+  backgroundOpacity: number; // 0-1
+  showGrid: boolean;
 }
 
 const STORAGE_KEY = "terminal64-settings";
@@ -51,6 +56,11 @@ const defaultSettings: Settings = {
   partyEqualizerDance: true,
   partyEqualizerRotation: true,
   partyIntensity: 0.7,
+  autoCompactEnabled: false,
+  autoCompactThreshold: 80,
+  backgroundImage: "",
+  backgroundOpacity: 0.15,
+  showGrid: true,
 };
 
 function loadSettings(): Settings {

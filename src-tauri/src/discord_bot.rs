@@ -447,7 +447,7 @@ async fn run_gateway(
                             safe_eprintln!("[discord] MESSAGE_CREATE in channel {} from {}: {}", channel_id, username, &content[..content.len().min(50)]);
 
                             let has_attachments = attachments.map(|a| !a.is_empty()).unwrap_or(false);
-                            if content.is_empty() && !has_attachments { continue; }
+                            if content.trim().is_empty() && !has_attachments { continue; }
 
                             let (session_id, session_cwd) = {
                                 let s = state.lock().await;
@@ -534,8 +534,9 @@ async fn run_gateway(
 
                                 let discord_blocked = Some("mcp__plugin_discord_discord__reply,mcp__plugin_discord_discord__react,mcp__plugin_discord_discord__edit_message,mcp__plugin_discord_discord__fetch_messages,mcp__plugin_discord_discord__download_attachment".to_string());
 
+                                // Try resume first if session file exists, fall back to create (and vice versa)
                                 let result = if session_file_exists {
-                                    claude_manager.send_prompt(app_handle, SendClaudePromptRequest {
+                                    match claude_manager.send_prompt(app_handle, SendClaudePromptRequest {
                                         session_id: sid.clone(),
                                         cwd: session_cwd.clone(),
                                         prompt: formatted_prompt.clone(),
@@ -543,10 +544,24 @@ async fn run_gateway(
                                         model: None, effort: None,
                                         disallowed_tools: discord_blocked.clone(),
                                         channel_server: None,
-                                    }, None, None)
+                                    }, None, None) {
+                                        Ok(()) => Ok(()),
+                                        Err(e) => {
+                                            safe_eprintln!("[discord] Resume failed, falling back to create: {}", e);
+                                            claude_manager.create_session(app_handle, CreateClaudeRequest {
+                                                session_id: sid.clone(),
+                                                cwd: session_cwd.clone(),
+                                                prompt: formatted_prompt.clone(),
+                                                permission_mode: "accept_edits".to_string(),
+                                                model: None, effort: None,
+                                                channel_server: None,
+                                                mcp_config: None,
+                                            }, None, None)
+                                        }
+                                    }
                                 } else {
                                     safe_eprintln!("[discord] First message — creating new session");
-                                    claude_manager.create_session(app_handle, CreateClaudeRequest {
+                                    match claude_manager.create_session(app_handle, CreateClaudeRequest {
                                         session_id: sid.clone(),
                                         cwd: session_cwd.clone(),
                                         prompt: formatted_prompt.clone(),
@@ -554,7 +569,21 @@ async fn run_gateway(
                                         model: None, effort: None,
                                         channel_server: None,
                                         mcp_config: None,
-                                    }, None, None)
+                                    }, None, None) {
+                                        Ok(()) => Ok(()),
+                                        Err(e) => {
+                                            safe_eprintln!("[discord] Create failed, falling back to resume: {}", e);
+                                            claude_manager.send_prompt(app_handle, SendClaudePromptRequest {
+                                                session_id: sid.clone(),
+                                                cwd: session_cwd.clone(),
+                                                prompt: formatted_prompt.clone(),
+                                                permission_mode: "accept_edits".to_string(),
+                                                model: None, effort: None,
+                                                disallowed_tools: discord_blocked.clone(),
+                                                channel_server: None,
+                                            }, None, None)
+                                        }
+                                    }
                                 };
                                 if let Err(e) = result {
                                     safe_eprintln!("[discord] Prompt error: {}", e);
@@ -619,13 +648,20 @@ async fn restore_channel_mappings(state: &Arc<TokioMutex<Option<BotState>>>, cha
         let ch_id = ch["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
         if ch_id == 0 { continue; }
 
-        // Channel topics are "Terminal 64: {session_id}"
+        // Channel topics are "Terminal 64: {session_id} | {cwd}"
         if let Some(topic) = ch["topic"].as_str() {
-            if let Some(session_id) = topic.strip_prefix("Terminal 64: ") {
-                let sid = session_id.trim().to_string();
+            if let Some(rest) = topic.strip_prefix("Terminal 64: ") {
+                let (sid, cwd) = if let Some((s, c)) = rest.split_once(" | ") {
+                    (s.trim().to_string(), c.trim().to_string())
+                } else {
+                    (rest.trim().to_string(), String::new())
+                };
                 if !sid.is_empty() {
                     bs.session_to_channel.insert(sid.clone(), ch_id);
-                    bs.channel_to_session.insert(ch_id, sid);
+                    bs.channel_to_session.insert(ch_id, sid.clone());
+                    if !cwd.is_empty() {
+                        bs.session_cwd.insert(sid, cwd);
+                    }
                     restored += 1;
                 }
             }
@@ -681,7 +717,11 @@ async fn create_session_channel(
         "name": channel_name,
         "type": 0,
         "parent_id": cat_id.to_string(),
-        "topic": format!("Terminal 64: {}", session_id),
+        "topic": if cwd.is_empty() {
+            format!("Terminal 64: {}", session_id)
+        } else {
+            format!("Terminal 64: {} | {}", session_id, cwd)
+        },
     });
 
     safe_eprintln!("[discord] Creating channel #{} for session {}", channel_name, session_id);

@@ -18,7 +18,7 @@ import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
-import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible } from "./lib/tauriApi";
+import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible, ensureSkillsPlugin } from "./lib/tauriApi";
 import { Toast, subscribeToasts, dismissToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
 import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
@@ -50,9 +50,10 @@ function App() {
     setAllBrowsersVisible(!anyOverlayOpen).catch(() => {});
   }, [anyOverlayOpen]);
 
-  // Check for updates on startup
+  // Check for updates on startup + ensure skills plugin bridge
   useEffect(() => {
     checkForUpdate().then(setUpdate);
+    ensureSkillsPlugin().catch(() => {});
   }, []);
 
   // Restore saved settings (theme, opacity) on startup
