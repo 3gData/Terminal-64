@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -95,6 +95,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const incrementPromptCount = useClaudeStore((s) => s.incrementPromptCount);
   const setDraftPrompt = useClaudeStore((s) => s.setDraftPrompt);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatBodyRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const loopTimerRef = useRef<number | null>(null);
   const INITIAL_VISIBLE = 40;
@@ -178,60 +179,82 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   useEffect(() => {
     document.documentElement.style.setProperty("--claude-font", fontStack(useSettingsStore.getState().claudeFont || "system"));
   }, []);
-  // Reset visible messages when switching sessions, and scroll to bottom
-  useEffect(() => {
-    setVisibleCount(INITIAL_VISIBLE);
-    wasAtBottom.current = true;
-    requestAnimationFrame(() => {
-      const el = messagesEndRef.current?.parentElement;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-  }, [sessionId]);
-
-  // Track whether user is at the bottom so we only auto-scroll when appropriate
-  const wasAtBottom = useRef(true);
-  // Use refs so the scroll handler doesn't need to be reattached on every message/visibleCount change
+  // ── Scroll management ──────────────────────────────────────────────
+  // stickyBottom: true when we should auto-follow new content.
+  // Uses hysteresis: must scroll >150px away to unstick, <30px to re-stick.
+  // This prevents smooth-scroll animations and programmatic scrolls from
+  // corrupting the flag.
+  const stickyBottom = useRef(true);
   const visibleCountRef = useRef(visibleCount);
   visibleCountRef.current = visibleCount;
   const messageLenRef = useRef(session?.messages?.length ?? 0);
   messageLenRef.current = session?.messages?.length ?? 0;
+  // For load-more: save scrollHeight before prepending so we can restore position
+  const loadMoreScrollHeight = useRef(0);
+  const loadMorePending = useRef(false);
 
+  // Reset on session switch — snap to bottom
   useEffect(() => {
-    const el = messagesEndRef.current?.parentElement;
+    setVisibleCount(INITIAL_VISIBLE);
+    stickyBottom.current = true;
+    loadMorePending.current = false;
+    requestAnimationFrame(() => {
+      const el = chatBodyRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }, [sessionId]);
+
+  // Scroll event handler — detect user intent + load-more trigger
+  useEffect(() => {
+    const el = chatBodyRef.current;
     if (!el) return;
     const handler = () => {
-      wasAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-      // Load more messages when scrolled to top
-      if (el.scrollTop < 80 && visibleCountRef.current < messageLenRef.current) {
-        const prevHeight = el.scrollHeight;
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // Hysteresis: only change sticky state at clear thresholds
+      if (dist > 150) stickyBottom.current = false;
+      else if (dist < 30) stickyBottom.current = true;
+      // Load more when scrolled near top
+      if (el.scrollTop < 80 && visibleCountRef.current < messageLenRef.current && !loadMorePending.current) {
+        loadMorePending.current = true;
+        loadMoreScrollHeight.current = el.scrollHeight;
         setVisibleCount((v) => Math.min(v + LOAD_MORE_BATCH, messageLenRef.current));
-        requestAnimationFrame(() => {
-          el.scrollTop = el.scrollHeight - prevHeight;
-        });
       }
     };
     el.addEventListener("scroll", handler, { passive: true });
     return () => el.removeEventListener("scroll", handler);
-  }, [sessionId]); // Only reattach when session changes
-  // Scroll on new messages (only if user was at bottom before the new content rendered)
+  }, [sessionId]);
+
+  // After load-more prepends messages: restore scroll position synchronously
+  // before the browser paints, so the user sees no jump.
+  useLayoutEffect(() => {
+    if (!loadMorePending.current) return;
+    const el = chatBodyRef.current;
+    if (el && loadMoreScrollHeight.current > 0) {
+      el.scrollTop = el.scrollHeight - loadMoreScrollHeight.current;
+    }
+    loadMorePending.current = false;
+    loadMoreScrollHeight.current = 0;
+  }, [visibleCount]);
+
+  // New messages arrived — scroll to bottom if sticky
   useEffect(() => {
-    const el = messagesEndRef.current?.parentElement;
-    if (!el) return;
-    if (wasAtBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    if (!stickyBottom.current) return;
+    const el = chatBodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [session?.messages?.length]);
-  // Auto-scroll to permission prompt when it appears
+
+  // Permission prompt appeared — always scroll down
   useEffect(() => {
     if (!session?.pendingPermission) return;
-    const el = messagesEndRef.current?.parentElement;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    const el = chatBodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [session?.pendingPermission]);
-  // For streaming, scroll instantly (only if at bottom — check position directly to avoid stale ref)
+
+  // Streaming text — instant scroll if sticky (fires frequently, must be cheap)
   useEffect(() => {
-    if (!session?.streamingText) return;
-    const el = messagesEndRef.current?.parentElement;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    if (atBottom) el.scrollTop = el.scrollHeight;
+    if (!session?.streamingText || !stickyBottom.current) return;
+    const el = chatBodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [session?.streamingText]);
   useEffect(() => {
     const handler = () => { setShowModelDrop(false); setShowEffortDrop(false); setShowMcpDrop(false); };
@@ -783,7 +806,7 @@ Rules:
 
   const handleEditClick = useCallback(async (tcId: string, filePath: string, _oldStr: string, newStr: string) => {
     // Save scroll position before opening overlay
-    const el = messagesEndRef.current?.parentElement;
+    const el = chatBodyRef.current;
     if (el) savedScrollTop.current = el.scrollTop;
     // Use persisted full-file content if available
     if (editOverrides.current[tcId]) {
@@ -818,7 +841,7 @@ Rules:
   }, []);
 
   const handleFileTreeOpen = useCallback(async (filePath: string) => {
-    const el = messagesEndRef.current?.parentElement;
+    const el = chatBodyRef.current;
     if (el) savedScrollTop.current = el.scrollTop;
     try {
       const content = await readFile(filePath);
@@ -1154,7 +1177,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                     }
                     setEditOverlay(null);
                     requestAnimationFrame(() => {
-                      const el = messagesEndRef.current?.parentElement;
+                      const el = chatBodyRef.current;
                       if (el) el.scrollTop = savedScrollTop.current;
                     });
                   }}>Close</button>
@@ -1235,7 +1258,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               </div>
             </div>
           ) : (
-          <div className="cc-messages">
+          <div className="cc-messages" ref={chatBodyRef}>
             {!hasMessages && (
               <div className="cc-empty">
                 <div className="cc-empty-icon">
