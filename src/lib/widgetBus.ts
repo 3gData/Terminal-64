@@ -1,4 +1,4 @@
-type Callback = (data: any) => void;
+type Callback = (data: unknown) => void;
 
 interface Subscriber {
   widgetId: string;
@@ -37,12 +37,12 @@ class WidgetBus {
     }
   }
 
-  broadcast(topic: string, data: any, senderWidgetId: string) {
+  broadcast(topic: string, data: unknown, senderWidgetId: string) {
     const subs = this.topics.get(topic);
     if (!subs) return;
     for (const sub of subs) {
       if (sub.widgetId !== senderWidgetId) {
-        try { sub.callback(data); } catch {}
+        try { sub.callback(data); } catch (e) { console.warn("[widgetBus] Callback error on topic broadcast:", e); }
       }
     }
   }

@@ -83,7 +83,6 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   const browserRafRef = useRef<number>(0);
   const lastBoundsRef = useRef("");
 
-  // Get widget server port on mount
   useEffect(() => {
     getWidgetServerPort()
       .then((port) => {
@@ -159,7 +158,9 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
             return `${base}?t=${reloadCounterRef.current}`;
           });
         }
-      } catch {}
+      } catch (e) {
+        console.warn("[widget] Poll for file changes failed:", e);
+      }
     }, POLL_INTERVAL);
 
     return () => {
@@ -170,11 +171,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   // ---- Event bridge: forward Claude store changes into the iframe ----
   useEffect(() => {
     const iframe = iframeRef.current;
-    const post = (msg: any) => {
+    const post = (msg: unknown) => {
       try { iframe?.contentWindow?.postMessage(msg, "*"); } catch {}
     };
 
-    // Send initial state once iframe loads
     const onLoad = () => {
       post({ type: "t64:init", payload: buildStateSnapshot() });
     };

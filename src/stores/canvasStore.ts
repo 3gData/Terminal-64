@@ -113,7 +113,6 @@ interface CanvasState {
   loadSession: () => boolean;
 }
 
-// Shared deserialization for session data
 interface SerializedTerminal {
   x?: number;
   y?: number;
@@ -122,14 +121,17 @@ interface SerializedTerminal {
   title?: string;
   borderColor?: string;
   cwd?: string;
+  panelType?: PanelType;
+  terminalId?: string;
+  claudeSkipPermissions?: boolean;
+  widgetId?: string;
+  browserUrl?: string;
 }
 
 function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
   return items.map((t, i) => {
-    const raw = t as any;
-    // Migrate legacy isClaudeSession to panelType
-    const panelType: PanelType = raw.panelType ?? (raw.isClaudeSession ? "claude" : "terminal");
-    const terminalId = (panelType !== "terminal" && raw.terminalId) ? raw.terminalId : uuidv4();
+    const panelType: PanelType = t.panelType ?? "terminal";
+    const terminalId = (panelType !== "terminal" && t.terminalId) ? t.terminalId : uuidv4();
     return {
       id: uuidv4(),
       terminalId,
@@ -143,9 +145,9 @@ function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
       poppedOut: false,
       cwd: t.cwd ?? "",
       panelType,
-      claudeSkipPermissions: raw.claudeSkipPermissions ?? false,
-      widgetId: raw.widgetId,
-      browserUrl: raw.browserUrl,
+      claudeSkipPermissions: t.claudeSkipPermissions ?? false,
+      widgetId: t.widgetId,
+      browserUrl: t.browserUrl,
     };
   });
 }
@@ -190,7 +192,9 @@ function getInitialState() {
         };
       }
     }
-  } catch {}
+  } catch (e) {
+    console.warn("[canvasStore] Failed to load session from localStorage:", e);
+  }
 
   const def = makeTerminal(1);
   return {
@@ -215,45 +219,54 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       try {
         useCanvasStore.getState().saveSession();
         dirty = false;
-      } catch {}
+      } catch (e) {
+        console.warn("[canvasStore] Auto-save failed:", e);
+      }
     }
   }, AUTO_SAVE_INTERVAL_MS);
 
   // Clean up on HMR to avoid stacking intervals
-  if ((import.meta as any).hot) {
-    (import.meta as any).hot.dispose(() => clearInterval(saveIntervalId));
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => clearInterval(saveIntervalId));
   }
 
   const markDirty = () => { dirty = true; };
+
+  /** Shared helper: position a new panel, add it to state, mark dirty. */
+  function addPanel(
+    overrides: Partial<CanvasTerminal>,
+    opts?: { x?: number; y?: number; width?: number; height?: number; setActive?: boolean },
+  ): CanvasTerminal {
+    const state = get();
+    const w = opts?.width || overrides.width || DEFAULT_TERMINAL_WIDTH;
+    const h = opts?.height || overrides.height || DEFAULT_TERMINAL_HEIGHT;
+    let px: number, py: number;
+    if (opts?.x != null && opts?.y != null) {
+      px = opts.x; py = opts.y;
+    } else {
+      const vc = getViewportCenter(state);
+      px = vc.x - w / 2;
+      py = vc.y - h / 2;
+    }
+    const pos = findNonOverlappingPosition(px, py, w, h, state.terminals);
+    const newTerm = makeTerminal(state.nextZ, { ...overrides, x: pos.x, y: pos.y, width: w, height: h });
+    set({
+      terminals: [...state.terminals, newTerm],
+      nextZ: state.nextZ + 1,
+      ...(opts?.setActive !== false ? { activeTerminalId: newTerm.terminalId } : {}),
+    });
+    markDirty();
+    return newTerm;
+  }
 
   return {
     ...initial,
 
     addTerminal: (x?: number, y?: number, cwd?: string, width?: number, height?: number, title?: string) => {
-      const state = get();
-      const w = width || DEFAULT_TERMINAL_WIDTH;
-      const h = height || DEFAULT_TERMINAL_HEIGHT;
-      let px: number, py: number;
-      if (x != null && y != null) {
-        px = x; py = y;
-      } else {
-        const vc = getViewportCenter(state);
-        px = vc.x - w / 2;
-        py = vc.y - h / 2;
-      }
-      const pos = findNonOverlappingPosition(px, py, w, h, state.terminals);
-      const newTerm = makeTerminal(state.nextZ, {
-        x: pos.x, y: pos.y, width: w, height: h,
-        ...(cwd ? { cwd } : {}),
-        ...(title ? { title } : {}),
-      });
-      set({
-        terminals: [...state.terminals, newTerm],
-        nextZ: state.nextZ + 1,
-        activeTerminalId: newTerm.terminalId,
-      });
-      markDirty();
-      return newTerm;
+      return addPanel(
+        { ...(cwd ? { cwd } : {}), ...(title ? { title } : {}) },
+        { x, y, width, height },
+      );
     },
 
     addClaudeTerminal: (cwd: string, skipPermissions: boolean, sessionName?: string, existingSessionId?: string) => {
@@ -261,97 +274,43 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     },
 
     addClaudeTerminalAt: (cwd, skipPermissions, sessionName, existingSessionId, x, y, width, height) => {
-      const state = get();
-      const w = width || DEFAULT_TERMINAL_WIDTH;
-      const h = height || DEFAULT_TERMINAL_HEIGHT;
-      let px: number, py: number;
-      if (x != null && y != null) {
-        px = x; py = y;
-      } else {
-        const vc = getViewportCenter(state);
-        px = vc.x - w / 2;
-        py = vc.y - h / 2;
-      }
-      const pos = findNonOverlappingPosition(px, py, w, h, state.terminals);
-      const newTerm = makeTerminal(state.nextZ, {
-        x: pos.x, y: pos.y, width: w, height: h,
+      return addPanel({
         title: sessionName || "Claude",
         borderColor: "#cba6f7",
         cwd,
         panelType: "claude",
         claudeSkipPermissions: skipPermissions,
         ...(existingSessionId ? { terminalId: existingSessionId } : {}),
-      });
-      set({
-        terminals: [...state.terminals, newTerm],
-        nextZ: state.nextZ + 1,
-        activeTerminalId: newTerm.terminalId,
-      });
-      markDirty();
-      return newTerm;
+      }, { x, y, width, height });
     },
 
     addWidgetTerminal: (widgetId, widgetName) => {
-      const state = get();
-      const w = 500, h = 400;
-      const vc = getViewportCenter(state);
-      const pos = findNonOverlappingPosition(vc.x - w / 2, vc.y - h / 2, w, h, state.terminals);
-      const newTerm = makeTerminal(state.nextZ, {
-        x: pos.x, y: pos.y, width: w, height: h,
+      return addPanel({
         title: widgetName || widgetId,
         borderColor: "#f9e2af",
         panelType: "widget",
         widgetId,
-      });
-      set({
-        terminals: [...state.terminals, newTerm],
-        nextZ: state.nextZ + 1,
-        activeTerminalId: newTerm.terminalId,
-      });
-      markDirty();
-      return newTerm;
+      }, { width: 500, height: 400 });
     },
 
     addSharedChatPanel: (groupId, x, y, width, height) => {
-      const state = get();
-      const pos = findNonOverlappingPosition(x, y, width, height, state.terminals);
-      const newTerm = makeTerminal(state.nextZ, {
-        x: pos.x, y: pos.y, width, height,
+      return addPanel({
         title: "Team Chat",
         borderColor: "#94e2d5",
         cwd: "",
         panelType: "shared-chat",
         terminalId: `shared-chat-${groupId}`,
-      });
-      set({
-        terminals: [...state.terminals, newTerm],
-        nextZ: state.nextZ + 1,
-      });
-      markDirty();
-      return newTerm;
+      }, { x, y, width, height, setActive: false });
     },
 
     addBrowserPanel: (url, title) => {
-      const state = get();
-      const w = 900, h = 600;
-      const vc = getViewportCenter(state);
-      const pos = findNonOverlappingPosition(vc.x - w / 2, vc.y - h / 2, w, h, state.terminals);
-      const browserId = `browser-${uuidv4().slice(0, 8)}`;
-      const newTerm = makeTerminal(state.nextZ, {
-        x: pos.x, y: pos.y, width: w, height: h,
+      return addPanel({
         title: title || "Browser",
         borderColor: "#89b4fa",
         panelType: "browser",
-        terminalId: browserId,
+        terminalId: `browser-${uuidv4().slice(0, 8)}`,
         browserUrl: url,
-      });
-      set({
-        terminals: [...state.terminals, newTerm],
-        nextZ: state.nextZ + 1,
-        activeTerminalId: newTerm.terminalId,
-      });
-      markDirty();
-      return newTerm;
+      }, { width: 900, height: 600 });
     },
 
     removeTerminal: (id: string) => {
@@ -397,13 +356,31 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       const state = get();
       const term = state.terminals.find((t) => t.id === id);
       if (!term || term.zIndex === state.nextZ - 1) return; // Already on top
-      set({
-        terminals: state.terminals.map((t) =>
-          t.id === id ? { ...t, zIndex: state.nextZ } : t
-        ),
-        nextZ: state.nextZ + 1,
-        activeTerminalId: term.terminalId,
-      });
+
+      // Rebalance z-indices when they get too high to prevent rendering issues
+      if (state.nextZ > 10000) {
+        const sorted = [...state.terminals].sort((a, b) => a.zIndex - b.zIndex);
+        const zMap = new Map<string, number>();
+        sorted.forEach((t, i) => zMap.set(t.id, i + 1));
+        // The target panel gets the top slot
+        zMap.set(id, sorted.length + 1);
+        set({
+          terminals: state.terminals.map((t) => ({
+            ...t,
+            zIndex: zMap.get(t.id)!,
+          })),
+          nextZ: sorted.length + 2,
+          activeTerminalId: term.terminalId,
+        });
+      } else {
+        set({
+          terminals: state.terminals.map((t) =>
+            t.id === id ? { ...t, zIndex: state.nextZ } : t
+          ),
+          nextZ: state.nextZ + 1,
+          activeTerminalId: term.terminalId,
+        });
+      }
       markDirty();
     },
 
@@ -538,7 +515,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       };
       try {
         localStorage.setItem("terminal64-session", JSON.stringify(session));
-      } catch {}
+      } catch (e) {
+        console.warn("[canvasStore] Failed to save session:", e);
+      }
     },
 
     loadSession: () => {

@@ -10,8 +10,7 @@ pub type TerminalId = String;
 struct PtyInstance {
     writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
-    #[allow(dead_code)]
-    child: Box<dyn portable_pty::Child + Send>,
+    _child: Box<dyn portable_pty::Child + Send>,
 }
 
 pub struct PtyManager {
@@ -91,7 +90,7 @@ impl PtyManager {
         let instance = PtyInstance {
             writer,
             master: pair.master,
-            child,
+            _child: child,
         };
 
         self.instances
@@ -176,8 +175,8 @@ impl PtyManager {
     pub fn close(&self, id: &str) -> Result<(), String> {
         let mut instances = self.instances.lock().map_err(|e| e.to_string())?;
         if let Some(mut instance) = instances.remove(id) {
-            let _ = instance.child.kill();
-            let _ = instance.child.wait();
+            let _ = instance._child.kill();
+            let _ = instance._child.wait();
         }
         Ok(())
     }

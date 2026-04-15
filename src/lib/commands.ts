@@ -13,20 +13,6 @@ export function executeCommand(id: string, ...args: unknown[]) {
   }
 }
 
-export function getCommand(id: string): Command | undefined {
-  return commandRegistry.get(id);
-}
-
-export function getAllCommands(): Command[] {
+function getAllCommands(): Command[] {
   return Array.from(commandRegistry.values());
-}
-
-export function searchCommands(query: string): Command[] {
-  const q = query.toLowerCase();
-  return getAllCommands().filter(
-    (cmd) =>
-      cmd.label.toLowerCase().includes(q) ||
-      cmd.id.toLowerCase().includes(q) ||
-      cmd.category?.toLowerCase().includes(q)
-  );
 }

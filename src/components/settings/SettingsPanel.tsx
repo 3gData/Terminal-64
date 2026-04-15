@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useThemeStore } from "../../stores/themeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { startDiscordBot, stopDiscordBot, discordBotStatus, generateTheme, onThemeGenChunk, onThemeGenDone } from "../../lib/tauriApi";
+import { startDiscordBot, stopDiscordBot, discordBotStatus, generateTheme, onThemeGenChunk, onThemeGenDone, startOpenwolfDaemon, stopOpenwolfDaemon, openwolfDaemonStatus } from "../../lib/tauriApi";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsPanel.css";
 
@@ -76,6 +76,14 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
   const autoCompactThreshold = useSettingsStore((s) => s.autoCompactThreshold);
 
+  // OpenWolf
+  const openwolfEnabled = useSettingsStore((s) => s.openwolfEnabled);
+  const openwolfAutoInit = useSettingsStore((s) => s.openwolfAutoInit);
+  const openwolfDaemon = useSettingsStore((s) => s.openwolfDaemon);
+  const openwolfDesignQC = useSettingsStore((s) => s.openwolfDesignQC);
+  const [wolfDaemonRunning, setWolfDaemonRunning] = useState(false);
+  const [wolfDaemonLoading, setWolfDaemonLoading] = useState(false);
+
   const discordToken = useSettingsStore((s) => s.discordBotToken);
   const discordServerId = useSettingsStore((s) => s.discordServerId);
   const [botConnected, setBotConnected] = useState(false);
@@ -89,6 +97,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   useEffect(() => {
     if (isOpen) {
       discordBotStatus().then(setBotConnected).catch(() => {});
+      openwolfDaemonStatus().then(setWolfDaemonRunning).catch(() => {});
     }
   }, [isOpen]);
 
@@ -116,7 +125,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           if (fenceMatch) json = fenceMatch[1].trim();
           const theme = JSON.parse(json) as ThemeDefinition;
           const requiredUi = ["bg","bgSecondary","bgTertiary","fg","fgSecondary","fgMuted","border","accent","accentHover","tabActiveBg","tabInactiveBg","tabActiveFg","tabInactiveFg","tabHoverBg","scrollbar","scrollbarHover"] as const;
-          if (theme.name && theme.ui && theme.terminal && requiredUi.every((k) => (theme.ui as any)[k])) {
+          if (theme.name && theme.ui && theme.terminal && requiredUi.every((k) => theme.ui[k])) {
             addTheme(theme);
             setTheme(theme.name);
             setSetting({ theme: theme.name });
@@ -319,6 +328,71 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                   />
                   <span className="sp-hint">Triggers /compact when context usage exceeds this percentage</span>
                 </div>
+              </div>
+            )}
+          </Section>
+
+          {/* OpenWolf */}
+          <Section label="OpenWolf" icon="◈" defaultOpen={false}>
+            <div className="sp-row">
+              <label className="sp-label">
+                Enabled
+                <span className="sp-hint-inline">Project intelligence via .wolf/</span>
+              </label>
+              <Toggle checked={openwolfEnabled} onChange={(v) => setSetting({ openwolfEnabled: v })} />
+            </div>
+
+            {openwolfEnabled && (
+              <div className="sp-sub">
+                <div className="sp-row">
+                  <label className="sp-label">
+                    Auto-Init
+                    <span className="sp-hint-inline">Create .wolf/ on session start</span>
+                  </label>
+                  <Toggle checked={openwolfAutoInit} onChange={(v) => setSetting({ openwolfAutoInit: v })} />
+                </div>
+
+                <div className="sp-row">
+                  <label className="sp-label">
+                    Design QC Hooks
+                    <span className="sp-hint-inline">Pre/PostToolUse quality checks</span>
+                  </label>
+                  <Toggle checked={openwolfDesignQC} onChange={(v) => setSetting({ openwolfDesignQC: v })} />
+                </div>
+
+                <div className="sp-row">
+                  <label className="sp-label">
+                    Daemon
+                    <span className={`sp-dot ${wolfDaemonRunning ? "sp-dot--on" : ""}`} />
+                  </label>
+                  <span className="sp-value">{wolfDaemonRunning ? "Running" : "Stopped"}</span>
+                </div>
+
+                <button
+                  className={`sp-btn sp-btn--wide ${wolfDaemonRunning ? "sp-btn--danger" : ""}`}
+                  disabled={wolfDaemonLoading}
+                  onClick={async () => {
+                    setWolfDaemonLoading(true);
+                    try {
+                      if (wolfDaemonRunning) {
+                        await stopOpenwolfDaemon();
+                        setWolfDaemonRunning(false);
+                        setSetting({ openwolfDaemon: false });
+                      } else {
+                        await startOpenwolfDaemon();
+                        setWolfDaemonRunning(true);
+                        setSetting({ openwolfDaemon: true });
+                      }
+                    } catch (err) {
+                      alert(String(err));
+                    } finally {
+                      setWolfDaemonLoading(false);
+                    }
+                  }}
+                >
+                  {wolfDaemonLoading ? "..." : wolfDaemonRunning ? "Stop Daemon" : "Start Daemon"}
+                </button>
+                <span className="sp-hint">Background daemon for continuous project analysis</span>
               </div>
             )}
           </Section>

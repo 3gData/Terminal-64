@@ -7,7 +7,7 @@ export interface QuickPaste {
   lastUsed: number;
 }
 
-export interface Settings {
+interface Settings {
   claudeModel: string;
   claudeEffort: string;
   claudePermMode: string;
@@ -32,6 +32,10 @@ export interface Settings {
   backgroundImage: string; // absolute file path or empty
   backgroundOpacity: number; // 0-1
   showGrid: boolean;
+  openwolfEnabled: boolean;
+  openwolfAutoInit: boolean;
+  openwolfDaemon: boolean;
+  openwolfDesignQC: boolean;
 }
 
 const STORAGE_KEY = "terminal64-settings";
@@ -61,20 +65,28 @@ const defaultSettings: Settings = {
   backgroundImage: "",
   backgroundOpacity: 0.15,
   showGrid: true,
+  openwolfEnabled: false,
+  openwolfAutoInit: true,
+  openwolfDaemon: false,
+  openwolfDesignQC: false,
 };
 
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return { ...defaultSettings, ...JSON.parse(raw) };
-  } catch {}
+  } catch (e) {
+    console.warn("[settings] Failed to load settings:", e);
+  }
   return defaultSettings;
 }
 
 function persist(state: Settings) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {}
+  } catch (e) {
+    console.warn("[settings] Failed to persist settings:", e);
+  }
 }
 
 interface SettingsState extends Settings {

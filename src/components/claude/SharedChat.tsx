@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getDelegationMessages, type DelegationMsg } from "../../lib/tauriApi";
+import { getDelegationMessages } from "../../lib/tauriApi";
+import type { DelegationMsg } from "../../lib/types";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { endDelegation, performMerge } from "../../hooks/useDelegationOrchestrator";

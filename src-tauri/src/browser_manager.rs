@@ -133,10 +133,4 @@ impl BrowserManager {
         }
     }
 
-    pub fn close_all(&self, app: &AppHandle) {
-        let ids: Vec<String> = self.active.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
-        for id in ids {
-            let _ = self.close(app, &id);
-        }
-    }
 }

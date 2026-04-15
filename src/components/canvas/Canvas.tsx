@@ -8,6 +8,13 @@ import FloatingTerminal from "./FloatingTerminal";
 import { PartyEqualizer } from "../party/PartyOverlay";
 import "./Canvas.css";
 
+/** Safari/WebKit gesture events (non-standard, not in lib.dom.d.ts) */
+interface GestureEvent extends UIEvent {
+  scale: number;
+  clientX: number;
+  clientY: number;
+}
+
 /** Compute the point on a rect's border closest to a target point. */
 function edgePoint(
   rect: { x: number; y: number; width: number; height: number },
@@ -164,24 +171,25 @@ export default function Canvas() {
       if (gestureTimeout !== null) clearTimeout(gestureTimeout);
       gestureTimeout = setTimeout(() => { gesturing = false; }, 500);
     };
-    const onGestureStart = (e: any) => {
+    const onGestureStart = (e: Event) => {
       e.preventDefault();
       if ((e.target as HTMLElement)?.closest?.(".floating-terminal")) return;
       gesturing = true;
       gestureStartZoom = useCanvasStore.getState().zoom;
       resetGestureTimeout();
     };
-    const onGestureChange = (e: any) => {
+    const onGestureChange = (e: Event) => {
       e.preventDefault();
       if (!gesturing) return;
       resetGestureTimeout();
+      const ge = e as GestureEvent;
       const rect = el.getBoundingClientRect();
-      const cx = (e.clientX ?? rect.width / 2) - rect.left;
-      const cy = (e.clientY ?? rect.height / 2) - rect.top;
-      const newZoom = Math.max(0.1, Math.min(5, gestureStartZoom * e.scale));
+      const cx = (ge.clientX ?? rect.width / 2) - rect.left;
+      const cy = (ge.clientY ?? rect.height / 2) - rect.top;
+      const newZoom = Math.max(0.1, Math.min(5, gestureStartZoom * ge.scale));
       useCanvasStore.getState().zoomAtPoint(newZoom, cx, cy);
     };
-    const onGestureEnd = (e: any) => {
+    const onGestureEnd = (e: Event) => {
       e.preventDefault();
       if (gestureTimeout !== null) clearTimeout(gestureTimeout);
       gesturing = false;
@@ -212,9 +220,9 @@ export default function Canvas() {
       }
     };
 
-    el.addEventListener("gesturestart", onGestureStart, { passive: false } as any);
-    el.addEventListener("gesturechange", onGestureChange, { passive: false } as any);
-    el.addEventListener("gestureend", onGestureEnd, { passive: false } as any);
+    el.addEventListener("gesturestart", onGestureStart, { passive: false });
+    el.addEventListener("gesturechange", onGestureChange, { passive: false });
+    el.addEventListener("gestureend", onGestureEnd, { passive: false });
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => {
       if (gestureTimeout !== null) clearTimeout(gestureTimeout);

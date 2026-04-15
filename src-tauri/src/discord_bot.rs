@@ -1,4 +1,3 @@
-use crate::claude_manager::ClaudeManager;
 use crate::types::*;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client as HttpClient;
@@ -43,7 +42,6 @@ impl DiscordBot {
         token: String,
         guild_id: u64,
         app_handle: AppHandle,
-        claude_manager: Arc<ClaudeManager>,
     ) -> Result<(), String> {
         if self.runtime.is_some() {
             return Err("Bot already running".into());
@@ -90,7 +88,6 @@ impl DiscordBot {
         // Spawn gateway listener
         let state_for_gw = bot_state.clone();
         let token_for_gw = token.clone();
-        let cm = claude_manager.clone();
         let ah = app_handle.clone();
         let mut shutdown_rx_gw = shutdown_rx.clone();
         let typing_stops_for_gw = typing_stops.clone();
@@ -99,7 +96,7 @@ impl DiscordBot {
         rt.spawn(async move {
             loop {
                 if *shutdown_rx_gw.borrow() { break; }
-                if let Err(e) = run_gateway(&token_for_gw, &state_for_gw, &cm, &ah, &mut shutdown_rx_gw, &typing_stops_for_gw, &http_for_typing).await {
+                if let Err(e) = run_gateway(&token_for_gw, &state_for_gw, &ah, &mut shutdown_rx_gw, &typing_stops_for_gw, &http_for_typing).await {
                     safe_eprintln!("[discord] Gateway error: {}, reconnecting in 5s...", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
@@ -125,10 +122,13 @@ impl DiscordBot {
                 };
                 if let Some(channel_id) = channel_id {
                     // Stop the typing indicator — a real message is going out
-                    if let Ok(mut stops) = typing_stops_for_queue.lock() {
-                        if let Some(tx) = stops.remove(&channel_id) {
-                            let _ = tx.send(true);
+                    match typing_stops_for_queue.lock() {
+                        Ok(mut stops) => {
+                            if let Some(tx) = stops.remove(&channel_id) {
+                                let _ = tx.send(true);
+                            }
                         }
+                        Err(e) => safe_eprintln!("[discord] Lock poisoned (typing stops): {}", e),
                     }
                     for chunk in split_msg(&text, 1900) {
                         let _ = send_discord_message(&http_for_queue, &token_for_queue, channel_id, &chunk).await;
@@ -194,8 +194,10 @@ impl DiscordBot {
             rt.shutdown_timeout(std::time::Duration::from_secs(2));
         }
         let state = self.state.clone();
-        // Clear state synchronously
-        let new_rt = tokio::runtime::Runtime::new().ok();
+        let new_rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => Some(rt),
+            Err(e) => { safe_eprintln!("[discord] Failed to create runtime for cleanup: {}", e); None }
+        };
         if let Some(rt) = new_rt {
             rt.block_on(async { *state.lock().await = None; });
         }
@@ -219,7 +221,6 @@ impl DiscordBot {
                 let bs = s.as_mut().ok_or("No state".to_string())?;
                 if let Some(channel_id) = bs.session_to_channel.remove(&sid) {
                     bs.channel_to_session.remove(&channel_id);
-                    // Delete the channel
                     let _ = bs.http.delete(format!("{}/channels/{}", DISCORD_API, channel_id))
                         .header("Authorization", format!("Bot {}", bs.token))
                         .send().await;
@@ -340,7 +341,6 @@ async fn ensure_category(state: &Arc<TokioMutex<Option<BotState>>>, token: &str,
         }
     }
 
-    // Create it
     let body = serde_json::json!({ "name": "Terminal 64", "type": 4 });
     let resp = bs.http.post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
         .header("Authorization", format!("Bot {}", token))
@@ -359,13 +359,11 @@ type TypingStops = Arc<std::sync::Mutex<HashMap<u64, tokio::sync::watch::Sender<
 async fn run_gateway(
     token: &str,
     state: &Arc<TokioMutex<Option<BotState>>>,
-    claude_manager: &Arc<ClaudeManager>,
     app_handle: &AppHandle,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
     typing_stops: &TypingStops,
     typing_http: &HttpClient,
 ) -> Result<(), String> {
-    // Get gateway URL
     let http = reqwest::Client::new();
     let gw_resp = http.get(format!("{}/gateway/bot", DISCORD_API))
         .header("Authorization", format!("Bot {}", token))
@@ -457,12 +455,12 @@ async fn run_gateway(
                             };
 
                             if let Some(sid) = session_id {
-                                // Show typing indicator immediately while Claude processes
                                 trigger_typing(typing_http, token, channel_id).await;
                                 {
                                     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-                                    if let Ok(mut stops) = typing_stops.lock() {
-                                        stops.insert(channel_id, stop_tx);
+                                    match typing_stops.lock() {
+                                        Ok(mut stops) => { stops.insert(channel_id, stop_tx); }
+                                        Err(e) => safe_eprintln!("[discord] Lock poisoned (typing stops): {}", e),
                                     }
                                     let http_t = typing_http.clone();
                                     let tok_t = token.to_string();
@@ -515,89 +513,14 @@ async fn run_gateway(
                                 };
                                 safe_eprintln!("[discord] Routing to session {} (cwd: {}): {}", sid, session_cwd, &formatted_prompt[..formatted_prompt.len().min(100)]);
 
-                                // Show in the GUI as a user message
-                                let _ = app_handle.emit("discord-message", serde_json::json!({
+                                // Route through the frontend — emit discord-prompt so the
+                                // GUI's handleSend/actualSend handles streaming checks,
+                                // queuing, resume/create fallback, permission mode, etc.
+                                let _ = app_handle.emit("discord-prompt", serde_json::json!({
                                     "session_id": sid,
                                     "username": username,
-                                    "content": content,
+                                    "prompt": formatted_prompt,
                                 }));
-                                // Check if session file exists on disk to decide create vs resume
-                                let session_file_exists = {
-                                    if let Some(home) = dirs::home_dir() {
-                                        let cwd_hash = session_cwd.replace(':', "-").replace('\\', "-").replace('/', "-");
-                                        let session_path = home.join(".claude").join("projects").join(&cwd_hash).join(format!("{}.jsonl", sid));
-                                        session_path.exists()
-                                    } else {
-                                        false
-                                    }
-                                };
-
-                                let discord_blocked = Some("mcp__plugin_discord_discord__reply,mcp__plugin_discord_discord__react,mcp__plugin_discord_discord__edit_message,mcp__plugin_discord_discord__fetch_messages,mcp__plugin_discord_discord__download_attachment".to_string());
-
-                                // Try resume first if session file exists, fall back to create (and vice versa)
-                                let result = if session_file_exists {
-                                    match claude_manager.send_prompt(app_handle, SendClaudePromptRequest {
-                                        session_id: sid.clone(),
-                                        cwd: session_cwd.clone(),
-                                        prompt: formatted_prompt.clone(),
-                                        permission_mode: "accept_edits".to_string(),
-                                        model: None, effort: None,
-                                        disallowed_tools: discord_blocked.clone(),
-                                        channel_server: None,
-                                        resume_session_at: None,
-                                        max_turns: None, max_budget_usd: None,
-                                        no_session_persistence: None, fork_session: None,
-                                    }, None, None) {
-                                        Ok(()) => Ok(()),
-                                        Err(e) => {
-                                            safe_eprintln!("[discord] Resume failed, falling back to create: {}", e);
-                                            claude_manager.create_session(app_handle, CreateClaudeRequest {
-                                                session_id: sid.clone(),
-                                                cwd: session_cwd.clone(),
-                                                prompt: formatted_prompt.clone(),
-                                                permission_mode: "accept_edits".to_string(),
-                                                model: None, effort: None,
-                                                channel_server: None,
-                                                mcp_config: None,
-                                                max_turns: None, max_budget_usd: None,
-                                                no_session_persistence: None,
-                                            }, None, None)
-                                        }
-                                    }
-                                } else {
-                                    safe_eprintln!("[discord] First message — creating new session");
-                                    match claude_manager.create_session(app_handle, CreateClaudeRequest {
-                                        session_id: sid.clone(),
-                                        cwd: session_cwd.clone(),
-                                        prompt: formatted_prompt.clone(),
-                                        permission_mode: "accept_edits".to_string(),
-                                        model: None, effort: None,
-                                        channel_server: None,
-                                        mcp_config: None,
-                                        max_turns: None, max_budget_usd: None,
-                                        no_session_persistence: None,
-                                    }, None, None) {
-                                        Ok(()) => Ok(()),
-                                        Err(e) => {
-                                            safe_eprintln!("[discord] Create failed, falling back to resume: {}", e);
-                                            claude_manager.send_prompt(app_handle, SendClaudePromptRequest {
-                                                session_id: sid.clone(),
-                                                cwd: session_cwd.clone(),
-                                                prompt: formatted_prompt.clone(),
-                                                permission_mode: "accept_edits".to_string(),
-                                                model: None, effort: None,
-                                                disallowed_tools: discord_blocked.clone(),
-                                                channel_server: None,
-                                                resume_session_at: None,
-                                                max_turns: None, max_budget_usd: None,
-                                                no_session_persistence: None, fork_session: None,
-                                            }, None, None)
-                                        }
-                                    }
-                                };
-                                if let Err(e) = result {
-                                    safe_eprintln!("[discord] Prompt error: {}", e);
-                                }
                             }
                         } else if event_name == "READY" {
                             safe_eprintln!("[discord] Gateway READY");

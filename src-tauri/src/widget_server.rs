@@ -92,7 +92,6 @@ fn handle_request(stream: TcpStream) {
         return;
     }
 
-    // Handle CORS preflight
     if parts[0] == "OPTIONS" {
         let header = "HTTP/1.1 204 No Content\r\n\
             Access-Control-Allow-Origin: *\r\n\

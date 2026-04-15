@@ -16,39 +16,6 @@ export interface TerminalExit {
   code?: number;
 }
 
-// Layout types
-
-export type PaneNode =
-  | { type: "terminal"; id: string; terminalId: string }
-  | {
-      type: "split";
-      id: string;
-      direction: "horizontal" | "vertical";
-      children: PaneNode[];
-      sizes: number[];
-    }
-  | {
-      type: "grid";
-      id: string;
-      cols: number;
-      rows: number;
-      cells: (string | null)[][];
-    };
-
-export interface Tab {
-  id: string;
-  label: string;
-  root: PaneNode;
-}
-
-export interface TerminalInfo {
-  id: string;
-  title: string;
-  shell?: string;
-  cwd?: string;
-  isAlive: boolean;
-}
-
 // Theme types
 
 export interface TerminalTheme {
@@ -124,24 +91,6 @@ export interface Command {
   label: string;
   category?: string;
   execute: (...args: unknown[]) => void;
-}
-
-// Config types
-
-export interface ConfigData {
-  theme?: string;
-  fontSize?: number;
-  fontFamily?: string;
-  defaultShell?: string;
-  keybindings?: Keybinding[];
-}
-
-// Session types
-
-export interface SessionData {
-  name: string;
-  layout: unknown;
-  createdAt: string;
 }
 
 // Claude session types
@@ -261,4 +210,134 @@ export interface DelegationGroup {
   sharedContext?: string;
   collaborationEnabled: boolean;
   parentPermissionMode?: PermissionMode;
+}
+
+// Session history types (snake_case — matches Rust/JSONL serialization)
+
+export interface DiskSession {
+  id: string;
+  modified: number;
+  size: number;
+  summary: string;
+}
+
+export interface HistoryToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  result?: string;
+  is_error?: boolean;
+}
+
+export interface HistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  tool_calls?: HistoryToolCall[];
+}
+
+// Delegation message type (snake_case — matches Rust serialization)
+
+export interface DelegationMsg {
+  group_id: string;
+  agent: string;
+  message: string;
+  timestamp: number;
+  msg_type: string;
+}
+
+// Widget types
+
+export interface WidgetInfo {
+  widget_id: string;
+  has_index: boolean;
+  modified: number;
+}
+
+// Skill types
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  tags: string[];
+  has_skill_md: boolean;
+  modified: number;
+  created?: number;
+}
+
+export interface ResolvedSkill {
+  name: string;
+  body: string;
+  allowed_tools: string[];
+  skill_dir: string;
+}
+
+// Proxy fetch types
+
+export interface ProxyFetchResponse {
+  status: number;
+  ok: boolean;
+  headers: Record<string, string>;
+  body: string;
+  is_base64: boolean;
+}
+
+// Party mode types
+
+export interface SpectrumData {
+  bands: number[];
+  peak: number;
+  bass: number;
+  mid: number;
+  treble: number;
+}
+
+// Vector search types (sqlite-vec)
+
+export interface VectorSearchResult {
+  id: string;
+  distance: number;
+  table: string;
+  title: string;
+  source: string;
+  content_preview: string;
+}
+
+// Hook event types — lifecycle events emitted by Claude CLI hooks
+
+export type HookEventType =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "Stop"
+  | "SubagentStart"
+  | "SubagentStop"
+  | "Notification"
+  | "PreCompact"
+  | "PostCompact"
+  | "SessionStart"
+  | "SessionEnd";
+
+export interface HookEvent {
+  type: HookEventType;
+  sessionId: string;
+  timestamp: number;
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  toolResult?: string;
+  subagentId?: string;
+  message?: string;
+  reason?: string;
+}
+
+/** Tauri event payload for claude-hook-* events */
+export interface HookEventPayload {
+  session_id: string;
+  hook_type: string;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  tool_result?: string;
+  subagent_id?: string;
+  message?: string;
+  reason?: string;
 }

@@ -272,8 +272,29 @@
   background: #a6e3a1;
 }
 
+.wdg-list-item-dot--bundled {
+  background: #89b4fa;
+  box-shadow: 0 0 6px rgba(137, 180, 250, 0.5);
+}
+
 .wdg-list-item-dot--empty {
   background: #6c7086;
+}
+
+.wdg-list-item--bundled {
+  border-color: rgba(137, 180, 250, 0.25);
+}
+
+.wdg-list-item-badge {
+  font-size: 9px;
+  color: #89b4fa;
+  background: rgba(137, 180, 250, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
 }
 
 .wdg-list-item-name {

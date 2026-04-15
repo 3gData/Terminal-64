@@ -1,9 +1,82 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onClaudeEvent, onClaudeDone, cancelClaude, sendClaudePrompt } from "../lib/tauriApi";
-import { useClaudeStore } from "../stores/claudeStore";
+import { useClaudeStore, type ClaudeTask } from "../stores/claudeStore";
 import { useSettingsStore } from "../stores/settingsStore";
-import { ToolCall } from "../lib/types";
+import { ToolCall, HookEventPayload, HookEvent, HookEventType } from "../lib/types";
+
+// --- Claude CLI stream JSON types ---
+
+interface ClaudeUsage {
+  input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  output_tokens?: number;
+}
+
+interface ClaudeContentBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  content?: string | ClaudeContentBlock[];
+  tool_use_id?: string;
+  is_error?: boolean;
+  parentToolUseId?: string;
+}
+
+interface ClaudeQuestion {
+  question?: string;
+  text?: string;
+  description?: string;
+  header?: string;
+  options?: (string | { label?: string; description?: string })[];
+  multiSelect?: boolean;
+}
+
+interface ClaudeMcpServerRaw {
+  name?: string;
+  status?: string;
+  error?: string;
+  type?: string;
+  transport?: string;
+  scope?: string;
+  tools?: { name?: string; description?: string }[];
+}
+
+interface ClaudeModelUsageEntry {
+  contextWindow?: number;
+  [key: string]: unknown;
+}
+
+interface PermissionRequestPayload {
+  request_id: string;
+  session_id: string;
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+}
+
+/** Loosely-typed parsed event from the Claude CLI stream-JSON output.
+ *  The CLI emits many event shapes — this captures common fields. */
+interface ClaudeStreamEvent {
+  type: string;
+  subtype?: string;
+  event?: ClaudeStreamEvent;
+  parent_tool_use_id?: string;
+  model?: string;
+  mcp_servers?: ClaudeMcpServerRaw[];
+  content_block?: { type: string; id?: string; name?: string };
+  delta?: { type: string; text?: string; partial_json?: string };
+  message?: { content?: ClaudeContentBlock[]; usage?: ClaudeUsage };
+  content?: ClaudeContentBlock[];
+  usage?: ClaudeUsage;
+  total_cost_usd?: number;
+  output_tokens?: number;
+  is_error?: boolean;
+  result?: string;
+  modelUsage?: Record<string, ClaudeModelUsageEntry>;
+}
 
 const sessionToolMaps = new Map<string, Map<string, string>>();
 const sessionFilePathMaps = new Map<string, Map<string, string>>();
@@ -52,7 +125,7 @@ function getContextWindowForModel(_model: string): number {
 }
 
 /** Sum all input token fields to get total context usage for a turn */
-function totalInputTokens(usage: any): number {
+function totalInputTokens(usage: ClaudeUsage | undefined): number {
   if (!usage) return 0;
   return (usage.input_tokens || 0)
     + (usage.cache_creation_input_tokens || 0)
@@ -74,7 +147,7 @@ const assistantFinalized = new Set<string>();
 
 function processContentArray(
   session_id: string,
-  content: any[],
+  content: ClaudeContentBlock[],
   store: ReturnType<typeof useClaudeStore.getState>,
 ): boolean {
   let text = "";
@@ -84,36 +157,36 @@ function processContentArray(
     if (block.type === "text") {
       text += block.text;
     } else if (block.type === "tool_use") {
-      const name = block.name;
+      const name = block.name ?? "";
+      const blockId = block.id ?? "";
       const input = block.input || {};
-      getSessionMap(sessionToolMaps, session_id).set(block.id, name);
+      getSessionMap(sessionToolMaps, session_id).set(blockId, name);
 
       if ((name === "Write" || name === "Edit" || name === "MultiEdit") && input.file_path) {
-        getSessionMap(sessionFilePathMaps, session_id).set(block.id, String(input.file_path));
+        getSessionMap(sessionFilePathMaps, session_id).set(blockId, String(input.file_path));
       }
 
-      // Handle internal tools
       if (name === "EnterPlanMode") {
         store.setPlanMode(session_id, true);
       } else if (name === "ExitPlanMode") {
         store.setPlanMode(session_id, false);
       } else if (name === "AskUserQuestion") {
-        let questions: any[] = [];
+        let questions: ClaudeQuestion[] = [];
         if (Array.isArray(input)) {
-          questions = input;
+          questions = input as ClaudeQuestion[];
         } else if (input.question || input.options) {
-          questions = [input];
+          questions = [input as ClaudeQuestion];
         } else {
           const vals = Object.values(input);
           const arr = vals.find((v) => Array.isArray(v));
-          if (arr) questions = arr as any[];
-          else questions = [{ question: input.description || input.text || "Claude has a question", options: [] }];
+          if (arr) questions = arr as ClaudeQuestion[];
+          else questions = [{ question: (input.description as string) || (input.text as string) || "Claude has a question", options: [] }];
         }
 
-        const items = questions.map((q: any) => ({
+        const items = questions.map((q) => ({
           question: q.question || q.text || q.description || "Question",
           header: q.header,
-          options: (q.options || []).map((o: any) =>
+          options: (q.options || []).map((o) =>
             typeof o === "string" ? { label: o } : { label: o.label || String(o), description: o.description }
           ),
           multiSelect: q.multiSelect || false,
@@ -121,7 +194,7 @@ function processContentArray(
 
         if (items.length > 0) {
           store.setPendingQuestions(session_id, {
-            toolUseId: block.id,
+            toolUseId: blockId,
             items,
             currentIndex: 0,
             answers: [],
@@ -131,7 +204,7 @@ function processContentArray(
         }
       } else if (name === "TaskCreate") {
         store.addTask(session_id, {
-          id: block.id,
+          id: blockId,
           subject: String(input.subject || input.title || "Task"),
           description: input.description ? String(input.description) : undefined,
           status: "pending",
@@ -139,14 +212,14 @@ function processContentArray(
       } else if (name === "TaskUpdate") {
         if (input.taskId) {
           store.updateTask(session_id, String(input.taskId), {
-            ...(input.status ? { status: input.status as any } : {}),
+            ...(input.status ? { status: String(input.status) as ClaudeTask["status"] } : {}),
             ...(input.subject ? { subject: String(input.subject) } : {}),
           });
         }
       }
 
       if (!HIDDEN_TOOLS.has(name)) {
-        toolCalls.push({ id: block.id, name, input, parentToolUseId: block.parentToolUseId });
+        toolCalls.push({ id: blockId, name, input, parentToolUseId: block.parentToolUseId });
       }
     }
   }
@@ -165,8 +238,8 @@ export function useClaudeEvents() {
   useEffect(() => {
     let unlistenEvent: (() => void) | null = null;
     let unlistenDone: (() => void) | null = null;
-    let unlistenDiscord: (() => void) | null = null;
     let unlistenPerm: (() => void) | null = null;
+    const unlistenHooks: (() => void)[] = [];
     let cancelled = false;
 
     // Fallback flush: RAF stops firing when the window is backgrounded,
@@ -181,9 +254,9 @@ export function useClaudeEvents() {
         const { session_id, data } = payload;
         const store = useClaudeStore.getState();
 
-        let parsed: any;
+        let parsed: ClaudeStreamEvent;
         try {
-          parsed = JSON.parse(data);
+          parsed = JSON.parse(data) as ClaudeStreamEvent;
         } catch (err) {
           console.warn("[claude] Failed to parse event:", data.slice(0, 200), err);
           store.setError(session_id, `Failed to parse Claude response — the session may need to be restarted.`);
@@ -200,7 +273,7 @@ export function useClaudeEvents() {
           parsed = parsed.event;
         }
 
-        const type = parsed.type;
+        const type: string = parsed.type;
 
         // Safety net: if we receive events while isStreaming is false, the process is
         // clearly still running — re-enable streaming. This catches stale claude-done
@@ -216,7 +289,7 @@ export function useClaudeEvents() {
         }
 
         if (type === "system" && parsed.subtype === "init") {
-          const model = parsed.model || "";
+          const model = String(parsed.model || "");
           store.setModel(session_id, model);
           store.setStreaming(session_id, true);
           // Only update contextMax — preserve existing contextUsed so the
@@ -224,8 +297,8 @@ export function useClaudeEvents() {
           const prevUsed = store.sessions[session_id]?.contextUsed || 0;
           store.setContextUsage(session_id, prevUsed, getContextWindowForModel(model));
           if (Array.isArray(parsed.mcp_servers)) {
-            store.setMcpServers(session_id, parsed.mcp_servers.map((s: any) => {
-              const tools = Array.isArray(s.tools) ? s.tools.map((t: any) => ({
+            store.setMcpServers(session_id, parsed.mcp_servers.map((s) => {
+              const tools = Array.isArray(s.tools) ? s.tools.map((t) => ({
                 name: String(t.name || ""),
                 ...(t.description ? { description: String(t.description) } : {}),
               })) : undefined;
@@ -260,7 +333,6 @@ export function useClaudeEvents() {
             pendingText.set(session_id, existing + parsed.delta.text);
             scheduleFlush();
           } else if (parsed.delta?.type === "input_json_delta" && parsed.delta?.partial_json) {
-            // Accumulate tool input JSON for pending blocks
             const blocks = pendingBlocks.get(session_id);
             if (blocks && blocks.length > 0) {
               blocks[blocks.length - 1].inputJson += parsed.delta.partial_json;
@@ -277,7 +349,6 @@ export function useClaudeEvents() {
         if (type === "message_start") {
           store.setStreaming(session_id, true);
           store.clearStreamingText(session_id);
-          // Reset per-turn state
           pendingBlocks.delete(session_id);
           assistantFinalized.delete(session_id);
           return;
@@ -301,7 +372,6 @@ export function useClaudeEvents() {
             store.setContextUsage(session_id, totalIn, ctxMax);
           }
 
-          // Try both parsed.message.content and parsed.content as fallback
           const content = parsed.message?.content || parsed.content;
           if (Array.isArray(content)) {
             processContentArray(session_id, content, store);
@@ -321,8 +391,7 @@ export function useClaudeEvents() {
             const streamText = sess?.streamingText || "";
 
             if ((blocks && blocks.length > 0) || streamText.trim()) {
-              // Build a synthetic content array from accumulated blocks
-              const content: any[] = [];
+              const content: ClaudeContentBlock[] = [];
               if (streamText.trim()) {
                 content.push({ type: "text", text: streamText });
               }
@@ -362,7 +431,6 @@ export function useClaudeEvents() {
                 const toolId = block.tool_use_id || "";
                 const toolName = getSessionMap(sessionToolMaps, session_id).get(toolId);
 
-                // Update task IDs from TaskCreate results
                 if (toolName === "TaskCreate" && block.content) {
                   const resultStr = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
                   const match = resultStr.match(/#(\d+)/);
@@ -385,14 +453,13 @@ export function useClaudeEvents() {
                   store.addModifiedFiles(session_id, [filePath]);
                 }
 
-                // Skip hidden tool results
                 if (toolName && HIDDEN_TOOLS.has(toolName)) continue;
 
                 const resultText =
                   typeof block.content === "string"
                     ? block.content
                     : Array.isArray(block.content)
-                      ? block.content.map((c: any) => c.type === "text" ? c.text : JSON.stringify(c)).join("\n")
+                      ? block.content.map((c: ClaudeContentBlock) => c.type === "text" ? c.text : JSON.stringify(c)).join("\n")
                       : JSON.stringify(block.content);
 
                 store.updateToolResult(session_id, toolId, resultText, block.is_error || false);
@@ -416,7 +483,7 @@ export function useClaudeEvents() {
           const sess = store.sessions[session_id];
           let ctxMax = sess?.contextMax || getContextWindowForModel(sess?.model || "");
           if (parsed.modelUsage) {
-            for (const modelData of Object.values(parsed.modelUsage) as any[]) {
+            for (const modelData of Object.values(parsed.modelUsage)) {
               if (modelData?.contextWindow && modelData.contextWindow > 0) {
                 ctxMax = modelData.contextWindow;
                 break;
@@ -464,7 +531,6 @@ export function useClaudeEvents() {
           }
 
           if (parsed.is_error && parsed.result) store.setError(session_id, parsed.result);
-          // Clean up any leftover pending state
           pendingBlocks.delete(session_id);
           assistantFinalized.delete(session_id);
           return;
@@ -478,7 +544,6 @@ export function useClaudeEvents() {
 
       const fn2 = await onClaudeDone((payload) => {
         if (cancelled) return;
-        // Flush any RAF-buffered text before cleanup
         if (rafId !== null) {
           cancelAnimationFrame(rafId);
           rafId = null;
@@ -501,7 +566,6 @@ export function useClaudeEvents() {
         }
         store.setStreaming(payload.session_id, false);
         store.clearStreamingText(payload.session_id);
-        // Clean up session's maps to prevent unbounded growth
         sessionToolMaps.delete(payload.session_id);
         sessionFilePathMaps.delete(payload.session_id);
         pendingBlocks.delete(payload.session_id);
@@ -510,22 +574,8 @@ export function useClaudeEvents() {
       if (cancelled) { fn2(); return; }
       unlistenDone = fn2;
 
-      // Listen for Discord messages to show in the GUI
-      const fn3 = await listen<{ session_id: string; username: string; content: string }>(
-        "discord-message",
-        (event) => {
-          if (cancelled) return;
-          const { session_id, username, content } = event.payload;
-          const store = useClaudeStore.getState();
-          store.addUserMessage(session_id, `[${username}]: ${content}`);
-          store.incrementPromptCount(session_id);
-        }
-      );
-      if (cancelled) { fn3(); return; }
-      unlistenDiscord = fn3;
-
       // Listen for permission requests from the hook server
-      const fn4 = await listen<{ request_id: string; session_id: string; tool_name: string; tool_input: any }>(
+      const fn4 = await listen<PermissionRequestPayload>(
         "permission-request",
         (event) => {
           if (cancelled) return;
@@ -539,6 +589,47 @@ export function useClaudeEvents() {
       );
       if (cancelled) { fn4(); return; }
       unlistenPerm = fn4;
+
+      // Listen for Claude hook lifecycle events
+      const HOOK_EVENTS: HookEventType[] = [
+        "PreToolUse", "PostToolUse", "Stop",
+        "SubagentStart", "SubagentStop", "Notification",
+        "PreCompact", "PostCompact", "SessionStart", "SessionEnd",
+      ];
+      for (const hookType of HOOK_EVENTS) {
+        const fn = await listen<HookEventPayload>(
+          `claude-hook-${hookType}`,
+          (event) => {
+            if (cancelled) return;
+            const p = event.payload;
+            const store = useClaudeStore.getState();
+            const hookEvent: HookEvent = {
+              type: hookType,
+              sessionId: p.session_id,
+              timestamp: Date.now(),
+              toolName: p.tool_name,
+              toolInput: p.tool_input,
+              toolResult: p.tool_result,
+              subagentId: p.subagent_id,
+              message: p.message,
+              reason: p.reason,
+            };
+            store.addHookEvent(p.session_id, hookEvent);
+
+            if (hookType === "PostToolUse" && p.tool_name) {
+              store.recordToolUsage(p.session_id, p.tool_name);
+            } else if (hookType === "PostCompact") {
+              store.incrementCompactionCount(p.session_id);
+            } else if (hookType === "SubagentStart" && p.subagent_id) {
+              store.addSubagent(p.session_id, p.subagent_id);
+            } else if (hookType === "SubagentStop" && p.subagent_id) {
+              store.removeSubagent(p.session_id, p.subagent_id);
+            }
+          }
+        );
+        if (cancelled) { fn(); return; }
+        unlistenHooks.push(fn);
+      }
     })();
 
     // Clean up module-scoped maps when sessions are removed from the store
@@ -561,7 +652,8 @@ export function useClaudeEvents() {
       if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
       flushPendingText();
       unsubStore();
-      unlistenEvent?.(); unlistenDone?.(); unlistenDiscord?.(); unlistenPerm?.();
+      unlistenEvent?.(); unlistenDone?.(); unlistenPerm?.();
+      for (const u of unlistenHooks) u();
       pendingText.clear();
       pendingBlocks.clear();
       assistantFinalized.clear();

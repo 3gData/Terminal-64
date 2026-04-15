@@ -194,11 +194,14 @@ fn spawn_and_stream(
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().flatten() {
                 safe_eprintln!("[claude:stderr:{}] {}", &sid_for_stderr[..8.min(sid_for_stderr.len())], line);
-                if let Ok(mut b) = buf.lock() {
-                    if b.len() < 4000 {
-                        if !b.is_empty() { b.push('\n'); }
-                        b.push_str(&line);
+                match buf.lock() {
+                    Ok(mut b) => {
+                        if b.len() < 4000 {
+                            if !b.is_empty() { b.push('\n'); }
+                            b.push_str(&line);
+                        }
                     }
+                    Err(e) => safe_eprintln!("[claude] Stderr buffer lock poisoned: {}", e),
                 }
             }
         });
@@ -327,4 +330,195 @@ impl ClaudeManager {
     pub fn close(&self, session_id: &str) -> Result<(), String> {
         self.cancel(session_id)
     }
+}
+
+// ── OpenWolf integration ───────────────────────────────────
+
+/// Resolve the openwolf CLI binary path, similar to resolve_claude_path.
+/// Cached after first lookup to avoid shelling out `which` on every prompt.
+pub fn resolve_openwolf_path() -> String {
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    return CACHED.get_or_init(resolve_openwolf_path_inner).clone();
+}
+
+fn resolve_openwolf_path_inner() -> String {
+    let lookup = {
+        let (cmd, arg) = if cfg!(windows) { ("where", "openwolf.exe") } else { ("which", "openwolf") };
+        let mut c = std::process::Command::new(cmd);
+        c.arg(arg)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x08000000);
+        }
+        c.output()
+    };
+    if let Ok(p) = lookup {
+        if p.status.success() {
+            let s = String::from_utf8_lossy(&p.stdout)
+                .lines().next().unwrap_or("").trim().to_string();
+            if !s.is_empty() { return s; }
+        }
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(ref h) = home {
+        candidates.push(format!("{}/.local/bin/openwolf", h));
+        candidates.push(format!("{}/.npm-global/bin/openwolf", h));
+        // npx cache location
+        let npx_dir = format!("{}/.npm/_npx", h);
+        if let Ok(entries) = std::fs::read_dir(&npx_dir) {
+            for entry in entries.flatten() {
+                let bin = entry.path().join("node_modules").join(".bin").join("openwolf");
+                if bin.exists() {
+                    candidates.push(bin.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    candidates.push("/usr/local/bin/openwolf".to_string());
+    candidates.push("/opt/homebrew/bin/openwolf".to_string());
+
+    for c in &candidates {
+        if std::path::Path::new(c).exists() { return c.clone(); }
+    }
+    "openwolf".to_string()
+}
+
+/// Check if .wolf/ exists in the project CWD. If auto_init is true
+/// and .wolf/ is missing, run `openwolf init` to create it.
+/// Returns true if .wolf/ exists (or was just created).
+pub fn ensure_openwolf(cwd: &str, auto_init: bool) -> bool {
+    let wolf_dir = std::path::Path::new(cwd).join(".wolf");
+    if wolf_dir.is_dir() {
+        return true;
+    }
+
+    if !auto_init {
+        safe_eprintln!("[openwolf] .wolf/ not found in {} and auto-init disabled", cwd);
+        return false;
+    }
+
+    safe_eprintln!("[openwolf] .wolf/ not found in {} — running init", cwd);
+    let wolf_bin = resolve_openwolf_path();
+    let mut cmd = Command::new(&wolf_bin);
+    cmd.arg("init")
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                safe_eprintln!("[openwolf] Init succeeded in {}", cwd);
+                true
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                safe_eprintln!("[openwolf] Init failed: {}", stderr.trim());
+                false
+            }
+        }
+        Err(e) => {
+            safe_eprintln!("[openwolf] Failed to run openwolf init: {}", e);
+            false
+        }
+    }
+}
+
+/// OpenWolf's 6 hook event types and their command-line hook configurations.
+/// Each returns a (event_name, hook_entry) pair for the settings JSON.
+fn openwolf_hook_entries(cwd: &str, design_qc: bool) -> Vec<(&'static str, serde_json::Value)> {
+    let wolf_bin = resolve_openwolf_path();
+    let mut hooks = vec![
+        ("Notification", serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": format!("{} hook notification --cwd {}", wolf_bin, cwd) }]
+        })),
+        ("Stop", serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": format!("{} hook stop --cwd {}", wolf_bin, cwd) }]
+        })),
+        ("SubagentStart", serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": format!("{} hook subagent-start --cwd {}", wolf_bin, cwd) }]
+        })),
+        ("SubagentStop", serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": format!("{} hook subagent-stop --cwd {}", wolf_bin, cwd) }]
+        })),
+    ];
+
+    if design_qc {
+        hooks.push(("PreToolUse", serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": format!("{} hook pre-tool-use --cwd {}", wolf_bin, cwd) }]
+        })));
+        hooks.push(("PostToolUse", serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": format!("{} hook post-tool-use --cwd {}", wolf_bin, cwd) }]
+        })));
+    }
+
+    hooks
+}
+
+/// Merge OpenWolf hook entries into an existing settings JSON file.
+/// Reads the file, adds OpenWolf hooks alongside T64's existing hooks
+/// (combining arrays, not overwriting), and writes back.
+pub fn merge_openwolf_hooks(settings_path: &str, cwd: &str, design_qc: bool) -> Result<(), String> {
+    let content = std::fs::read_to_string(settings_path)
+        .map_err(|e| format!("read settings: {}", e))?;
+    let mut settings: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse settings: {}", e))?;
+
+    let hooks_obj = settings
+        .as_object_mut()
+        .ok_or("settings not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+
+    let hooks_map = hooks_obj.as_object_mut().ok_or("hooks not an object")?;
+
+    for (event_name, entry) in openwolf_hook_entries(cwd, design_qc) {
+        let arr = hooks_map
+            .entry(event_name)
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(existing) = arr.as_array_mut() {
+            // Skip if openwolf hooks already present for this event
+            let already_has = existing.iter().any(|e| {
+                e.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.contains("openwolf"))
+                            .unwrap_or(false)
+                    }))
+                    .unwrap_or(false)
+            });
+            if !already_has {
+                existing.push(entry);
+            }
+        }
+    }
+
+    std::fs::write(settings_path, serde_json::to_string(&settings).unwrap())
+        .map_err(|e| format!("write settings: {}", e))?;
+
+    safe_eprintln!("[openwolf] Merged hooks into {}", settings_path);
+    Ok(())
 }

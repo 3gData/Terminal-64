@@ -11,6 +11,15 @@ import {
   SlashCommand,
   DirEntry,
   McpServer,
+  DiskSession,
+  HistoryMessage,
+  DelegationMsg,
+  WidgetInfo,
+  SkillInfo,
+  ResolvedSkill,
+  ProxyFetchResponse,
+  SpectrumData,
+  VectorSearchResult,
 } from "./types";
 
 // PTY terminal commands
@@ -41,12 +50,40 @@ export function onTerminalExit(callback: (payload: TerminalExit) => void): Promi
 
 // Claude session commands
 
+/** Read OpenWolf settings from persisted store (avoids circular imports). */
+function getOpenwolfSettings(): { enabled: boolean; autoInit: boolean; designQc: boolean } {
+  try {
+    const raw = localStorage.getItem("terminal64-settings");
+    if (raw) {
+      const s = JSON.parse(raw);
+      return {
+        enabled: !!s.openwolfEnabled,
+        autoInit: s.openwolfAutoInit !== false,
+        designQc: !!s.openwolfDesignQC,
+      };
+    }
+  } catch { /* ignore */ }
+  return { enabled: false, autoInit: true, designQc: false };
+}
+
 export async function createClaudeSession(req: CreateClaudeRequest): Promise<void> {
-  return invoke("create_claude_session", { req });
+  const ow = getOpenwolfSettings();
+  return invoke("create_claude_session", {
+    req,
+    openwolfEnabled: ow.enabled,
+    openwolfAutoInit: ow.autoInit,
+    openwolfDesignQc: ow.designQc,
+  });
 }
 
 export async function sendClaudePrompt(req: SendClaudePromptRequest): Promise<void> {
-  return invoke("send_claude_prompt", { req });
+  const ow = getOpenwolfSettings();
+  return invoke("send_claude_prompt", {
+    req,
+    openwolfEnabled: ow.enabled,
+    openwolfAutoInit: ow.autoInit,
+    openwolfDesignQc: ow.designQc,
+  });
 }
 
 export async function cancelClaude(sessionId: string): Promise<void> {
@@ -77,31 +114,8 @@ export async function searchFiles(cwd: string, query: string): Promise<string[]>
   return invoke("search_files", { cwd, query });
 }
 
-export interface DiskSession {
-  id: string;
-  modified: number;
-  size: number;
-  summary: string;
-}
-
 export async function listDiskSessions(cwd: string): Promise<DiskSession[]> {
   return invoke("list_disk_sessions", { cwd });
-}
-
-export interface HistoryToolCall {
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-  result?: string;
-  is_error?: boolean;
-}
-
-export interface HistoryMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: number;
-  tool_calls?: HistoryToolCall[];
 }
 
 export async function loadSessionHistory(sessionId: string, cwd: string): Promise<HistoryMessage[]> {
@@ -123,27 +137,6 @@ export function mapHistoryMessages(history: HistoryMessage[]) {
       isError: tc.is_error,
     })),
   }));
-}
-
-export async function truncateSessionJsonl(sessionId: string, cwd: string, keepTurns: number): Promise<void> {
-  return invoke("truncate_session_jsonl", { sessionId, cwd, keepTurns });
-}
-
-export interface TruncateResult {
-  path: string;
-  keep_messages: number;
-  actual_visible_kept: number;
-  original_lines: number;
-  new_lines: number;
-  original_bytes: number;
-  new_bytes: number;
-  verify_lines: number;
-  last_visible_role: string;
-  last_visible_preview: string;
-}
-
-export async function truncateSessionJsonlByMessages(sessionId: string, cwd: string, keepMessages: number): Promise<TruncateResult> {
-  return invoke("truncate_session_jsonl_by_messages", { sessionId, cwd, keepMessages });
 }
 
 export async function findRewindUuid(sessionId: string, cwd: string, keepMessages: number): Promise<string> {
@@ -213,14 +206,6 @@ export async function getDelegationSecret(): Promise<string> {
   return invoke("get_delegation_secret");
 }
 
-export interface DelegationMsg {
-  group_id: string;
-  agent: string;
-  message: string;
-  timestamp: number;
-  msg_type: string;
-}
-
 export async function getDelegationMessages(groupId: string): Promise<DelegationMsg[]> {
   return invoke("get_delegation_messages", { groupId });
 }
@@ -248,8 +233,7 @@ export async function createMcpConfigFile(
   });
 }
 
-/** Get the fully-resolved node binary path from the backend. */
-export async function getNodePath(): Promise<string> {
+async function getNodePath(): Promise<string> {
   return invoke("get_node_path");
 }
 
@@ -333,29 +317,22 @@ export async function clearT64DelegationEnv(cwd: string): Promise<void> {
   const entry = config.mcpServers?.["terminal-64"];
   if (!entry?.env) return;
 
-  // Reset to base config (no env)
   config.mcpServers["terminal-64"] = { command: nodePath, args: [scriptPath] };
   await writeFile(mcpPath, JSON.stringify(config, null, 2));
 }
 
 // Widget commands
 
-export interface WidgetInfo {
-  widget_id: string;
-  has_index: boolean;
-  modified: number;
-}
-
 export async function createWidgetFolder(widgetId: string): Promise<string> {
   return invoke("create_widget_folder", { widgetId });
 }
 
-export async function readWidgetHtml(widgetId: string): Promise<string> {
-  return invoke("read_widget_html", { widgetId });
-}
-
 export async function listWidgetFolders(): Promise<WidgetInfo[]> {
   return invoke("list_widget_folders");
+}
+
+export async function installBundledWidget(widgetName: string): Promise<void> {
+  return invoke("install_bundled_widget", { widgetName });
 }
 
 export async function widgetFileModified(widgetId: string): Promise<number> {
@@ -376,11 +353,11 @@ export async function getWidgetServerPort(): Promise<number> {
 
 // Widget persistent state
 
-export async function widgetGetState(widgetId: string, key?: string): Promise<any> {
+export async function widgetGetState(widgetId: string, key?: string): Promise<unknown> {
   return invoke("widget_get_state", { widgetId, key: key ?? null });
 }
 
-export async function widgetSetState(widgetId: string, key: string, value: any): Promise<void> {
+export async function widgetSetState(widgetId: string, key: string, value: unknown): Promise<void> {
   return invoke("widget_set_state", { widgetId, key, value });
 }
 
@@ -389,15 +366,6 @@ export async function widgetClearState(widgetId: string): Promise<void> {
 }
 
 // Skill library commands
-
-export interface SkillInfo {
-  name: string;
-  description: string;
-  tags: string[];
-  has_skill_md: boolean;
-  modified: number;
-  created?: number;
-}
 
 export async function createSkillFolder(skillId: string): Promise<string> {
   return invoke("create_skill_folder", { skillId });
@@ -411,27 +379,8 @@ export async function deleteSkill(skillId: string): Promise<void> {
   return invoke("delete_skill", { skillId });
 }
 
-export async function updateSkillMeta(
-  skillId: string,
-  description?: string,
-  tags?: string[],
-): Promise<void> {
-  return invoke("update_skill_meta", {
-    skillId,
-    description: description ?? null,
-    tags: tags ?? null,
-  });
-}
-
 export async function readSkillContent(skillId: string): Promise<string> {
   return invoke("read_skill_content", { skillId });
-}
-
-export interface ResolvedSkill {
-  name: string;
-  body: string;
-  allowed_tools: string[];
-  skill_dir: string;
 }
 
 export async function resolveSkillPrompt(
@@ -456,14 +405,6 @@ export async function ensureSkillsPlugin(): Promise<void> {
 
 // Proxy fetch (CORS bypass for widgets)
 
-export interface ProxyFetchResponse {
-  status: number;
-  ok: boolean;
-  headers: Record<string, string>;
-  body: string;
-  is_base64: boolean;
-}
-
 export async function proxyFetch(
   url: string,
   method?: string,
@@ -478,12 +419,6 @@ export async function proxyFetch(
     body: body ?? null,
     timeoutMs: timeoutMs ?? null,
   });
-}
-
-// System notification
-
-export async function sendNotification(title: string, body?: string): Promise<void> {
-  return invoke("send_notification", { title, body: body ?? null });
 }
 
 // Checkpoint commands (undo system)
@@ -570,24 +505,12 @@ export function onThemeGenDone(callback: (payload: { id: string; text: string })
 
 // Party Mode commands
 
-export interface SpectrumData {
-  bands: number[];
-  peak: number;
-  bass: number;
-  mid: number;
-  treble: number;
-}
-
 export async function startPartyMode(): Promise<void> {
   return invoke("start_party_mode");
 }
 
 export async function stopPartyMode(): Promise<void> {
   return invoke("stop_party_mode");
-}
-
-export async function partyModeStatus(): Promise<boolean> {
-  return invoke("party_mode_status");
 }
 
 export function onPartyModeSpectrum(
@@ -598,6 +521,20 @@ export function onPartyModeSpectrum(
   );
 }
 
+// OpenWolf daemon commands
+
+export async function startOpenwolfDaemon(): Promise<void> {
+  return invoke("start_openwolf_daemon");
+}
+
+export async function stopOpenwolfDaemon(): Promise<void> {
+  return invoke("stop_openwolf_daemon");
+}
+
+export async function openwolfDaemonStatus(): Promise<boolean> {
+  return invoke("openwolf_daemon_status");
+}
+
 // Image paste commands
 
 export async function savePastedImage(base64Data: string, extension: string): Promise<string> {
@@ -606,4 +543,67 @@ export async function savePastedImage(base64Data: string, extension: string): Pr
 
 export async function readFileBase64(path: string): Promise<string> {
   return invoke("read_file_base64", { path });
+}
+
+// Vector search commands (sqlite-vec)
+
+export async function vectorSearch(table: string, query: string, topK: number): Promise<VectorSearchResult[]> {
+  return invoke("vector_search", { table, query, topK });
+}
+
+export async function vectorIndexFile(path: string, content: string): Promise<void> {
+  return invoke("vector_index_file", { path, content });
+}
+
+export async function vectorIndexSession(sessionId: string, summary: string, cwd: string): Promise<void> {
+  return invoke("vector_index_session", { sessionId, summary, cwd });
+}
+
+export async function vectorReindexAll(): Promise<void> {
+  return invoke("vector_reindex_all");
+}
+
+// ── Shared helpers ──────────────────────────────────
+
+/**
+ * Spawn a Claude session panel on the canvas with an initial prompt.
+ * Consolidates the duplicated pattern from WidgetDialog + SkillDialog.
+ *
+ * @param cwd       Working directory for the Claude CLI
+ * @param sessionName  Display name for the session
+ * @param prompt    Initial prompt to send
+ * @param getStores  Lazy getter to avoid circular imports — returns {canvasStore, claudeStore, settingsStore}
+ */
+export function spawnClaudeWithPrompt(
+  cwd: string,
+  sessionName: string,
+  prompt: string,
+  getStores: () => {
+    canvasStore: { getState: () => any };
+    claudeStore: { getState: () => any };
+    settingsStore: { getState: () => any };
+  },
+): void {
+  const { canvasStore, claudeStore, settingsStore } = getStores();
+  canvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
+  const terminals = canvasStore.getState().terminals;
+  const claudePanel = terminals[terminals.length - 1];
+  if (!claudePanel || claudePanel.panelType !== "claude") return;
+
+  const sid = claudePanel.terminalId;
+  claudeStore.getState().createSession(sid, sessionName);
+  claudeStore.getState().addUserMessage(sid, prompt);
+  const permMode = settingsStore.getState().claudePermMode || "default";
+  // Small delay so ClaudeChat mounts and event listeners are ready
+  setTimeout(() => {
+    createClaudeSession({
+      session_id: sid,
+      cwd,
+      prompt,
+      permission_mode: permMode,
+    }).catch((err: unknown) => {
+      claudeStore.getState().setError(sid, String(err));
+    });
+    claudeStore.getState().incrementPromptCount(sid);
+  }, 300);
 }

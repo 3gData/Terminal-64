@@ -13,6 +13,7 @@ import { useKeybindings } from "./hooks/useKeybindings";
 import { useClaudeEvents } from "./hooks/useClaudeEvents";
 import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
 import { usePartyMode } from "./hooks/usePartyMode";
+import { useVectorAutoIndex } from "./hooks/useVectorAutoIndex";
 import { PartyEqualizer, PartyEdgeGlow } from "./components/party/PartyOverlay";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
@@ -44,6 +45,7 @@ function App() {
   useClaudeEvents();
   useDelegationOrchestrator();
   usePartyMode();
+  useVectorAutoIndex();
 
   const [widgetDropOver, setWidgetDropOver] = useState(false);
   const widgetDialogRef = useRef(widgetDialogOpen);
@@ -53,17 +55,17 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     getCurrentWebviewWindow()
-      .onDragDropEvent(async (event: any) => {
+      .onDragDropEvent(async (event) => {
         if (widgetDialogRef.current) return;
-        const { type, paths } = event.payload;
-        if (type === "over") {
-          const hasZip = (paths as string[])?.some((p: string) => p.toLowerCase().endsWith(".zip"));
+        const payload = event.payload;
+        if (payload.type === "enter") {
+          const hasZip = payload.paths.some((p) => p.toLowerCase().endsWith(".zip"));
           if (hasZip) setWidgetDropOver(true);
-        } else if (type === "leave" || type === "cancel") {
+        } else if (payload.type === "leave") {
           setWidgetDropOver(false);
-        } else if (type === "drop") {
+        } else if (payload.type === "drop") {
           setWidgetDropOver(false);
-          const zipFiles = ((paths as string[]) || []).filter((p: string) => p.toLowerCase().endsWith(".zip"));
+          const zipFiles = payload.paths.filter((p) => p.toLowerCase().endsWith(".zip"));
           for (const zipPath of zipFiles) {
             try {
               const widgetId = await installWidgetZip(zipPath);
@@ -86,7 +88,6 @@ function App() {
     setAllBrowsersVisible(!anyOverlayOpen).catch(() => {});
   }, [anyOverlayOpen]);
 
-  // Check for updates on startup + ensure skills plugin bridge
   useEffect(() => {
     checkForUpdate().then(setUpdate);
     ensureSkillsPlugin().catch(() => {});
@@ -111,7 +112,9 @@ function App() {
               try {
                 const raw = localStorage.getItem(STORAGE_KEY);
                 if (raw) { const d = JSON.parse(raw); cwd = d[t.terminalId]?.cwd || cwd; }
-              } catch {}
+              } catch (e) {
+                console.warn("[discord] Failed to read cwd from localStorage:", e);
+              }
               try {
                 await linkSessionToDiscord(t.terminalId, title, cwd);
               } catch (err) {
@@ -408,7 +411,9 @@ function App() {
               savedCwd = d[sessionId]?.cwd || "";
               hasMessages = (d[sessionId]?.messages?.length || 0) > 0;
             }
-          } catch {}
+          } catch (e) {
+            console.warn("[session] Failed to read session data from localStorage:", e);
+          }
           const effectiveCwd = savedCwd || dialogCwd || ".";
           useCanvasStore.getState().addClaudeTerminal(effectiveCwd, false, name || undefined, sessionId);
           if (name) linkSessionToDiscord(sessionId, name, effectiveCwd).catch(() => {});

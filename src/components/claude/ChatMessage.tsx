@@ -6,7 +6,6 @@ const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
 const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
 const SLASH_CMD_RE = /^\/([a-zA-Z0-9_-]+)\s*([\s\S]*)$/;
 
-// Image paste support
 const IMAGE_EXTS = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i;
 const ATTACHED_FILE_RE = /\[Attached file: (.+?)\]/g;
 const EXT_TO_MIME: Record<string, string> = {
@@ -52,9 +51,8 @@ function renderUserContent(content: string): React.ReactNode {
   return parts.length > 0 ? <>{parts}</> : content;
 }
 
-// Render inline markdown: bold, italic, bold+italic, inline code, links, strikethrough
 function renderInline(text: string, keyPrefix: string = ""): React.ReactNode[] {
-  // Order matters: bold+italic first, then bold, italic, inline code, links, strikethrough
+  // Order matters: bold+italic before bold/italic to prevent partial matching
   const pattern = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|~~(.+?)~~|`([^`]+)`|\[([^\]]+)\]\(((?:[^()]+|\([^()]*\))+)\))/g;
   const result: React.ReactNode[] = [];
   let lastIndex = 0;
@@ -184,7 +182,6 @@ function CopyBtn({ text }: { text: string }) {
   );
 }
 
-// Render a full markdown block: headings, code blocks, lists, blockquotes, hrs, paragraphs
 export function renderContent(text: string) {
   if (!text) return null;
 
@@ -224,7 +221,7 @@ export function renderContent(text: string) {
       const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
       if (headingMatch) {
         const level = headingMatch[1].length;
-        const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+        const Tag = `h${level}` as keyof React.JSX.IntrinsicElements;
         elements.push(<Tag key={key++} className={`cc-h cc-h${level}`}>{renderInline(headingMatch[2])}</Tag>);
         i++; continue;
       }
@@ -298,7 +295,6 @@ export function renderContent(text: string) {
           const hasSep = /^\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$/.test(tableLines[1]);
           const bodyStart = hasSep ? 2 : 1;
 
-          // Parse alignment from separator
           const aligns: ("left" | "center" | "right" | undefined)[] = [];
           if (hasSep) {
             parseRow(tableLines[1]).forEach((cell) => {
@@ -356,7 +352,6 @@ export function renderContent(text: string) {
   return elements;
 }
 
-// Tool-specific header content
 export function toolHeader(tc: ToolCall): { icon: string; title: string; detail: string } {
   const i = tc.input;
   switch (tc.name) {
@@ -401,7 +396,6 @@ function summarizeFallback(input: Record<string, unknown>): string {
   return typeof first === "string" ? first.slice(0, 50) : "";
 }
 
-// Render the expanded body based on tool type
 function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: string, filePath: string, oldStr: string, newStr: string) => void }) {
   const i = tc.input;
   const result = tc.result;
@@ -654,4 +648,3 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
 
 const ChatMessage = React.memo(ChatMessageInner);
 export default ChatMessage;
-export type { ChatMessageType };

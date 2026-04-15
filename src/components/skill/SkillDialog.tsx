@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { listSkills, createSkillFolder, deleteSkill, createClaudeSession, shellExec, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, SkillInfo } from "../../lib/tauriApi";
+import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnClaudeWithPrompt } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import type { PermissionMode } from "../../lib/types";
+import { useSemanticSearch } from "../../hooks/useSemanticSearch";
+import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
+import type { SkillInfo } from "../../lib/types";
 import "./Skill.css";
 
 const SKILL_CREATOR_PROMPT = `You are the Skill Creator for Terminal 64. Your job is to help the user create a Claude Code skill — a reusable set of instructions that Claude loads when triggered by matching user prompts.
@@ -98,6 +100,8 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
   const [creating, setCreating] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [searchMode, setSearchMode] = useState<"keyword" | "semantic">("keyword");
+  const semantic = useSemanticSearch("skills", 10);
   const searchRef = useRef<HTMLInputElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const recentDirs = useSettingsStore((s) => s.recentDirs);
@@ -114,6 +118,8 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
     setShowCreate(false);
     setDetailSkill(null);
     setDetailContent(null);
+    semantic.clear();
+    setSearchMode("keyword");
     refreshList();
     setTimeout(() => searchRef.current?.focus(), 120);
   }, [isOpen]);
@@ -171,26 +177,11 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
       const projectDir = dir.trim();
       addRecentDir(projectDir);
       const prompt = buildSkillPrompt(skillFolderPath, skillCreatorPath);
-      useCanvasStore.getState().addClaudeTerminal(projectDir, false, `Skill: ${skillName}`);
-      const terminals = useCanvasStore.getState().terminals;
-      const claudePanel = terminals[terminals.length - 1];
-      if (claudePanel?.panelType === "claude") {
-        const sid = claudePanel.terminalId;
-        useClaudeStore.getState().createSession(sid, `Skill: ${skillName}`);
-        useClaudeStore.getState().addUserMessage(sid, prompt);
-        const permMode = (useSettingsStore.getState().claudePermMode || "default") as PermissionMode;
-        setTimeout(() => {
-          createClaudeSession({
-            session_id: sid,
-            cwd: projectDir,
-            prompt,
-            permission_mode: permMode,
-          }).catch((err) => {
-            useClaudeStore.getState().setError(sid, String(err));
-          });
-          useClaudeStore.getState().incrementPromptCount(sid);
-        }, 300);
-      }
+      spawnClaudeWithPrompt(projectDir, `Skill: ${skillName}`, prompt, () => ({
+        canvasStore: useCanvasStore,
+        claudeStore: useClaudeStore,
+        settingsStore: useSettingsStore,
+      }));
       onClose();
     } catch (err) {
       console.warn("[skill] Failed to create:", err);
@@ -206,7 +197,8 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
     try {
       const content = await readSkillContent(skill.name);
       setDetailContent(content);
-    } catch {
+    } catch (e) {
+      console.warn("[skill] Failed to read skill content:", e);
       setDetailContent(null);
     } finally {
       setDetailLoading(false);
@@ -238,16 +230,6 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
     } catch (err) {
       console.warn("[skill] Failed to delete:", err);
     }
-  };
-
-  const formatTime = (ms: number) => {
-    if (!ms) return "";
-    const now = Date.now();
-    const diff = now - ms;
-    if (diff < 60000) return "just now";
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-    return new Date(ms).toLocaleDateString();
   };
 
   return (
@@ -342,20 +324,53 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
           /* ── List View ── */
           <>
             <div className="skl-body">
-              {/* Toolbar: search + new */}
+              {/* Toolbar: search + mode toggle + new */}
               <div className="skl-toolbar">
                 <div className="skl-search">
                   <svg className="skl-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <circle cx="11" cy="11" r="8"/>
                     <path d="M21 21l-4.35-4.35"/>
                   </svg>
-                  <input
-                    ref={searchRef}
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search skills..."
-                    onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
-                  />
+                  {searchMode === "keyword" ? (
+                    <input
+                      ref={searchRef}
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Search skills..."
+                      onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
+                    />
+                  ) : (
+                    <input
+                      value={semantic.query}
+                      onChange={(e) => semantic.search(e.target.value)}
+                      placeholder="Describe what you need..."
+                      onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
+                      autoFocus
+                    />
+                  )}
+                  {semantic.searching && <span className="vs-search-spinner" />}
+                </div>
+                <div className="vs-mode-toggle vs-mode-toggle--compact">
+                  <button
+                    className={`vs-mode-btn ${searchMode === "keyword" ? "vs-mode-btn--active" : ""}`}
+                    onClick={() => { setSearchMode("keyword"); semantic.clear(); }}
+                    title="Keyword search"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+                    </svg>
+                  </button>
+                  <button
+                    className={`vs-mode-btn ${searchMode === "semantic" ? "vs-mode-btn--active" : ""}`}
+                    onClick={() => { setSearchMode("semantic"); setSearch(""); }}
+                    title="Semantic search"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/>
+                      <path d="M8 6a4 4 0 0 1 8 0"/>
+                      <path d="M5.2 11.2a8 8 0 0 1 13.6 0"/>
+                    </svg>
+                  </button>
                 </div>
                 <button
                   className={`skl-new-btn ${showCreate ? "skl-new-btn--cancel" : ""}`}
@@ -364,6 +379,44 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                   {showCreate ? "Cancel" : "+ New"}
                 </button>
               </div>
+
+              {/* Semantic search results */}
+              {searchMode === "semantic" && semantic.results.length > 0 && (
+                <div className="vs-results vs-results--skills">
+                  <label className="skl-section-label">
+                    Semantic Matches
+                    <span className="claude-dialog-count" style={{ marginLeft: 6 }}>{semantic.results.length}</span>
+                  </label>
+                  <div className="vs-results-list">
+                    {semantic.results.map((r) => {
+                      const matchedSkill = skills.find((s) => s.name === r.id);
+                      return (
+                        <button
+                          key={r.id}
+                          className="vs-result-item vs-result-item--skill"
+                          onClick={() => matchedSkill ? handleOpen(matchedSkill) : undefined}
+                        >
+                          <div className="vs-result-top">
+                            <span className="vs-result-text">{r.title || r.id}</span>
+                            <span className="vs-result-score">{Math.max(0, (1 - r.distance) * 100).toFixed(0)}%</span>
+                          </div>
+                          {matchedSkill?.tags && matchedSkill.tags.length > 0 && (
+                            <div className="vs-result-tags">
+                              {matchedSkill.tags.map((t) => (
+                                <span key={t} className="skl-card-tag" style={{ "--skl-tag-color": tagColor(t) } as React.CSSProperties}>{t}</span>
+                              ))}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {searchMode === "semantic" && !semantic.searching && semantic.query.trim() && semantic.results.length === 0 && (
+                <div className="vs-empty">No semantic matches found</div>
+              )}
 
               {/* Create panel (collapsible) */}
               {showCreate && (
@@ -419,8 +472,8 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                 </div>
               )}
 
-              {/* Tag filter */}
-              {allTags.length > 0 && (
+              {/* Tag filter + grid (keyword mode only) */}
+              {searchMode === "keyword" && allTags.length > 0 && (
                 <div className="skl-tags">
                   {allTags.filter((tag) => !search.trim() || tag.toLowerCase().includes(search.trim().toLowerCase())).map((tag) => {
                     const color = tagColor(tag);
@@ -439,8 +492,8 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                 </div>
               )}
 
-              {/* Skills grid */}
-              {filteredSkills.length > 0 && (
+              {/* Skills grid (keyword mode) */}
+              {searchMode === "keyword" && filteredSkills.length > 0 && (
                 <>
                   <div className="skl-section-label">
                     {activeTag ? `Tagged "${activeTag}"` : search.trim() ? "Results" : "All skills"}
@@ -476,7 +529,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                                   </span>
                                 ))}
                               </div>
-                              <span className="skl-card-time">{formatTime(s.modified)}</span>
+                              <span className="skl-card-time">{formatRelativeTime(s.modified)}</span>
                             </div>
                           </div>
                           <button
@@ -495,8 +548,8 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                 </>
               )}
 
-              {/* Empty states */}
-              {filteredSkills.length === 0 && skills.length === 0 && (
+              {/* Empty states (keyword mode) */}
+              {searchMode === "keyword" && filteredSkills.length === 0 && skills.length === 0 && (
                 <div className="skl-empty">
                   <div className="skl-empty-glyph">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -513,7 +566,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                 </div>
               )}
 
-              {filteredSkills.length === 0 && skills.length > 0 && (
+              {searchMode === "keyword" && filteredSkills.length === 0 && skills.length > 0 && (
                 <div className="skl-empty">
                   <div className="skl-empty-text">
                     <div className="skl-empty-title">No matches</div>
@@ -534,12 +587,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
             <div className="skl-footer">
               <button
                 className="skl-folder-btn"
-                onClick={() => {
-                  const cmd = navigator.platform.includes("Win")
-                    ? 'explorer.exe "%USERPROFILE%\\.terminal64\\skills"'
-                    : 'open "$HOME/.terminal64/skills"';
-                  shellExec(cmd).catch(() => {});
-                }}
+                onClick={() => openSystemFolder("$HOME/.terminal64/skills")}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>

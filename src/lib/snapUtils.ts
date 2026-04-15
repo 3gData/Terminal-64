@@ -152,7 +152,6 @@ export function computeResizeSnap(
         x += width - snapW;
       }
       width = snapW;
-      // Show horizontal guide across the bottom of this terminal to indicate matched width
       guides.push({ orientation: "horizontal", position: y + height, start: x, end: x + width });
     }
   }
@@ -164,7 +163,6 @@ export function computeResizeSnap(
         y += height - snapH;
       }
       height = snapH;
-      // Show vertical guide along the right of this terminal to indicate matched height
       guides.push({ orientation: "vertical", position: x + width, start: y, end: y + height });
     }
   }

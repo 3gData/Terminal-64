@@ -69,7 +69,6 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
 
     safe_eprintln!("[audio] Using ScreenCaptureKit for system audio capture");
 
-    // Get shareable content (triggers Screen Recording permission on first use)
     let content = SCShareableContent::get()
         .map_err(|e| format!("Failed to get shareable content (Screen Recording permission needed): {:?}", e))?;
 
@@ -84,7 +83,6 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
         .with_sample_rate(48000)
         .with_channel_count(2);
 
-    // Create content filter for the display
     let filter = SCContentFilter::create()
         .with_display(&display)
         .with_excluding_windows(&[])
@@ -99,7 +97,6 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
     let logged = Arc::new(AtomicBool::new(false));
     let logged_clone = logged.clone();
 
-    // Create stream and add closure-based audio handler
     let mut stream = SCStream::new(&filter, &config);
     stream.add_output_handler(
         move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {

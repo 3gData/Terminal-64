@@ -14,6 +14,12 @@ import { hexToRgba } from "../../lib/themeEngine";
 import "@xterm/xterm/css/xterm.css";
 import "./XTerminal.css";
 
+// Global WebGL context tracker — browsers limit to ~8-16 concurrent contexts.
+// When the limit is approached, new terminals fall back to canvas rendering
+// instead of silently failing.
+const MAX_WEBGL_CONTEXTS = 10;
+let activeWebglCount = 0;
+
 interface XTerminalProps {
   terminalId: string;
   isActive?: boolean;
@@ -61,6 +67,7 @@ export default function XTerminal({
     if (bgAlpha < 1 && webglRef.current) {
       webglRef.current.dispose();
       webglRef.current = null;
+      activeWebglCount--;
     }
 
     if (bgAlpha < 1) {
@@ -82,14 +89,17 @@ export default function XTerminal({
 
     term.refresh(0, term.rows - 1);
 
-    // Re-enable WebGL when fully opaque
-    if (bgAlpha >= 1 && !webglRef.current) {
+    // Re-enable WebGL when fully opaque (if under context limit)
+    if (bgAlpha >= 1 && !webglRef.current && activeWebglCount < MAX_WEBGL_CONTEXTS) {
       try {
         const addon = new WebglAddon();
-        addon.onContextLoss(() => addon.dispose());
+        addon.onContextLoss(() => { addon.dispose(); webglRef.current = null; activeWebglCount--; });
         term.loadAddon(addon);
         webglRef.current = addon;
-      } catch {}
+        activeWebglCount++;
+      } catch (e) {
+        console.warn("[xterm] WebGL addon failed:", e);
+      }
     }
   }, [theme, bgAlpha]);
 
@@ -132,7 +142,6 @@ export default function XTerminal({
         ? { ...baseTheme, background: "#00000000" }
         : baseTheme;
 
-    // Set container bg for transparency
     if (currentAlpha < 1 && containerRef.current) {
       containerRef.current.style.backgroundColor = hexToRgba(
         baseTheme.background,
@@ -160,14 +169,17 @@ export default function XTerminal({
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
 
-    // Only use WebGL when fully opaque (it doesn't support transparency)
-    if (currentAlpha >= 1) {
+    // Only use WebGL when fully opaque and under context limit
+    if (currentAlpha >= 1 && activeWebglCount < MAX_WEBGL_CONTEXTS) {
       try {
         const addon = new WebglAddon();
-        addon.onContextLoss(() => addon.dispose());
+        addon.onContextLoss(() => { addon.dispose(); webglRef.current = null; activeWebglCount--; });
         term.loadAddon(addon);
         webglRef.current = addon;
-      } catch {}
+        activeWebglCount++;
+      } catch (e) {
+        console.warn("[xterm] WebGL addon failed:", e);
+      }
     }
 
     fitAddon.fit();
@@ -175,7 +187,6 @@ export default function XTerminal({
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Send keystrokes to PTY
     term.onData((data) => {
       writeTerminal(terminalId, data).catch(() => {});
     });
@@ -214,9 +225,6 @@ export default function XTerminal({
       if (mod(event) && event.key === "v") {
         navigator.clipboard.readText().then((text) => {
           if (text) writeTerminal(terminalId, text).catch(() => {});
-        }).catch(() => {
-          // Fallback: let the browser handle paste natively
-          document.execCommand("paste");
         });
         return false;
       }
@@ -252,7 +260,6 @@ export default function XTerminal({
       return true;
     });
 
-    // Register listeners then create PTY
     let unlistenOutput: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
     let disposed = false;
@@ -262,8 +269,6 @@ export default function XTerminal({
         if (payload.id === terminalId) {
           term.write(payload.data);
           onActivity?.(terminalId);
-          // Parse CWD from PowerShell prompt "PS C:\path>" or OSC 7
-          // Parse CWD from PowerShell prompt or OSC 7
           const psMatch = payload.data.match(/PS ([A-Z]:\\[^>]*?)>/);
           if (psMatch) onCwdChange?.(terminalId, psMatch[1]);
           const oscMatch = payload.data.match(/\x1b\]7;file:\/\/[^/]*\/(.*?)(?:\x07|\x1b\\)/);
@@ -297,7 +302,6 @@ export default function XTerminal({
       }
     })();
 
-    // Resize only when container actually changes
     let resizeTimeout: ReturnType<typeof setTimeout>;
     const observer = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect;
@@ -330,13 +334,17 @@ export default function XTerminal({
       disposed = true;
       clearTimeout(focusTimer);
       initializedRef.current = false;
+      // Disconnect observer BEFORE clearing refs to prevent race condition
       observer.disconnect();
       clearTimeout(resizeTimeout);
       unlistenOutput?.();
       unlistenExit?.();
       xtermTA?.removeEventListener("paste", killPaste, true);
-      webglRef.current?.dispose();
-      webglRef.current = null;
+      if (webglRef.current) {
+        webglRef.current.dispose();
+        webglRef.current = null;
+        activeWebglCount--;
+      }
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;

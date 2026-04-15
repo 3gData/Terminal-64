@@ -27,13 +27,10 @@ mod discord_bot;
 mod permission_server;
 mod pty_manager;
 mod types;
+mod vector_store;
 mod widget_server;
 
-// ---- Security: path sandboxing ----
-
-/// Returns the list of allowed root directories for file operations.
-/// Currently: the current working directory of the app and ~/.terminal64/.
-// ---- Security: shell command validation ----
+// ---- Security ----
 
 /// Blocklist of dangerous shell patterns. Returns an error message if the command matches.
 fn validate_shell_command(command: &str) -> Result<(), String> {
@@ -85,6 +82,7 @@ use claude_manager::ClaudeManager;
 use discord_bot::DiscordBot;
 use permission_server::PermissionServer;
 use pty_manager::PtyManager;
+use vector_store::VectorStore;
 use widget_server::WidgetServer;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -110,6 +108,8 @@ struct AppState {
     audio_manager: Arc<AudioManager>,
     browser_manager: BrowserManager,
     widget_server: WidgetServer,
+    vector_store: Arc<Mutex<Option<VectorStore>>>,
+    openwolf_daemon: Mutex<Option<std::process::Child>>,
 }
 
 #[tauri::command]
@@ -148,15 +148,35 @@ fn close_terminal(
     state.pty_manager.close(&id)
 }
 
+/// If OpenWolf is enabled, ensure .wolf/ exists and merge its hooks into the settings file.
+fn maybe_apply_openwolf(settings_path: &Option<String>, cwd: &str, enabled: bool, auto_init: bool, design_qc: bool) {
+    if !enabled { return; }
+    claude_manager::ensure_openwolf(cwd, auto_init);
+    if let Some(ref sp) = settings_path {
+        if let Err(e) = claude_manager::merge_openwolf_hooks(sp, cwd, design_qc) {
+            safe_eprintln!("[openwolf] Failed to merge hooks: {}", e);
+        }
+    }
+}
+
 #[tauri::command]
 fn create_claude_session(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
     req: CreateClaudeRequest,
+    openwolf_enabled: Option<bool>,
+    openwolf_auto_init: Option<bool>,
+    openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
     let settings_path = if req.permission_mode != "bypass_all" {
         state.permission_server.register_session(&req.session_id).ok().map(|(_, p)| p.to_string_lossy().to_string())
     } else { None };
+    maybe_apply_openwolf(
+        &settings_path, &req.cwd,
+        openwolf_enabled.unwrap_or(false),
+        openwolf_auto_init.unwrap_or(true),
+        openwolf_design_qc.unwrap_or(false),
+    );
     let channel = req.channel_server.clone();
     state.claude_manager.create_session(&app_handle, req, settings_path, channel)
 }
@@ -166,10 +186,19 @@ fn send_claude_prompt(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
     req: SendClaudePromptRequest,
+    openwolf_enabled: Option<bool>,
+    openwolf_auto_init: Option<bool>,
+    openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
     let settings_path = if req.permission_mode != "bypass_all" {
         state.permission_server.register_session(&req.session_id).ok().map(|(_, p)| p.to_string_lossy().to_string())
     } else { None };
+    maybe_apply_openwolf(
+        &settings_path, &req.cwd,
+        openwolf_enabled.unwrap_or(false),
+        openwolf_auto_init.unwrap_or(true),
+        openwolf_design_qc.unwrap_or(false),
+    );
     let channel = req.channel_server.clone();
     state.claude_manager.send_prompt(&app_handle, req, settings_path, channel)
 }
@@ -424,35 +453,6 @@ async fn search_files(cwd: String, query: String) -> Result<Vec<String>, String>
         results.truncate(12);
         results
     }).await.map_err(|e| e.to_string())
-}
-
-#[derive(serde::Serialize)]
-struct DiskSession {
-    id: String,
-    modified: u64,
-    size: u64,
-    summary: String,
-}
-
-#[derive(serde::Serialize)]
-struct HistoryToolCall {
-    id: String,
-    name: String,
-    input: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
-    #[serde(default)]
-    is_error: bool,
-}
-
-#[derive(serde::Serialize)]
-struct HistoryMessage {
-    id: String,
-    role: String,  // "user" or "assistant"
-    content: String,
-    timestamp: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<HistoryToolCall>>,
 }
 
 fn extract_session_summary(path: &std::path::Path) -> String {
@@ -778,53 +778,6 @@ fn is_real_user_message(val: &serde_json::Value) -> bool {
         });
     }
     false
-}
-
-/// Collect JSONL lines keeping exactly `keep_messages` visible messages
-/// (counting both user + assistant the same way load_session_history does).
-fn collect_jsonl_lines_by_messages<'a>(content: &'a str, keep_messages: usize) -> Vec<&'a str> {
-    let mut kept: Vec<&str> = Vec::new();
-    let mut visible_count: usize = 0;
-    let mut done = false;
-
-    for line in content.lines() {
-        if line.trim().is_empty() { continue; }
-        if done {
-            let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => break };
-            if val["type"].as_str().unwrap_or("") == "user" && !is_real_user_message(&val) {
-                kept.push(line);
-                continue;
-            }
-            break;
-        }
-        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => { kept.push(line); continue; } };
-        let rec_type = val["type"].as_str().unwrap_or("");
-        if rec_type == "user" && is_real_user_message(&val) {
-            visible_count += 1;
-            if visible_count > keep_messages { break; }
-        } else if rec_type == "assistant" {
-            if let Some(content_arr) = val["message"]["content"].as_array() {
-                let has_text = content_arr.iter().any(|b|
-                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
-                );
-                let has_tools = content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use"));
-                if has_text || has_tools {
-                    visible_count += 1;
-                    if visible_count > keep_messages { break; }
-                }
-            }
-        }
-        kept.push(line);
-        if visible_count == keep_messages && rec_type == "assistant" {
-            if let Some(content_arr) = val["message"]["content"].as_array() {
-                if content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use")) {
-                    done = true;
-                    continue;
-                }
-            }
-        }
-    }
-    kept
 }
 
 #[tauri::command]
@@ -1354,7 +1307,7 @@ fn start_discord_bot(
 ) -> Result<(), String> {
     let gid: u64 = guild_id.parse().map_err(|_| "Invalid guild ID")?;
     let mut bot = state.discord_bot.lock().map_err(|e| e.to_string())?;
-    bot.start(token, gid, app_handle, state.claude_manager.clone())
+    bot.start(token, gid, app_handle)
 }
 
 #[tauri::command]
@@ -1367,6 +1320,69 @@ fn stop_discord_bot(state: tauri::State<'_, AppState>) -> Result<(), String> {
 fn discord_bot_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let bot = state.discord_bot.lock().map_err(|e| e.to_string())?;
     Ok(bot.is_running())
+}
+
+// ── OpenWolf daemon management ─────────────────────────────
+
+#[tauri::command]
+fn start_openwolf_daemon(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut daemon = state.openwolf_daemon.lock().map_err(|e| e.to_string())?;
+    // Kill any existing daemon first
+    if let Some(mut child) = daemon.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    let wolf_bin = claude_manager::resolve_openwolf_path();
+    let mut cmd = std::process::Command::new(&wolf_bin);
+    cmd.arg("daemon")
+        .arg("start")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let child = cmd.spawn().map_err(|e| format!("Failed to start OpenWolf daemon: {}", e))?;
+    safe_eprintln!("[openwolf] Daemon started (pid {})", child.id());
+    *daemon = Some(child);
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_openwolf_daemon(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut daemon = state.openwolf_daemon.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = daemon.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        safe_eprintln!("[openwolf] Daemon stopped");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn openwolf_daemon_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let mut daemon = state.openwolf_daemon.lock().map_err(|e| e.to_string())?;
+    if let Some(ref mut child) = *daemon {
+        // Check if process is still running
+        match child.try_wait() {
+            Ok(None) => Ok(true),     // still running
+            Ok(Some(_)) => {
+                *daemon = None;       // exited, clean up
+                Ok(false)
+            }
+            Err(_) => {
+                *daemon = None;
+                Ok(false)
+            }
+        }
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -1523,7 +1539,6 @@ fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Strin
 
 #[tauri::command]
 fn get_app_dir(app_handle: tauri::AppHandle) -> Result<String, String> {
-    // Check Tauri resource directory first (production builds bundle mcp/ here)
     if let Ok(res_dir) = app_handle.path().resource_dir() {
         if res_dir.join("mcp").is_dir() {
             safe_eprintln!("[app] Found mcp/ in resource dir: {}", res_dir.display());
@@ -1721,6 +1736,9 @@ fn widget_file_modified(widget_id: String) -> Result<u64, String> {
                     if n.starts_with('.') || n == "node_modules" { continue; }
                     max = max.max(newest_mtime(&entry.path()));
                 } else {
+                    // Skip state.json — written by widget state API, not user edits
+                    let name = entry.file_name();
+                    if name.to_string_lossy() == "state.json" { continue; }
                     let mt = entry.metadata()
                         .and_then(|m| m.modified())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| std::io::Error::other("time")))
@@ -1911,14 +1929,6 @@ fn read_skill_content(skill_id: String) -> Result<String, String> {
     }
 }
 
-#[derive(serde::Serialize)]
-struct ResolvedSkill {
-    name: String,
-    body: String,
-    allowed_tools: Vec<String>,
-    skill_dir: String,
-}
-
 /// Finds a skill by name across all skill directories, reads its SKILL.md,
 /// parses frontmatter, applies $ARGUMENTS substitution, and returns the
 /// rendered body in the same format Claude Code uses for skill injection.
@@ -1968,7 +1978,6 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
     let content = std::fs::read_to_string(&skill_md)
         .map_err(|e| format!("read {}: {}", skill_md.display(), e))?;
 
-    // Parse frontmatter
     let content_trimmed = content.trim_start();
     let (yaml_block, markdown_body) = if content_trimmed.starts_with("---") {
         let rest = &content_trimmed[3..];
@@ -2026,12 +2035,10 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
         let placeholder = format!("${}", i);
         let replacement = arg_parts.get(i).unwrap_or(&"").to_string();
         // Only replace if not followed by another word character (poor man's word boundary)
-        let new_body = String::new();
         let mut chars = body.char_indices().peekable();
         let mut result = String::with_capacity(body.len());
         while let Some((pos, ch)) = chars.next() {
             if body[pos..].starts_with(&placeholder) {
-                // Check char after the placeholder
                 let after_pos = pos + placeholder.len();
                 let next_ch = body.get(after_pos..after_pos + 1).and_then(|s| s.chars().next());
                 if next_ch.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
@@ -2046,7 +2053,6 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
                 result.push(ch);
             }
         }
-        let _ = new_body; // suppress unused warning
         body = result;
     }
 
@@ -2097,7 +2103,6 @@ fn ensure_skills_plugin() -> Result<(), String> {
     let skills_dir = home.join(".terminal64").join("skills");
     std::fs::create_dir_all(&skills_dir).map_err(|e| format!("mkdir skills: {}", e))?;
 
-    // Create the T64 plugin directory in Claude's plugin system
     let plugin_dir = home
         .join(".claude/plugins/marketplaces/claude-plugins-official/plugins/terminal-64-skills");
     let claude_plugin_dir = plugin_dir.join(".claude-plugin");
@@ -2187,7 +2192,9 @@ fn ensure_skills_plugin() -> Result<(), String> {
     // Sync symlinks: ~/.claude/skills/{name} -> ~/.terminal64/skills/{name}
     // This is the path Claude CLI actually resolves for /skill-name commands
     let claude_skills_dir = home.join(".claude").join("skills");
-    std::fs::create_dir_all(&claude_skills_dir).ok();
+    if let Err(e) = std::fs::create_dir_all(&claude_skills_dir) {
+        safe_eprintln!("[skills] Failed to create skills dir {:?}: {}", claude_skills_dir, e);
+    }
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for entry in entries.flatten() {
             let src = entry.path();
@@ -2205,9 +2212,13 @@ fn ensure_skills_plugin() -> Result<(), String> {
                 Err(_) => {} // doesn't exist, create it
             }
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&src, &dest).ok();
+            if let Err(e) = std::os::unix::fs::symlink(&src, &dest) {
+                safe_eprintln!("[skills] Failed to symlink {:?} -> {:?}: {}", dest, src, e);
+            }
             #[cfg(windows)]
-            std::os::windows::fs::symlink_dir(&src, &dest).ok();
+            if let Err(e) = std::os::windows::fs::symlink_dir(&src, &dest) {
+                safe_eprintln!("[skills] Failed to symlink {:?} -> {:?}: {}", dest, src, e);
+            }
         }
     }
 
@@ -2229,15 +2240,6 @@ fn ensure_skills_plugin() -> Result<(), String> {
 
 // ---- Proxy fetch (CORS bypass for widgets) ----
 
-#[derive(serde::Serialize)]
-struct ProxyFetchResponse {
-    status: u16,
-    ok: bool,
-    headers: std::collections::HashMap<String, String>,
-    body: String,
-    is_base64: bool,
-}
-
 #[tauri::command]
 async fn proxy_fetch(
     url: String,
@@ -2251,7 +2253,6 @@ async fn proxy_fetch(
         return Err("file:// URLs are not allowed".into());
     }
 
-    // Parse URL and block private/internal IP ranges
     let parsed = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
     if let Some(host) = parsed.host_str() {
         let host_lower = host.to_lowercase();
@@ -2415,12 +2416,6 @@ fn checkpoints_base_dir() -> Result<std::path::PathBuf, String> {
     Ok(home.join(".terminal64").join("checkpoints"))
 }
 
-#[derive(serde::Deserialize)]
-struct FileSnapshot {
-    path: String,
-    content: String,
-}
-
 #[tauri::command]
 fn create_checkpoint(session_id: String, turn: usize, files: Vec<FileSnapshot>) -> Result<(), String> {
     let dir = checkpoints_base_dir()?.join(&session_id).join(format!("turn-{}", turn));
@@ -2491,8 +2486,6 @@ fn cleanup_checkpoints(session_id: String, keep_up_to_turn: usize) -> Result<(),
     Ok(())
 }
 
-/// Delete a list of files (used during rewind to remove files created by delegation agents).
-/// Silently skips files that don't exist.
 #[tauri::command]
 fn delete_files(paths: Vec<String>) -> Result<Vec<String>, String> {
     let mut deleted = Vec::new();
@@ -2512,8 +2505,6 @@ fn delete_files(paths: Vec<String>) -> Result<Vec<String>, String> {
     Ok(deleted)
 }
 
-/// Revert files to their git HEAD state. For files that are new (untracked), delete them.
-/// For files that were modified, restore from git. For files that were deleted, restore from git.
 #[tauri::command]
 fn revert_files_git(cwd: String, paths: Vec<String>) -> Result<Vec<String>, String> {
     let cwd_path = std::path::Path::new(&cwd);
@@ -2704,6 +2695,145 @@ fn browser_eval(
     state.browser_manager.eval_js(&app_handle, &id, &js)
 }
 
+// ---- Vector Store Commands ----
+
+#[tauri::command]
+fn vector_search(
+    state: tauri::State<'_, AppState>,
+    table: String,
+    query: String,
+    top_k: Option<usize>,
+) -> Result<Vec<vector_store::VectorSearchResult>, String> {
+    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
+    let k = top_k.unwrap_or(10);
+    if table == "all" {
+        store.search_all(&query, k)
+    } else {
+        store.search(&table, &query, k)
+    }
+}
+
+#[tauri::command]
+fn vector_index_file(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
+    let title = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let preview = content.chars().take(200).collect::<String>();
+    store.upsert_file(&path, &content, &title, &path, &preview)
+}
+
+#[tauri::command]
+fn vector_index_session(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    summary: String,
+    cwd: String,
+) -> Result<(), String> {
+    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
+    let preview = summary.chars().take(200).collect::<String>();
+    store.upsert_session(&session_id, &summary, &session_id, &cwd, &preview)
+}
+
+#[tauri::command]
+fn vector_reindex_all(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
+
+    let mut indexed = 0usize;
+
+    // Index skills from ~/.terminal64/skills/
+    let base = dirs::home_dir().ok_or("No home dir")?.join(".terminal64").join("skills");
+    if base.exists() {
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let skill_dir = entry.path();
+                let skill_md = skill_dir.join("SKILL.md");
+                if skill_md.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&skill_md) {
+                        let name = skill_dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let preview = content.chars().take(200).collect::<String>();
+                        let _ = store.upsert_skill(&name, &content, &name, &skill_dir.to_string_lossy(), &preview);
+                        indexed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Index widgets from ~/.terminal64/widgets/
+    let widgets_base = dirs::home_dir().ok_or("No home dir")?.join(".terminal64").join("widgets");
+    if widgets_base.exists() {
+        if let Ok(entries) = std::fs::read_dir(&widgets_base) {
+            for entry in entries.flatten() {
+                let widget_dir = entry.path();
+                let index_html = widget_dir.join("index.html");
+                if index_html.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&index_html) {
+                        let name = widget_dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let preview = content.chars().take(200).collect::<String>();
+                        let _ = store.upsert_widget(&name, &content, &name, &widget_dir.to_string_lossy(), &preview);
+                        indexed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(format!("Reindexed {indexed} items"))
+}
+
+/// Install a specific bundled widget by name to ~/.terminal64/widgets/.
+/// Uses CARGO_MANIFEST_DIR at compile time (works reliably in dev and prod).
+#[tauri::command]
+fn install_bundled_widget(widget_name: String) -> Result<(), String> {
+    let dest_base = dirs::home_dir()
+        .ok_or("No home directory")?
+        .join(".terminal64")
+        .join("widgets");
+
+    // CARGO_MANIFEST_DIR is set at compile time to src-tauri/
+    let src_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("bundled-widgets")
+        .join(&widget_name);
+
+    if !src_dir.is_dir() {
+        return Err(format!("Bundled widget '{}' not found at {:?}", widget_name, src_dir));
+    }
+
+    let dest_dir = dest_base.join(&widget_name);
+
+    // Always overwrite to keep bundled widgets up to date
+    std::fs::create_dir_all(&dest_dir).map_err(|e| format!("mkdir: {}", e))?;
+
+    let files = std::fs::read_dir(&src_dir).map_err(|e| format!("read src: {}", e))?;
+    for file in files.flatten() {
+        if file.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            let dest_file = dest_dir.join(file.file_name());
+            std::fs::copy(file.path(), &dest_file)
+                .map_err(|e| format!("copy {:?}: {}", file.file_name(), e))?;
+        }
+    }
+    safe_eprintln!("[setup] Installed bundled widget: {}", widget_name);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2727,7 +2857,28 @@ pub fn run() {
                 audio_manager: Arc::new(AudioManager::new()),
                 browser_manager: BrowserManager::new(),
                 widget_server: widget_srv,
+                vector_store: Arc::new(Mutex::new(None)),
+                openwolf_daemon: Mutex::new(None),
             });
+
+            // Initialize the vector store in a background thread (model download may take time)
+            {
+                let vs_arc = {
+                    let state: tauri::State<'_, AppState> = app.state();
+                    Arc::clone(&state.vector_store)
+                };
+                std::thread::spawn(move || {
+                    match VectorStore::initialize() {
+                        Ok(store) => {
+                            *vs_arc.lock().unwrap() = Some(store);
+                            safe_eprintln!("[vector_store] Initialized successfully");
+                        }
+                        Err(e) => {
+                            safe_eprintln!("[vector_store] Failed to initialize: {}", e);
+                        }
+                    }
+                });
+            }
 
             // Disable native WKWebView pinch-to-zoom magnification on macOS
             // so our custom canvas zoom isn't fighting the browser's own zoom
@@ -2760,6 +2911,9 @@ pub fn run() {
             start_discord_bot,
             stop_discord_bot,
             discord_bot_status,
+            start_openwolf_daemon,
+            stop_openwolf_daemon,
+            openwolf_daemon_status,
             link_session_to_discord,
             unlink_session_from_discord,
             rename_discord_session,
@@ -2827,6 +2981,11 @@ pub fn run() {
             resolve_skill_prompt,
             get_skill_creator_path,
             ensure_skills_plugin,
+            vector_search,
+            vector_index_file,
+            vector_index_session,
+            vector_reindex_all,
+            install_bundled_widget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

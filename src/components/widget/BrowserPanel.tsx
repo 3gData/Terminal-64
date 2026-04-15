@@ -58,7 +58,6 @@ export default function BrowserPanel({ browserId, initialUrl }: BrowserPanelProp
     }
   }, [browserId, created]);
 
-  // Create the native webview on mount
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
@@ -116,7 +115,6 @@ export default function BrowserPanel({ browserId, initialUrl }: BrowserPanelProp
       if (document.activeElement !== urlInputRef.current) {
         setUrl(event.payload);
       }
-      // Update stored URL in canvas store
       useCanvasStore.setState((s) => ({
         terminals: s.terminals.map((t) =>
           t.terminalId === browserId ? { ...t, browserUrl: event.payload } : t,

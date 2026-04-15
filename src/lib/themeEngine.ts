@@ -7,7 +7,7 @@ export function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-export function applyUiTheme(ui: UiTheme, alpha: number = 1) {
+function applyUiTheme(ui: UiTheme, alpha: number = 1) {
   const root = document.documentElement;
   const a = (hex: string) => (alpha < 1 ? hexToRgba(hex, alpha) : hex);
 

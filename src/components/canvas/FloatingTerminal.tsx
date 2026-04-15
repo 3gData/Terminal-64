@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useEffect, useMemo } from "react";
+import { memo, useCallback, useRef, useState, useEffect, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, CanvasTerminal } from "../../stores/canvasStore";
@@ -27,7 +27,7 @@ interface FloatingTerminalProps {
   term: CanvasTerminal;
 }
 
-export default function FloatingTerminal({ term }: FloatingTerminalProps) {
+export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
   // Reactive state — only re-render when these change
   const isActive = useCanvasStore((s) => s.activeTerminalId === term.terminalId);
   // Stable action refs — won't cause re-renders
@@ -42,8 +42,8 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   const [editorOpen, setEditorOpen] = useState(false);
   const workTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef({ startX: 0, startY: 0, origX: 0, origY: 0 });
-  // Track active drag/resize cleanup so we can tear down on unmount
-  const cleanupRef = useRef<(() => void) | null>(null);
+  // Track ALL active drag/resize cleanups (prevents listener leaks when drag + resize overlap)
+  const cleanupFns = useRef<Set<() => void>>(new Set());
   // Keep a live ref to term so drag/resize callbacks don't need term.x/y/w/h in deps
   const termRef = useRef(term);
   termRef.current = term;
@@ -59,9 +59,9 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
   useEffect(() => {
     return () => {
       if (workTimer.current) clearTimeout(workTimer.current);
-      // Clean up any lingering drag/resize window listeners on unmount
-      cleanupRef.current?.();
-      cleanupRef.current = null;
+      // Clean up ALL lingering drag/resize window listeners on unmount
+      for (const fn of cleanupFns.current) fn();
+      cleanupFns.current.clear();
     };
   }, []);
 
@@ -125,11 +125,11 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
         window.removeEventListener("mouseup", onUp);
         unblockIframes();
         useCanvasStore.getState().clearSnapGuides();
-        cleanupRef.current = null;
+        cleanupFns.current.delete(onUp);
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
-      cleanupRef.current = onUp;
+      cleanupFns.current.add(onUp);
     },
     [term.id, moveTerminal, bringToFront]
   );
@@ -191,11 +191,11 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
         window.removeEventListener("mouseup", onUp);
         unblockIframes();
         useCanvasStore.getState().clearSnapGuides();
-        cleanupRef.current = null;
+        cleanupFns.current.delete(onUp);
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
-      cleanupRef.current = onUp;
+      cleanupFns.current.add(onUp);
     },
     [term.id, resizeTerminal, moveTerminal, bringToFront]
   );
@@ -521,4 +521,4 @@ export default function FloatingTerminal({ term }: FloatingTerminalProps) {
       <div className="ft-resize ft-resize--se" onMouseDown={(e) => startEdgeResize(e, "se")} />
     </div>
   );
-}
+});

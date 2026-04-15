@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { ChatMessage, ToolCall } from "../lib/types";
+import { ChatMessage, ToolCall, McpTool, HookEvent } from "../lib/types";
 
 export const STORAGE_KEY = "terminal64-claude-sessions";
 
@@ -48,7 +48,7 @@ export interface McpServerStatus {
   error?: string;
   transport?: string;
   scope?: string;
-  tools?: { name: string; description?: string }[];
+  tools?: McpTool[];
   toolCount?: number;
 }
 
@@ -83,6 +83,11 @@ export interface ClaudeSession {
   autoCompactStartedAt: number | null; // timestamp when compacting began
   resumeAtUuid: string | null; // JSONL UUID for --resume-session-at after rewind (one-shot, cleared after use)
   forkParentSessionId: string | null; // parent session ID for --fork-session (one-shot, cleared after use)
+  // Hook event tracking
+  toolUsageStats: Record<string, number>; // tool name → invocation count (from PostToolUse)
+  compactionCount: number; // number of compactions (from PostCompact)
+  subagentIds: string[]; // currently active subagent IDs (tracked via SubagentStart/Stop)
+  hookEventLog: HookEvent[]; // chronological log of all hook events
 }
 
 export interface ActiveLoop {
@@ -134,6 +139,12 @@ interface ClaudeState {
   setResumeAtUuid: (sessionId: string, uuid: string | null) => void;
   setForkParentSessionId: (sessionId: string, parentId: string | null) => void;
   truncateFromMessage: (sessionId: string, messageId: string) => void;
+  // Hook event actions
+  addHookEvent: (sessionId: string, event: HookEvent) => void;
+  recordToolUsage: (sessionId: string, toolName: string) => void;
+  incrementCompactionCount: (sessionId: string) => void;
+  addSubagent: (sessionId: string, subagentId: string) => void;
+  removeSubagent: (sessionId: string, subagentId: string) => void;
 }
 
 function updateSession(
@@ -156,7 +167,9 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) existing = JSON.parse(raw);
-    } catch {}
+    } catch (e) {
+      console.warn("[claudeStore] Failed to parse existing sessions:", e);
+    }
 
     // Remove sessions that are no longer in memory if they're unnamed or delegation children
     for (const id of Object.keys(existing)) {
@@ -165,7 +178,6 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
       }
     }
 
-    // Update with current in-memory sessions (skip ephemeral)
     for (const [id, s] of Object.entries(sessions)) {
       if (s.ephemeral) continue;
       existing[id] = {
@@ -235,7 +247,7 @@ function loadSession(sessionId: string): ClaudeSession | null {
       contextUsed: saved.contextUsed || 0,
       contextMax: saved.contextMax || 0,
       error: null,
-      promptCount: saved.promptCount || saved.messages.filter((m: any) => m.role === "user").length,
+      promptCount: saved.promptCount || saved.messages.filter((m: ChatMessage) => m.role === "user").length,
       planModeActive: false,
       pendingQuestions: null,
       pendingPermission: null,
@@ -252,6 +264,10 @@ function loadSession(sessionId: string): ClaudeSession | null {
       autoCompactStartedAt: null,
       resumeAtUuid: null,
       forkParentSessionId: null,
+      toolUsageStats: {},
+      compactionCount: 0,
+      subagentIds: [],
+      hookEventLog: [],
     };
   } catch {
     return null;
@@ -297,6 +313,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
           model: "", totalCost: 0, totalTokens: 0, contextUsed: 0, contextMax: 0, error: null, promptCount: 0, planModeActive: false,
           pendingQuestions: null, pendingPermission: null, name: initialName || "", cwd: "",
           promptQueue: [], hasBeenStarted: false, draftPrompt: "", activeLoop: null, ephemeral: !!ephemeral, mcpServers: [], modifiedFiles: [], autoCompactStatus: "idle" as const, autoCompactStartedAt: null, resumeAtUuid: null, forkParentSessionId: null,
+          toolUsageStats: {}, compactionCount: 0, subagentIds: [], hookEventLog: [],
         },
       };
       if (!ephemeral) debouncedSave();
@@ -314,7 +331,9 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
         try {
           const raw = localStorage.getItem(STORAGE_KEY);
           if (raw) { const d = JSON.parse(raw); delete d[sessionId]; localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
-        } catch {}
+        } catch (e) {
+          console.warn("[claudeStore] Failed to clean up localStorage on remove:", e);
+        }
       }
       return { sessions: rest };
     });
@@ -617,7 +636,9 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
           delete d[sessionId];
           localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
         }
-      } catch {}
+      } catch (e) {
+        console.warn("[claudeStore] Failed to delete session from localStorage:", e);
+      }
       return { sessions: rest };
     });
   },
@@ -654,6 +675,55 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       return { sessions: updated };
     });
   },
+
+  // Hook event actions
+  addHookEvent: (sessionId, event) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      // Cap log at 500 entries to prevent unbounded growth
+      const log = session.hookEventLog.length >= 500
+        ? [...session.hookEventLog.slice(-499), event]
+        : [...session.hookEventLog, event];
+      return { sessions: updateSession(s.sessions, sessionId, { hookEventLog: log }) };
+    });
+  },
+
+  recordToolUsage: (sessionId, toolName) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      const stats = { ...session.toolUsageStats };
+      stats[toolName] = (stats[toolName] || 0) + 1;
+      return { sessions: updateSession(s.sessions, sessionId, { toolUsageStats: stats }) };
+    });
+  },
+
+  incrementCompactionCount: (sessionId) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { compactionCount: session.compactionCount + 1 }) };
+    });
+  },
+
+  addSubagent: (sessionId, subagentId) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session || session.subagentIds.includes(subagentId)) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { subagentIds: [...session.subagentIds, subagentId] }) };
+    });
+  },
+
+  removeSubagent: (sessionId, subagentId) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      const filtered = session.subagentIds.filter((id) => id !== subagentId);
+      if (filtered.length === session.subagentIds.length) return s;
+      return { sessions: updateSession(s.sessions, sessionId, { subagentIds: filtered }) };
+    });
+  },
 }));
 
 // Emergency save on tab hide / close — prevents data loss from random stops or network issues
@@ -671,9 +741,8 @@ if (typeof window !== "undefined") {
   }, 5000);
 
   // Clean up on HMR to prevent interval leaks
-  const hot = (import.meta as any).hot;
-  if (hot) {
-    hot.dispose(() => {
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
       clearInterval(saveIntervalId);
       document.removeEventListener("visibilitychange", visibilityHandler);
       window.removeEventListener("beforeunload", flushSave);

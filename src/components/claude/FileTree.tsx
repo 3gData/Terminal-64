@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { listDirectory, searchFiles } from "../../lib/tauriApi";
+import { useSemanticSearch } from "../../hooks/useSemanticSearch";
 import type { DirEntry } from "../../lib/types";
 
 const CODE_EXTS = new Set([
@@ -59,7 +60,8 @@ function TreeNode({ name, fullPath, isDir, onFileClick, depth }: TreeNodeProps) 
       try {
         const entries = await listDirectory(fullPath);
         setChildren(entries);
-      } catch {
+      } catch (e) {
+        console.warn("[file-tree] Failed to list directory:", fullPath, e);
         setChildren([]);
       }
       setLoading(false);
@@ -107,9 +109,10 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<string[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [fileSearchMode, setFileSearchMode] = useState<"keyword" | "semantic">("keyword");
+  const semantic = useSemanticSearch("files", 20);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Clean up search timer on unmount
   useEffect(() => {
     return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
   }, []);
@@ -138,6 +141,7 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
     }, 200);
   }, [cwd]);
 
+
   const dirName = cwd.split(/[/\\]/).pop() || cwd;
 
   return (
@@ -147,51 +151,132 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
         <button className="cft-close" onClick={onClose}>×</button>
       </div>
       <div className="cft-search">
-        <input
-          className="cft-search-input"
-          placeholder="Search files…"
-          value={query}
-          onChange={(e) => handleSearch(e.target.value)}
-          autoFocus
-        />
+        <div className="vs-mode-toggle vs-mode-toggle--inline">
+          <button
+            className={`vs-mode-btn vs-mode-btn--tiny ${fileSearchMode === "keyword" ? "vs-mode-btn--active" : ""}`}
+            onClick={() => { setFileSearchMode("keyword"); semantic.clear(); }}
+            title="Filename search"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+            </svg>
+          </button>
+          <button
+            className={`vs-mode-btn vs-mode-btn--tiny ${fileSearchMode === "semantic" ? "vs-mode-btn--active" : ""}`}
+            onClick={() => { setFileSearchMode("semantic"); setQuery(""); setSearchResults(null); }}
+            title="Semantic search"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/>
+              <path d="M8 6a4 4 0 0 1 8 0"/>
+              <path d="M5.2 11.2a8 8 0 0 1 13.6 0"/>
+            </svg>
+          </button>
+        </div>
+        {fileSearchMode === "keyword" ? (
+          <input
+            className="cft-search-input"
+            placeholder="Search files…"
+            value={query}
+            onChange={(e) => handleSearch(e.target.value)}
+            autoFocus
+          />
+        ) : (
+          <input
+            className="cft-search-input"
+            placeholder="Describe what you're looking for…"
+            value={semantic.query}
+            onChange={(e) => semantic.search(e.target.value)}
+            autoFocus
+          />
+        )}
+        {semantic.searching && <span className="vs-search-spinner vs-search-spinner--small" />}
       </div>
       <div className="cft-tree">
-        {searchResults !== null ? (
+        {/* Semantic search results */}
+        {fileSearchMode === "semantic" ? (
           <>
-            {searching && <div className="cft-empty">Searching…</div>}
-            {!searching && searchResults.length === 0 && <div className="cft-empty">No results</div>}
-            {searchResults.map((rel) => {
-              const fullPath = `${cwd}/${rel}`;
-              const name = rel.split(/[/\\]/).pop() || rel;
-              const code = isCodeFile(name);
+            {semantic.searching && <div className="cft-empty">Searching…</div>}
+            {!semantic.searching && semantic.query.trim() && semantic.results.length === 0 && (
+              <div className="cft-empty">No semantic matches</div>
+            )}
+            {semantic.results.map((r) => {
+              const relPath = r.source || r.id;
+              const fullPath = relPath.startsWith("/") ? relPath : `${cwd}/${relPath}`;
+              const fileName = relPath.split(/[/\\]/).pop() || r.id;
+              const code = isCodeFile(fileName);
               return (
                 <div
-                  key={rel}
+                  key={r.id}
                   className={`cft-node cft-search-result ${code ? "cft-node--file" : "cft-node--dim"}`}
                   style={{ paddingLeft: 8 }}
-                  onClick={() => code && onFileClick(fullPath)}
+                  onClick={() => code && fullPath && onFileClick(fullPath)}
                 >
-                  <span className="cft-icon">{fileIcon(name, false)}</span>
-                  <span className="cft-name cft-search-path">{rel}</span>
+                  <span className="cft-icon">{fileIcon(fileName, false)}</span>
+                  <span className="cft-name cft-search-path">{r.title || relPath}</span>
+                  <span className="vs-result-score vs-result-score--inline">{Math.max(0, (1 - r.distance) * 100).toFixed(0)}%</span>
                 </div>
               );
             })}
+            {!semantic.query.trim() && (
+              <>
+                {error && <div className="cft-empty">Failed to load directory</div>}
+                {!entries && !error && <div className="cft-empty">Loading…</div>}
+                {entries && entries.length === 0 && <div className="cft-empty">Empty directory</div>}
+                {entries && entries.map((entry) => (
+                  <TreeNode
+                    key={entry.name}
+                    name={entry.name}
+                    fullPath={`${cwd}/${entry.name}`}
+                    isDir={entry.is_dir}
+                    onFileClick={onFileClick}
+                    depth={0}
+                  />
+                ))}
+              </>
+            )}
           </>
         ) : (
+          /* Keyword mode: original behavior */
           <>
-            {error && <div className="cft-empty">Failed to load directory</div>}
-            {!entries && !error && <div className="cft-empty">Loading…</div>}
-            {entries && entries.length === 0 && <div className="cft-empty">Empty directory</div>}
-            {entries && entries.map((entry) => (
-              <TreeNode
-                key={entry.name}
-                name={entry.name}
-                fullPath={`${cwd}/${entry.name}`}
-                isDir={entry.is_dir}
-                onFileClick={onFileClick}
-                depth={0}
-              />
-            ))}
+            {searchResults !== null ? (
+              <>
+                {searching && <div className="cft-empty">Searching…</div>}
+                {!searching && searchResults.length === 0 && <div className="cft-empty">No results</div>}
+                {searchResults.map((rel) => {
+                  const fullPath = `${cwd}/${rel}`;
+                  const name = rel.split(/[/\\]/).pop() || rel;
+                  const code = isCodeFile(name);
+                  return (
+                    <div
+                      key={rel}
+                      className={`cft-node cft-search-result ${code ? "cft-node--file" : "cft-node--dim"}`}
+                      style={{ paddingLeft: 8 }}
+                      onClick={() => code && onFileClick(fullPath)}
+                    >
+                      <span className="cft-icon">{fileIcon(name, false)}</span>
+                      <span className="cft-name cft-search-path">{rel}</span>
+                    </div>
+                  );
+                })}
+              </>
+            ) : (
+              <>
+                {error && <div className="cft-empty">Failed to load directory</div>}
+                {!entries && !error && <div className="cft-empty">Loading…</div>}
+                {entries && entries.length === 0 && <div className="cft-empty">Empty directory</div>}
+                {entries && entries.map((entry) => (
+                  <TreeNode
+                    key={entry.name}
+                    name={entry.name}
+                    fullPath={`${cwd}/${entry.name}`}
+                    isDir={entry.is_dir}
+                    onFileClick={onFileClick}
+                    depth={0}
+                  />
+                ))}
+              </>
+            )}
           </>
         )}
       </div>

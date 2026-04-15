@@ -1,6 +1,6 @@
 import { KeyCombo, Keybinding } from "./types";
 
-export function parseKeyCombo(str: string): KeyCombo {
+function parseKeyCombo(str: string): KeyCombo {
   const parts = str.toLowerCase().split("+").map((s) => s.trim());
   const combo: KeyCombo = { key: "" };
 
@@ -29,7 +29,7 @@ export function parseKeyCombo(str: string): KeyCombo {
   return combo;
 }
 
-export function matchesKeyCombo(
+function matchesKeyCombo(
   event: KeyboardEvent,
   combo: KeyCombo
 ): boolean {
@@ -48,7 +48,7 @@ export function matchesKeyCombo(
   return true;
 }
 
-export function formatKeyCombo(combo: KeyCombo): string {
+function formatKeyCombo(combo: KeyCombo): string {
   const parts: string[] = [];
   if (combo.ctrl) parts.push("Ctrl");
   if (combo.shift) parts.push("Shift");

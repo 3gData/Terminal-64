@@ -36,7 +36,6 @@
   overflow: visible;
   pointer-events: none;
   z-index: 2;
-  will-change: transform;
 }
 
 .canvas-content > *:not(.canvas-link-line) {

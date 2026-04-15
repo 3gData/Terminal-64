@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, createClaudeSession, shellExec, WidgetInfo } from "../../lib/tauriApi";
+import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnClaudeWithPrompt } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { pushToast } from "../../lib/notifications";
-import type { PermissionMode } from "../../lib/types";
+import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
+import type { WidgetInfo } from "../../lib/types";
 import "./Widget.css";
 
 const WIDGET_SYSTEM_PROMPT = `You are building a widget for Terminal 64, a canvas-based terminal emulator.
@@ -250,7 +251,22 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
   const [installing, setInstalling] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const refreshList = () => listWidgetFolders().then(setWidgets).catch(() => {});
+  const openwolfEnabled = useSettingsStore((s) => s.openwolfEnabled);
+
+  const refreshList = async () => {
+    if (openwolfEnabled) {
+      // Only install if not already present
+      const existing = await listWidgetFolders().catch(() => [] as WidgetInfo[]);
+      if (!existing.some((w) => w.widget_id === "project-intel")) {
+        try { await installBundledWidget("project-intel"); } catch (_) {}
+      }
+      setWidgets(existing.some((w) => w.widget_id === "project-intel")
+        ? existing
+        : await listWidgetFolders().catch(() => [] as WidgetInfo[]));
+      return;
+    }
+    listWidgetFolders().then(setWidgets).catch(() => {});
+  };
 
   useEffect(() => {
     if (!isOpen) return;
@@ -266,16 +282,16 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
     if (!isOpen) return;
     let unlisten: (() => void) | null = null;
     getCurrentWebviewWindow()
-      .onDragDropEvent(async (event: any) => {
-        const { type, paths } = event.payload;
-        if (type === "over") {
-          const hasZip = (paths as string[])?.some((p: string) => p.toLowerCase().endsWith(".zip"));
+      .onDragDropEvent(async (event) => {
+        const payload = event.payload;
+        if (payload.type === "enter") {
+          const hasZip = payload.paths.some((p) => p.toLowerCase().endsWith(".zip"));
           if (hasZip) setIsDragOver(true);
-        } else if (type === "leave" || type === "cancel") {
+        } else if (payload.type === "leave") {
           setIsDragOver(false);
-        } else if (type === "drop") {
+        } else if (payload.type === "drop") {
           setIsDragOver(false);
-          const zipFiles = ((paths as string[]) || []).filter((p: string) => p.toLowerCase().endsWith(".zip"));
+          const zipFiles = payload.paths.filter((p) => p.toLowerCase().endsWith(".zip"));
           if (zipFiles.length === 0) return;
           setInstalling(true);
           for (const zipPath of zipFiles) {
@@ -307,30 +323,13 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
       const widgetName = name.trim();
       // Open widget panel on canvas
       useCanvasStore.getState().addWidgetTerminal(id, widgetName);
-      // Open a Claude session pointed at the widget folder
-      useCanvasStore.getState().addClaudeTerminal(folderPath, false, `Widget: ${widgetName}`);
-      // Auto-send the system prompt to the new Claude session
-      const terminals = useCanvasStore.getState().terminals;
-      const claudePanel = terminals[terminals.length - 1];
-      if (claudePanel?.panelType === "claude") {
-        const sid = claudePanel.terminalId;
-        const fullPrompt = WIDGET_SYSTEM_PROMPT + "\n\n" + buildWidgetContext();
-        useClaudeStore.getState().createSession(sid, `Widget: ${widgetName}`);
-        useClaudeStore.getState().addUserMessage(sid, fullPrompt);
-        const permMode = (useSettingsStore.getState().claudePermMode || "default") as PermissionMode;
-        // Small delay so ClaudeChat mounts and event listeners are ready
-        setTimeout(() => {
-          createClaudeSession({
-            session_id: sid,
-            cwd: folderPath,
-            prompt: fullPrompt,
-            permission_mode: permMode,
-          }).catch((err) => {
-            useClaudeStore.getState().setError(sid, String(err));
-          });
-          useClaudeStore.getState().incrementPromptCount(sid);
-        }, 300);
-      }
+      // Open a Claude session pointed at the widget folder with system prompt
+      const fullPrompt = WIDGET_SYSTEM_PROMPT + "\n\n" + buildWidgetContext();
+      spawnClaudeWithPrompt(folderPath, `Widget: ${widgetName}`, fullPrompt, () => ({
+        canvasStore: useCanvasStore,
+        claudeStore: useClaudeStore,
+        settingsStore: useSettingsStore,
+      }));
       onClose();
     } catch (err) {
       console.warn("[widget] Failed to create:", err);
@@ -367,16 +366,6 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
     } catch (err) {
       console.warn("[widget] Failed to delete:", err);
     }
-  };
-
-  const formatTime = (ms: number) => {
-    if (!ms) return "";
-    const now = Date.now();
-    const diff = now - ms;
-    if (diff < 60000) return "just now";
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-    return new Date(ms).toLocaleDateString();
   };
 
   return (
@@ -416,33 +405,45 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
             </div>
           </div>
 
-          {widgets.length > 0 && (
-            <>
-              <div className="wdg-section-label">Existing Widgets</div>
-              <div className="wdg-list">
-                {widgets.map((w) => (
-                  <div
-                    key={w.widget_id}
-                    className="wdg-list-item"
-                    onClick={() => handleOpen(w)}
-                  >
-                    <div className={`wdg-list-item-dot ${w.has_index ? "wdg-list-item-dot--ready" : "wdg-list-item-dot--empty"}`} />
-                    <span className="wdg-list-item-name">{w.widget_id}</span>
-                    <span className="wdg-list-item-time">{formatTime(w.modified)}</span>
-                    <button
-                      className="wdg-list-item-delete"
-                      onClick={(e) => handleDelete(e, w)}
-                      title="Delete widget"
-                    >
-                      <svg width="10" height="10" viewBox="0 0 10 10">
-                        <path d="M2 3H8M3 3V8.5H7V3M4 4.5V7M6 4.5V7M3.5 3L4 1.5H6L6.5 3" stroke="currentColor" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round"/>
-                      </svg>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+          {widgets.length > 0 && (() => {
+            const BUNDLED_IDS = new Set(["project-intel"]);
+            const bundled = widgets.filter((w) => BUNDLED_IDS.has(w.widget_id));
+            const user = widgets.filter((w) => !BUNDLED_IDS.has(w.widget_id));
+            const sorted = [...bundled, ...user];
+            return (
+              <>
+                <div className="wdg-section-label">Existing Widgets</div>
+                <div className="wdg-list">
+                  {sorted.map((w) => {
+                    const isBundled = BUNDLED_IDS.has(w.widget_id);
+                    return (
+                      <div
+                        key={w.widget_id}
+                        className={`wdg-list-item ${isBundled ? "wdg-list-item--bundled" : ""}`}
+                        onClick={() => handleOpen(w)}
+                      >
+                        <div className={`wdg-list-item-dot ${isBundled ? "wdg-list-item-dot--bundled" : w.has_index ? "wdg-list-item-dot--ready" : "wdg-list-item-dot--empty"}`} />
+                        <span className="wdg-list-item-name">{w.widget_id}</span>
+                        {isBundled && <span className="wdg-list-item-badge">built-in</span>}
+                        <span className="wdg-list-item-time">{formatRelativeTime(w.modified)}</span>
+                        {!isBundled && (
+                          <button
+                            className="wdg-list-item-delete"
+                            onClick={(e) => handleDelete(e, w)}
+                            title="Delete widget"
+                          >
+                            <svg width="10" height="10" viewBox="0 0 10 10">
+                              <path d="M2 3H8M3 3V8.5H7V3M4 4.5V7M6 4.5V7M3.5 3L4 1.5H6L6.5 3" stroke="currentColor" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round"/>
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
 
           {widgets.length === 0 && (
             <div className="wdg-empty">
@@ -473,12 +474,7 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
 
           <button
             className="wdg-open-folder"
-            onClick={() => {
-              const cmd = navigator.platform.includes("Win")
-                ? 'explorer.exe "%USERPROFILE%\\.terminal64\\widgets"'
-                : 'open "$HOME/.terminal64/widgets"';
-              shellExec(cmd).catch(() => {});
-            }}
+            onClick={() => openSystemFolder("$HOME/.terminal64/widgets")}
           >
             Open Widgets Folder
           </button>

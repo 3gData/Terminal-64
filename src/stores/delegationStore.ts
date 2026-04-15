@@ -31,7 +31,9 @@ interface DelegationState {
 function saveToStorage(groups: Record<string, DelegationGroup>) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(groups));
-  } catch {}
+  } catch (e) {
+    console.warn("[delegation] Failed to save to localStorage:", e);
+  }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -44,7 +46,9 @@ function loadFromStorage(): Record<string, DelegationGroup> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return JSON.parse(raw);
-  } catch {}
+  } catch (e) {
+    console.warn("[delegation] Failed to load from localStorage:", e);
+  }
   return {};
 }
 

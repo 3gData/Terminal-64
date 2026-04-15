@@ -23,6 +23,8 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
         notes: data.body || "",
       };
     }
-  } catch {}
+  } catch (e) {
+    console.warn("[updater] Failed to check for updates:", e);
+  }
   return null;
 }

@@ -1,3 +1,4 @@
+use crate::types::HookEvent;
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -6,6 +7,40 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+
+/// All Claude Code lifecycle hook events to register for each session.
+const HOOK_EVENTS: &[&str] = &[
+    "PermissionRequest",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SubagentStart",
+    "SubagentStop",
+    "Notification",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+];
+
+/// Build a complete hooks settings JSON registering HTTP hooks for all lifecycle events.
+fn build_hook_settings(port: u16, secret: &str, run_token: &str) -> serde_json::Value {
+    let mut hooks = serde_json::Map::new();
+    for event in HOOK_EVENTS {
+        let url = format!(
+            "http://127.0.0.1:{}/hook/{}/{}/{}",
+            port, secret, run_token, event
+        );
+        hooks.insert(
+            event.to_string(),
+            serde_json::json!([{
+                "matcher": "",
+                "hooks": [{ "type": "http", "url": url }]
+            }]),
+        );
+    }
+    serde_json::json!({ "hooks": hooks })
+}
 
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -143,15 +178,7 @@ impl PermissionServer {
             .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         for (run_token, session_id) in &tokens {
-            let url = format!("http://127.0.0.1:{}/hook/{}/{}", new_port, self.secret, run_token);
-            let settings = serde_json::json!({
-                "hooks": {
-                    "PermissionRequest": [{
-                        "matcher": "",
-                        "hooks": [{ "type": "http", "url": url }]
-                    }]
-                }
-            });
+            let settings = build_hook_settings(new_port, &self.secret, run_token);
             if let Some(path) = self.settings_files.lock().unwrap_or_else(|e| e.into_inner()).get(run_token) {
                 if let Err(e) = std::fs::write(path, settings.to_string()) {
                     safe_eprintln!("[perm-server] Failed to rewrite settings for session {}: {}", session_id, e);
@@ -163,18 +190,14 @@ impl PermissionServer {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn port(&self) -> u16 {
-        self.port.load(Ordering::SeqCst)
-    }
-
     pub fn secret(&self) -> &str {
         &self.secret
     }
 
     pub fn cleanup_delegation_group(&self, group_id: &str) {
-        if let Ok(mut store) = self.delegation_messages.lock() {
-            store.remove(group_id);
+        match self.delegation_messages.lock() {
+            Ok(mut store) => { store.remove(group_id); }
+            Err(e) => safe_eprintln!("[perm-server] Lock poisoned in cleanup_delegation_group: {}", e),
         }
     }
 
@@ -198,19 +221,7 @@ impl PermissionServer {
 
         let run_token = random_token();
         let port = self.port.load(Ordering::SeqCst);
-        let url = format!(
-            "http://127.0.0.1:{}/hook/{}/{}",
-            port, self.secret, run_token
-        );
-
-        let settings = serde_json::json!({
-            "hooks": {
-                "PermissionRequest": [{
-                    "matcher": "",
-                    "hooks": [{ "type": "http", "url": url }]
-                }]
-            }
-        });
+        let settings = build_hook_settings(port, &self.secret, &run_token);
 
         let path = std::env::temp_dir().join(format!("t64-hook-{}.json", &run_token[..run_token.len().min(12)]));
         std::fs::write(&path, settings.to_string()).map_err(|e| format!("write settings: {}", e))?;
@@ -281,7 +292,6 @@ fn handle_connection(
         }
     }
 
-    // Parse first line
     let first_line = headers.lines().next().unwrap_or("");
     let method = first_line.split_whitespace().next().unwrap_or("");
     let path = first_line.split_whitespace().nth(1).unwrap_or("");
@@ -321,7 +331,14 @@ fn handle_connection(
             if content_length > 0 {
                 reader.read_exact(&mut body).map_err(|e| format!("body: {}", e))?;
             }
-            let parsed: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&body)).unwrap_or_default();
+            let body_text = String::from_utf8_lossy(&body);
+            let parsed: serde_json::Value = match serde_json::from_str(&body_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    safe_eprintln!("[delegation] Failed to parse request body: {}", e);
+                    serde_json::Value::default()
+                }
+            };
             let group_id = parsed["group_id"].as_str().unwrap_or("").to_string();
             let agent = parsed["agent"].as_str().unwrap_or("Agent").to_string();
             let message = if path == "/delegation/complete" {
@@ -345,11 +362,11 @@ fn handle_connection(
             };
 
             // Store message
-            if let Ok(mut store) = delegation_messages.lock() {
-                store.entry(group_id.clone()).or_default().push(del_msg.clone());
+            match delegation_messages.lock() {
+                Ok(mut store) => { store.entry(group_id.clone()).or_default().push(del_msg.clone()); }
+                Err(e) => safe_eprintln!("[delegation] Lock poisoned storing message: {}", e),
             }
 
-            // Emit to frontend
             let _ = app_handle.emit("delegation-message", &del_msg);
 
             safe_eprintln!("[delegation] {} from {} in group {}: {}", msg_type, agent, &group_id[..group_id.len().min(8)], &message[..message.len().min(80)]);
@@ -359,7 +376,6 @@ fn handle_connection(
         }
 
         if method == "GET" && path.starts_with("/delegation/messages") {
-            // Parse query params: ?group=X&last=N
             let query = path.split('?').nth(1).unwrap_or("");
             let params: HashMap<&str, &str> = query.split('&')
                 .filter_map(|p| p.split_once('='))
@@ -367,15 +383,19 @@ fn handle_connection(
             let group_id = params.get("group").unwrap_or(&"");
             let last_n: usize = params.get("last").and_then(|v| v.parse().ok()).unwrap_or(20);
 
-            let recent: Vec<DelegationMessage> = if let Ok(store) = delegation_messages.lock() {
-                if let Some(msgs) = store.get(*group_id) {
-                    let start = msgs.len().saturating_sub(last_n);
-                    msgs[start..].to_vec()
-                } else {
+            let recent: Vec<DelegationMessage> = match delegation_messages.lock() {
+                Ok(store) => {
+                    if let Some(msgs) = store.get(*group_id) {
+                        let start = msgs.len().saturating_sub(last_n);
+                        msgs[start..].to_vec()
+                    } else {
+                        vec![]
+                    }
+                }
+                Err(e) => {
+                    safe_eprintln!("[delegation] Lock poisoned reading messages: {}", e);
                     vec![]
                 }
-            } else {
-                vec![]
             };
             let body = serde_json::to_string(&recent).unwrap_or("[]".to_string());
             send_http(&mut stream, 200, &body);
@@ -398,6 +418,8 @@ fn handle_connection(
         return Ok(());
     }
     let run_token = parts[3].to_string();
+    // Event name is the 5th path segment; default to PermissionRequest for backwards compat
+    let event_name = if parts.len() >= 5 { parts[4] } else { "PermissionRequest" };
 
     // Parse Content-Length (cap at 1MB to prevent DoS)
     const MAX_BODY: usize = 1024 * 1024;
@@ -417,13 +439,13 @@ fn handle_connection(
             .map_err(|e| format!("body read: {}", e))?;
     }
     let body_str = String::from_utf8_lossy(&body);
-    let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap_or_default();
-
-    let tool_name = parsed["tool_name"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    let tool_input = parsed["tool_input"].clone();
+    let parsed: serde_json::Value = match serde_json::from_str(&body_str) {
+        Ok(v) => v,
+        Err(e) => {
+            safe_eprintln!("[perm-server] Failed to parse permission request body: {}", e);
+            serde_json::Value::default()
+        }
+    };
 
     // Look up session
     let session_id = sessions
@@ -434,78 +456,117 @@ fn handle_connection(
         .unwrap_or_default();
 
     if session_id.is_empty() {
-        // Unknown token — deny by default (fail-closed)
-        let resp = serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "deny",
-                    "message": "Unknown session — denied for safety"
+        // Unknown token — fail-closed
+        if event_name == "PermissionRequest" {
+            let resp = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "Unknown session — denied for safety"
+                    }
                 }
-            }
-        });
-        send_http(&mut stream, 200, &resp.to_string());
+            });
+            send_http(&mut stream, 200, &resp.to_string());
+        } else {
+            send_http(&mut stream, 200, r#"{}"#);
+        }
         return Ok(());
     }
 
-    let request_id = next_id();
-    safe_eprintln!(
-        "[perm-server] Permission request {} for {} in session {}: {}",
-        request_id, tool_name, &session_id[..session_id.len().min(8)], tool_name
-    );
+    match event_name {
+        "PermissionRequest" => {
+            let tool_name = parsed["tool_name"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let tool_input = parsed["tool_input"].clone();
 
-    // Create channel and store sender
-    let (tx, rx) = mpsc::sync_channel(1);
-    pending.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), tx);
+            let request_id = next_id();
+            safe_eprintln!(
+                "[perm-server] Permission request {} for {} in session {}: {}",
+                request_id, tool_name, &session_id[..session_id.len().min(8)], tool_name
+            );
 
-    // Emit to frontend
-    let _ = app_handle.emit(
-        "permission-request",
-        serde_json::json!({
-            "request_id": request_id,
-            "session_id": session_id,
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-        }),
-    );
+            let (tx, rx) = mpsc::sync_channel(1);
+            pending.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), tx);
 
-    // Wait for decision (5 minute timeout)
-    // Remove read timeout so the connection stays open
-    stream.set_read_timeout(None).ok();
+            let _ = app_handle.emit(
+                "permission-request",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                }),
+            );
 
-    let (allow, reason) = match rx.recv_timeout(Duration::from_secs(300)) {
-        Ok(decision) => decision,
-        Err(_) => {
-            pending.lock().map_err(|e| e.to_string())?.remove(&request_id);
-            safe_eprintln!("[perm-server] Timeout for request {}", request_id);
-            (false, "Permission request timed out".to_string())
+            // Remove read timeout so the connection stays open for the 5-min decision window
+            stream.set_read_timeout(None).ok();
+
+            let (allow, reason) = match rx.recv_timeout(Duration::from_secs(300)) {
+                Ok(decision) => decision,
+                Err(_) => {
+                    pending.lock().map_err(|e| e.to_string())?.remove(&request_id);
+                    safe_eprintln!("[perm-server] Timeout for request {}", request_id);
+                    (false, "Permission request timed out".to_string())
+                }
+            };
+
+            let decision = if allow { "allow" } else { "deny" };
+            safe_eprintln!("[perm-server] Resolved {}: {}", request_id, decision);
+
+            let resp = if allow {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": {
+                            "behavior": "allow"
+                        }
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": {
+                            "behavior": "deny",
+                            "message": reason
+                        }
+                    }
+                })
+            };
+            send_http(&mut stream, 200, &resp.to_string());
         }
-    };
+        "PreToolUse" | "PostToolUse" | "Stop" | "SubagentStart" | "SubagentStop"
+        | "Notification" | "PreCompact" | "PostCompact" | "SessionStart" | "SessionEnd" => {
+            // Non-blocking hook events: emit Tauri event and respond immediately
+            let hook_event = HookEvent {
+                session_id: session_id.clone(),
+                event_name: event_name.to_string(),
+                payload: parsed.clone(),
+            };
 
-    let decision = if allow { "allow" } else { "deny" };
-    safe_eprintln!("[perm-server] Resolved {}: {}", request_id, decision);
+            // Emit event-specific Tauri event: claude-hook-{EventName}
+            // Session ID is in the payload — listeners filter by it
+            let specific_event = format!("claude-hook-{}", event_name);
+            let _ = app_handle.emit(&specific_event, &hook_event);
+            // Also emit generic event for catch-all listeners
+            let _ = app_handle.emit("claude-hook-event", &hook_event);
 
-    let resp = if allow {
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "allow"
-                }
-            }
-        })
-    } else {
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "deny",
-                    "message": reason
-                }
-            }
-        })
-    };
-    send_http(&mut stream, 200, &resp.to_string());
+            safe_eprintln!(
+                "[perm-server] Hook event {} for session {}",
+                event_name,
+                &session_id[..session_id.len().min(8)]
+            );
+
+            send_http(&mut stream, 200, r#"{}"#);
+        }
+        _ => {
+            safe_eprintln!("[perm-server] Unknown hook event: {}", event_name);
+            send_http(&mut stream, 200, r#"{}"#);
+        }
+    }
 
     Ok(())
 }

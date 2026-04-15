@@ -1,8 +1,10 @@
 import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useClaudeStore } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { cancelClaude, sendClaudePrompt, cleanupDelegationGroup, clearT64DelegationEnv } from "../lib/tauriApi";
+import type { ChatMessage, ToolCall, HookEventPayload } from "../lib/types";
 
 const FORWARDING_PREFIX = "[Update from";
 const MAX_SUMMARY_LENGTH = 800;
@@ -32,6 +34,9 @@ function closeSharedChatPanel(groupId: string) {
 
 export function useDelegationOrchestrator() {
   useEffect(() => {
+    let cancelled = false;
+    const hookUnlistens: (() => void)[] = [];
+
     const unsub = useClaudeStore.subscribe((state, prev) => {
       for (const [sid, session] of Object.entries(state.sessions)) {
         const prevSession = prev.sessions[sid];
@@ -72,8 +77,42 @@ export function useDelegationOrchestrator() {
       }
     });
 
+    // Use SubagentStop hook events as an additional completion signal for delegation children.
+    // When a delegation child's last subagent stops, treat it as a turn-complete hint.
+    (async () => {
+      const fnStop = await listen<HookEventPayload>("claude-hook-SubagentStop", (event) => {
+        if (cancelled) return;
+        const { session_id } = event.payload;
+        const delStore = useDelegationStore.getState();
+        const group = delStore.getGroupForSession(session_id);
+        if (!group || group.status !== "active") return;
+
+        // If this child has no more active subagents and isn't streaming, check for completion
+        const session = useClaudeStore.getState().sessions[session_id];
+        if (session && !session.isStreaming && session.subagentIds.length === 0) {
+          handleTurnComplete(session_id);
+        }
+      });
+      if (cancelled) { fnStop(); return; }
+      hookUnlistens.push(fnStop);
+
+      // SubagentStart: cancel idle timers — child is spawning subagents, don't time it out
+      const fnStart = await listen<HookEventPayload>("claude-hook-SubagentStart", (event) => {
+        if (cancelled) return;
+        const { session_id } = event.payload;
+        const delStore = useDelegationStore.getState();
+        if (delStore.getGroupForSession(session_id)) {
+          clearIdleTimer(session_id);
+        }
+      });
+      if (cancelled) { fnStart(); return; }
+      hookUnlistens.push(fnStart);
+    })();
+
     return () => {
+      cancelled = true;
       unsub();
+      for (const u of hookUnlistens) u();
       // Clean up timers on unmount
       for (const timer of idleTimers.values()) clearTimeout(timer);
       idleTimers.clear();
@@ -116,7 +155,7 @@ function handleTurnComplete(sessionId: string) {
   // Determine result — prefer report_done summary, fall back to last message content
   const resultText = reportDoneSummary
     || lastAssistant?.content
-    || summarizeToolCalls(lastAssistant)
+    || (lastAssistant ? summarizeToolCalls(lastAssistant) : "")
     || "";
 
   // report_done is the ONLY hard completion signal — no text-based phrase guessing.
@@ -131,7 +170,6 @@ function handleTurnComplete(sessionId: string) {
     scheduleIdleCompletion(sessionId, group.id, task.id, resultText);
   }
 
-  // Check if all tasks are complete → merge
   checkAndMerge(group.id);
 }
 
@@ -143,7 +181,6 @@ function markComplete(groupId: string, taskId: string, sessionId: string, summar
 }
 
 function scheduleIdleCompletion(sessionId: string, groupId: string, taskId: string, fallbackText: string) {
-  // Clear any existing timer for this session
   const existing = idleTimers.get(sessionId);
   if (existing) clearTimeout(existing);
 
@@ -156,9 +193,10 @@ function scheduleIdleCompletion(sessionId: string, groupId: string, taskId: stri
     const task = group.tasks.find((t) => t.id === taskId);
     if (!task || task.status !== "running") return;
 
-    // Check if agent restarted streaming (e.g. got a follow-up prompt)
+    // Check if agent restarted streaming or has active subagents
     const session = useClaudeStore.getState().sessions[sessionId];
     if (session?.isStreaming) return; // Still working — don't interrupt
+    if (session?.subagentIds.length) return; // Has active subagents — wait for them
 
     // Agent has been idle for IDLE_TIMEOUT_MS — mark as complete
     const summary = fallbackText.slice(0, MAX_SUMMARY_LENGTH * 2) || "(agent completed without explicit summary)";
@@ -171,7 +209,7 @@ function scheduleIdleCompletion(sessionId: string, groupId: string, taskId: stri
 
 /** Scan messages for a report_done tool call and extract its summary arg.
  *  MCP tools are prefixed: mcp__terminal-64__report_done */
-function extractReportDone(msgs: any[]): string | null {
+function extractReportDone(msgs: ChatMessage[]): string | null {
   for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 5); i--) {
     const msg = msgs[i];
     if (msg.role === "assistant" && msg.toolCalls) {
@@ -186,9 +224,9 @@ function extractReportDone(msgs: any[]): string | null {
 }
 
 /** Build a summary from tool calls when there's no text content. */
-function summarizeToolCalls(msg: any): string {
+function summarizeToolCalls(msg: ChatMessage): string {
   if (!msg?.toolCalls?.length) return "";
-  const actions = msg.toolCalls.map((tc: any) => {
+  const actions = msg.toolCalls.map((tc: ToolCall) => {
     const detail = tc.input?.file_path || tc.input?.command || tc.input?.pattern || "";
     return `${tc.name}${detail ? ` ${String(detail).split(/[/\\]/).pop()?.slice(0, 50)}` : ""}`;
   });

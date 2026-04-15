@@ -102,8 +102,8 @@ export default function TextEditor({ onSend, onClose }: TextEditorProps) {
         setHistory((h) => [...h.slice(0, idx + 1), result]);
         return idx + 1;
       });
-    } catch (err: any) {
-      setError(err.message || "Rewrite failed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rewrite failed");
       setText(original);
     } finally {
       setRewriting(false);

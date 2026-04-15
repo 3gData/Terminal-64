@@ -28,14 +28,18 @@ function loadCustomThemes(): ThemeDefinition[] {
   try {
     const raw = localStorage.getItem(CUSTOM_THEMES_KEY);
     if (raw) return JSON.parse(raw);
-  } catch {}
+  } catch (e) {
+    console.warn("[theme] Failed to load custom themes:", e);
+  }
   return [];
 }
 
 function persistCustomThemes(themes: ThemeDefinition[]) {
   try {
     localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
-  } catch {}
+  } catch (e) {
+    console.warn("[theme] Failed to persist custom themes:", e);
+  }
 }
 
 const customThemes = loadCustomThemes();
@@ -51,14 +55,18 @@ function loadSavedTheme(): { themeName: string; theme: ThemeDefinition; bgAlpha:
         return { themeName: saved.themeName, theme, bgAlpha: saved.bgAlpha ?? 1 };
       }
     }
-  } catch {}
+  } catch (e) {
+    console.warn("[theme] Failed to load saved theme:", e);
+  }
   return { themeName: "Catppuccin Mocha", theme: catppuccinMocha as ThemeDefinition, bgAlpha: 1 };
 }
 
 function persistTheme(themeName: string, bgAlpha: number) {
   try {
     localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify({ themeName, bgAlpha }));
-  } catch {}
+  } catch (e) {
+    console.warn("[theme] Failed to persist theme:", e);
+  }
 }
 
 interface ThemeState {

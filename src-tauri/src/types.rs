@@ -108,3 +108,74 @@ pub struct SpectrumData {
     pub mid: f32,         // average of mid bands
     pub treble: f32,      // average of high bands
 }
+
+// Session history types (used by list_disk_sessions / load_session_history commands)
+
+#[derive(Serialize)]
+pub struct DiskSession {
+    pub id: String,
+    pub modified: u64,
+    pub size: u64,
+    pub summary: String,
+}
+
+#[derive(Serialize)]
+pub struct HistoryToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+#[derive(Serialize)]
+pub struct HistoryMessage {
+    pub id: String,
+    pub role: String,  // "user" or "assistant"
+    pub content: String,
+    pub timestamp: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<HistoryToolCall>>,
+}
+
+// Skill resolution type (used by resolve_skill_prompt command)
+
+#[derive(Serialize)]
+pub struct ResolvedSkill {
+    pub name: String,
+    pub body: String,
+    pub allowed_tools: Vec<String>,
+    pub skill_dir: String,
+}
+
+// Proxy fetch type (used by proxy_fetch command)
+
+#[derive(Serialize)]
+pub struct ProxyFetchResponse {
+    pub status: u16,
+    pub ok: bool,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body: String,
+    pub is_base64: bool,
+}
+
+// Checkpoint type (used by create_checkpoint command)
+
+#[derive(Deserialize)]
+pub struct FileSnapshot {
+    pub path: String,
+    pub content: String,
+}
+
+// Hook lifecycle event types (emitted to frontend via Tauri events)
+
+/// Generic hook event wrapper — emitted for all non-PermissionRequest hook events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookEvent {
+    pub session_id: String,
+    pub event_name: String,
+    pub payload: serde_json::Value,
+}
+

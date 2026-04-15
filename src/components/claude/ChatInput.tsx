@@ -125,7 +125,6 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     return () => clearInterval(id);
   }, [isStreaming, streamingStartedAt]);
 
-  // Handle pre-filled text from rewind
   useEffect(() => {
     if (initialText) {
       setTextDirect(initialText);
@@ -221,7 +220,6 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     const el = textareaRef.current;
     if (el) {
       const val = el.value;
-      // Remove the @file mention from text
       const mention = "@" + file;
       const idx = val.indexOf(mention);
       if (idx >= 0) {
@@ -371,8 +369,8 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         return;
       }
 
-      // Atomic deletion of @file mentions
-      if (e.key === "Backspace" && inlineFiles.size > 0) {
+      // Atomic deletion of @file mentions (Backspace: cursor inside or at end; Delete: cursor inside or at start)
+      if ((e.key === "Backspace" || e.key === "Delete") && inlineFiles.size > 0) {
         const el = textareaRef.current;
         if (el && el.selectionStart === el.selectionEnd) {
           const pos = el.selectionStart;
@@ -382,37 +380,10 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
             const idx = val.indexOf(mention);
             if (idx < 0) continue;
             const end = idx + mention.length;
-            if (pos > idx && pos <= end) {
-              e.preventDefault();
-              let removeEnd = end;
-              if (val[removeEnd] === " ") removeEnd++;
-              const newVal = val.slice(0, idx) + val.slice(removeEnd);
-              el.value = newVal;
-              el.selectionStart = el.selectionEnd = idx;
-              textRef.current = newVal;
-              setText(newVal);
-              setInlineFiles((prev) => {
-                const next = new Set(prev);
-                next.delete(file);
-                return next;
-              });
-              return;
-            }
-          }
-        }
-      }
-
-      if (e.key === "Delete" && inlineFiles.size > 0) {
-        const el = textareaRef.current;
-        if (el && el.selectionStart === el.selectionEnd) {
-          const pos = el.selectionStart;
-          const val = el.value;
-          for (const file of inlineFiles) {
-            const mention = "@" + file;
-            const idx = val.indexOf(mention);
-            if (idx < 0) continue;
-            const end = idx + mention.length;
-            if (pos >= idx && pos < end) {
+            const hit = e.key === "Backspace"
+              ? (pos > idx && pos <= end)
+              : (pos >= idx && pos < end);
+            if (hit) {
               e.preventDefault();
               let removeEnd = end;
               if (val[removeEnd] === " ") removeEnd++;
@@ -479,7 +450,6 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
       if (r.start > cursor) {
         parts.push(<span key={`t${cursor}`}>{val.slice(cursor, r.start)}</span>);
       }
-      // Render the exact same text as the textarea for pixel-perfect alignment
       const mentionText = val.slice(r.start, r.end);
       parts.push(
         <span key={`f${r.start}`} className="cc-at-highlight">{mentionText}</span>

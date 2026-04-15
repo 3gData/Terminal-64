@@ -2557,3 +2557,182 @@
   overflow-y: auto;
   font-size: 11px;
 }
+
+/* ---- Hook Activity (ch- prefix) ---- */
+
+.ch-tool-badge {
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  background: var(--bg-tertiary, #181825);
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.ch-compact-badge {
+  font-size: 10px;
+  color: #f9e2af;
+  background: rgba(249, 226, 175, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.ch-log-toggle {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: none;
+  color: var(--fg-muted, #6c7086);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color 0.1s, background 0.1s;
+}
+
+.ch-log-toggle:hover,
+.ch-log-toggle--active {
+  color: var(--fg, #cdd6f4);
+  background: var(--bg-tertiary, #181825);
+}
+
+.ch-log-count {
+  font-size: 9px;
+  background: var(--accent, #89b4fa);
+  color: var(--bg, #1e1e2e);
+  padding: 0 4px;
+  border-radius: 6px;
+  min-width: 14px;
+  text-align: center;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.ch-log-panel {
+  position: absolute;
+  top: 32px;
+  right: 8px;
+  width: 340px;
+  max-height: 320px;
+  background: var(--bg-secondary, #313244);
+  border: 1px solid var(--border, #45475a);
+  border-radius: 10px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: ch-panel-in 0.15s ease;
+}
+
+@keyframes ch-panel-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ch-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, #45475a);
+  flex-shrink: 0;
+}
+
+.ch-log-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg, #cdd6f4);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ch-log-close {
+  background: none;
+  border: none;
+  color: var(--fg-muted, #6c7086);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.ch-log-close:hover {
+  color: var(--fg, #cdd6f4);
+}
+
+.ch-log-body {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px 0;
+}
+
+.ch-log-empty {
+  padding: 20px 12px;
+  text-align: center;
+  color: var(--fg-muted, #6c7086);
+  font-size: 11px;
+}
+
+.ch-log-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  transition: background 0.1s;
+}
+
+.ch-log-entry:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ch-log-time {
+  color: var(--fg-muted, #6c7086);
+  font-size: 10px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-log-type {
+  font-weight: 600;
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(137, 180, 250, 0.12);
+  color: #89b4fa;
+}
+
+.ch-log-entry--pretooluse .ch-log-type { color: #89dceb; background: rgba(137, 220, 235, 0.12); }
+.ch-log-entry--posttooluse .ch-log-type { color: #a6e3a1; background: rgba(166, 227, 161, 0.12); }
+.ch-log-entry--stop .ch-log-type { color: #f38ba8; background: rgba(243, 139, 168, 0.12); }
+.ch-log-entry--subagentstart .ch-log-type { color: #cba6f7; background: rgba(203, 166, 247, 0.12); }
+.ch-log-entry--subagentstop .ch-log-type { color: #cba6f7; background: rgba(203, 166, 247, 0.12); }
+.ch-log-entry--notification .ch-log-type { color: #f9e2af; background: rgba(249, 226, 175, 0.12); }
+.ch-log-entry--precompact .ch-log-type,
+.ch-log-entry--postcompact .ch-log-type { color: #94e2d5; background: rgba(148, 226, 213, 0.12); }
+.ch-log-entry--sessionstart .ch-log-type,
+.ch-log-entry--sessionend .ch-log-type { color: #fab387; background: rgba(250, 179, 135, 0.12); }
+
+.ch-log-detail {
+  color: var(--fg-secondary, #bac2de);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  flex-shrink: 0;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ch-log-msg {
+  color: var(--fg-muted, #6c7086);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}

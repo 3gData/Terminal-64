@@ -4,8 +4,8 @@ import {
   startPartyMode,
   stopPartyMode,
   onPartyModeSpectrum,
-  SpectrumData,
 } from "../lib/tauriApi";
+import type { SpectrumData } from "../lib/types";
 
 // Module-level ref for components that need raw band data (e.g. equalizer)
 // Updated at ~30fps by the spectrum listener — read via requestAnimationFrame
