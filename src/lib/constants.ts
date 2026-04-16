@@ -1,4 +1,5 @@
 import { shellExec } from "./tauriApi";
+import { IS_WIN } from "./platform";
 
 export const BORDER_COLORS = [
   "#3b82f6", "#ef4444", "#22c55e", "#eab308",
@@ -37,10 +38,9 @@ export function formatRelativeTime(ms: number): string {
 /** Open a system folder in the platform file manager.
  *  Accepts paths with $HOME or %USERPROFILE% — they are expanded by the shell. */
 export function openSystemFolder(folderPath: string): void {
-  const isWin = navigator.platform.includes("Win");
-  const resolved = isWin
+  const resolved = IS_WIN
     ? folderPath.replace("$HOME", "%USERPROFILE%").replace(/\//g, "\\")
     : folderPath;
-  const cmd = isWin ? `explorer.exe "${resolved}"` : `open "${resolved}"`;
+  const cmd = IS_WIN ? `explorer.exe "${resolved}"` : `open "${resolved}"`;
   shellExec(cmd).catch(() => {});
 }

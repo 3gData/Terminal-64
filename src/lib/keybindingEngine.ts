@@ -1,4 +1,5 @@
 import { KeyCombo, Keybinding } from "./types";
+import { IS_MAC } from "./platform";
 
 function parseKeyCombo(str: string): KeyCombo {
   const parts = str.toLowerCase().split("+").map((s) => s.trim());
@@ -35,15 +36,14 @@ function matchesKeyCombo(
 ): boolean {
   const key = event.key.toLowerCase();
   const comboKey = combo.key.toLowerCase();
-  const isMac = navigator.platform.includes("Mac");
 
   if (key !== comboKey) return false;
   // On Mac, treat Cmd as Ctrl for keybinding matching
-  const ctrlPressed = isMac ? (event.metaKey || event.ctrlKey) : event.ctrlKey;
+  const ctrlPressed = IS_MAC ? (event.metaKey || event.ctrlKey) : event.ctrlKey;
   if (!!combo.ctrl !== ctrlPressed) return false;
   if (!!combo.shift !== event.shiftKey) return false;
   if (!!combo.alt !== event.altKey) return false;
-  if (!isMac && !!combo.meta !== event.metaKey) return false;
+  if (!IS_MAC && !!combo.meta !== event.metaKey) return false;
 
   return true;
 }

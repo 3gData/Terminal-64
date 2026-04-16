@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { SlashCommand } from "../../lib/types";
 import { searchFiles, readFileBase64 } from "../../lib/tauriApi";
 import { formatDuration } from "../../lib/constants";
+import { isAbsolutePath, joinPath } from "../../lib/platform";
 
 const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 
@@ -99,9 +100,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
   useEffect(() => {
     for (const file of inlineFiles) {
       if (IMAGE_EXTS.test(file) && !imagePreviews[file]) {
-        const isAbs = file.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(file) || file.startsWith("\\\\");
-        const sep = cwd && /[\\]/.test(cwd) && !/[/]/.test(cwd) ? "\\" : "/";
-        const fullPath = cwd ? (isAbs ? file : `${cwd}${sep}${file}`) : file;
+        const fullPath = cwd ? (isAbsolutePath(file) ? file : joinPath(cwd, file)) : file;
         readFileBase64(fullPath).then((b64) => {
           const ext = file.split(".").pop()?.toLowerCase() || "png";
           const mime = ext === "svg" ? "image/svg+xml" : `image/${ext.replace("jpg", "jpeg")}`;

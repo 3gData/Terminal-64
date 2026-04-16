@@ -20,6 +20,7 @@ import { endDelegation } from "../../hooks/useDelegationOrchestrator";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { v4 as uuidv4 } from "uuid";
 import { formatDuration } from "../../lib/constants";
+import { baseName, dirName } from "../../lib/platform";
 import "./ClaudeChat.css";
 
 let monacoThemeForBg = "";
@@ -102,8 +103,8 @@ function RewindPromptDialog({ affectedFiles, toolSummary, onConfirm, onCancel }:
             {filesOpen && (
               <div className="cc-rewind-changelist-rows">
                 {affectedFiles.map(({ path, action, insertions, deletions }) => {
-                  const fileName = path.split("/").pop() || path;
-                  const dir = path.slice(0, path.length - fileName.length).replace(/\/$/, "");
+                  const fileName = baseName(path) || path;
+                  const dir = dirName(path);
                   const meta = REWIND_ACTION_META[action];
                   return (
                     <div key={path} className="cc-rewind-row">
@@ -182,6 +183,8 @@ const MODELS = [
   { id: "sonnet", label: "Sonnet" },
   { id: "opus", label: "Opus" },
   { id: "haiku", label: "Haiku" },
+  { id: "opusplan", label: "Opus Plan" },
+  { id: "claude-opus-4-7", label: "Opus 4.7" },
 ];
 
 const EFFORTS = [
@@ -189,6 +192,7 @@ const EFFORTS = [
   { id: "medium", label: "Med" },
   { id: "high", label: "High" },
   { id: "max", label: "Max" },
+  { id: "xhigh", label: "X-High" },
 ];
 
 const PERMISSION_MODES: { id: PermissionMode; label: string; color: string; desc: string }[] = [
@@ -648,10 +652,13 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
           useClaudeStore.getState().setForkParentSessionId(sessionId, null);
         }
         console.log("[send] Sending prompt:", { started, sessionId, cwd: effectiveCwd, resumeAtUuid, forkParent, promptPreview: prompt.slice(0, 80) });
-        if (forkParent && !started) {
-          // Forked session: use --resume with --fork-session to let CLI handle the fork
+        if (forkParent) {
+          // Forked session's first prompt — use --fork-session so the CLI
+          // creates this session's JSONL from the parent's chain. loadFromDisk
+          // sets hasBeenStarted=true for the hydrated messages, so we can't
+          // rely on !started here; the presence of forkParent is the signal.
           await sendClaudePrompt({ ...req, cwd: effectiveCwd, fork_session: forkParent });
-          console.log("[send] sendClaudePrompt with --fork-session succeeded");
+          console.log("[send] sendClaudePrompt (--fork-session) succeeded");
         } else if (started) {
           try {
             await sendClaudePrompt({ ...req, cwd: effectiveCwd, resume_session_at: resumeAtUuid });

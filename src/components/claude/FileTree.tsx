@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { listDirectory, searchFiles } from "../../lib/tauriApi";
 import { useSemanticSearch } from "../../hooks/useSemanticSearch";
 import type { DirEntry } from "../../lib/types";
+import { joinPath, baseName, isAbsolutePath } from "../../lib/platform";
 
 const CODE_EXTS = new Set([
   "ts", "tsx", "js", "jsx", "rs", "py", "go", "java", "json", "css", "scss",
@@ -87,7 +88,7 @@ function TreeNode({ name, fullPath, isDir, onFileClick, depth }: TreeNodeProps) 
         <TreeNode
           key={child.name}
           name={child.name}
-          fullPath={`${fullPath}/${child.name}`}
+          fullPath={joinPath(fullPath, child.name)}
           isDir={child.is_dir}
           onFileClick={onFileClick}
           depth={depth + 1}
@@ -142,7 +143,7 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
   }, [cwd]);
 
 
-  const dirName = cwd.split(/[/\\]/).pop() || cwd;
+  const dirName = baseName(cwd) || cwd;
 
   return (
     <div className="cft-sidebar" onClick={(e) => e.stopPropagation()}>
@@ -202,8 +203,8 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
             )}
             {semantic.results.map((r) => {
               const relPath = r.source || r.id;
-              const fullPath = relPath.startsWith("/") ? relPath : `${cwd}/${relPath}`;
-              const fileName = relPath.split(/[/\\]/).pop() || r.id;
+              const fullPath = isAbsolutePath(relPath) ? relPath : joinPath(cwd, relPath);
+              const fileName = baseName(relPath) || r.id;
               const code = isCodeFile(fileName);
               return (
                 <div
@@ -227,7 +228,7 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
                   <TreeNode
                     key={entry.name}
                     name={entry.name}
-                    fullPath={`${cwd}/${entry.name}`}
+                    fullPath={joinPath(cwd, entry.name)}
                     isDir={entry.is_dir}
                     onFileClick={onFileClick}
                     depth={0}
@@ -244,8 +245,8 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
                 {searching && <div className="cft-empty">Searching…</div>}
                 {!searching && searchResults.length === 0 && <div className="cft-empty">No results</div>}
                 {searchResults.map((rel) => {
-                  const fullPath = `${cwd}/${rel}`;
-                  const name = rel.split(/[/\\]/).pop() || rel;
+                  const fullPath = joinPath(cwd, rel);
+                  const name = baseName(rel) || rel;
                   const code = isCodeFile(name);
                   return (
                     <div
@@ -269,7 +270,7 @@ export default function FileTree({ cwd, onFileClick, onClose }: FileTreeProps) {
                   <TreeNode
                     key={entry.name}
                     name={entry.name}
-                    fullPath={`${cwd}/${entry.name}`}
+                    fullPath={joinPath(cwd, entry.name)}
                     isDir={entry.is_dir}
                     onFileClick={onFileClick}
                     depth={0}

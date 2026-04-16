@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg", "deb", "appimage", "rpm", "nsis"],
     "resources": {"../mcp/*": "mcp/", "resources/skill-creator/**/*": "skill-creator/", "bundled-widgets/**/*": "bundled-widgets/"},
     "icon": [
       "icons/32x32.png",
@@ -43,11 +43,15 @@
     ],
     "windows": {
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "downloadBootstrapper",
+        "silent": true
       },
+      "allowDowngrades": true,
       "nsis": {
         "installMode": "currentUser",
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "minimumWebview2Version": "110.0.1587.40"
       }
     }
   }

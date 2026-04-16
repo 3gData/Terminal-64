@@ -500,7 +500,31 @@ async fn run_gateway(
                                             .chars()
                                             .filter(|c| !matches!(c, '\0'..='\x1f' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
                                             .collect();
-                                        let filename = if filename.trim().is_empty() || filename == "." || filename == ".." {
+                                        // Windows silently strips trailing dots/spaces from filenames —
+                                        // "CON.txt." becomes "CON.txt", which can cause file open failures
+                                        // and create collisions with sibling files.
+                                        let filename = filename.trim_end_matches(|c: char| c == '.' || c == ' ').to_string();
+                                        // Windows reserves device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) —
+                                        // a file named "CON.png" or just "CON" will fail to open.
+                                        // Match on the stem (part before the first dot) case-insensitively.
+                                        let stem_upper = filename
+                                            .split('.')
+                                            .next()
+                                            .unwrap_or("")
+                                            .to_uppercase();
+                                        let is_reserved = matches!(
+                                            stem_upper.as_str(),
+                                            "CON" | "PRN" | "AUX" | "NUL"
+                                            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
+                                            | "COM6" | "COM7" | "COM8" | "COM9"
+                                            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
+                                            | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+                                        );
+                                        let filename = if filename.trim().is_empty()
+                                            || filename == "."
+                                            || filename == ".."
+                                            || is_reserved
+                                        {
                                             "file".to_string()
                                         } else {
                                             filename

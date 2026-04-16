@@ -233,7 +233,7 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
 
     let full_prompt = format!("{}\n\nRewrite this prompt:\n{}", SYSTEM_PROMPT, prompt);
     let claude_bin = claude_manager::resolve_claude_path();
-    let mut cmd = std::process::Command::new(&claude_bin);
+    let mut cmd = claude_manager::shim_command(&claude_bin);
     cmd.arg("-p").arg(&full_prompt)
         .arg("--output-format").arg("stream-json")
         .arg("--verbose")
@@ -243,12 +243,6 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
@@ -337,7 +331,7 @@ Rules:
 
     let full_prompt = format!("{}\n\nGenerate a theme for: {}", SYSTEM_PROMPT, prompt);
     let claude_bin = claude_manager::resolve_claude_path();
-    let mut cmd = std::process::Command::new(&claude_bin);
+    let mut cmd = claude_manager::shim_command(&claude_bin);
     cmd.arg("-p").arg(&full_prompt)
         .arg("--output-format").arg("stream-json")
         .arg("--verbose")
@@ -347,12 +341,6 @@ Rules:
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
@@ -411,7 +399,7 @@ fn generate_rewind_summary(app_handle: tauri::AppHandle, summary: String) -> Res
 
     let full_prompt = format!("{}\n\nSummarize these changes:\n{}", SYSTEM_PROMPT, summary);
     let claude_bin = claude_manager::resolve_claude_path();
-    let mut cmd = std::process::Command::new(&claude_bin);
+    let mut cmd = claude_manager::shim_command(&claude_bin);
     cmd.arg("-p").arg(&full_prompt)
         .arg("--output-format").arg("stream-json")
         .arg("--verbose")
@@ -421,12 +409,6 @@ fn generate_rewind_summary(app_handle: tauri::AppHandle, summary: String) -> Res
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
@@ -1614,6 +1596,7 @@ fn openwolf_daemon_stop_all() -> Result<(), String> {
     }
     Ok(())
 }
+
 
 /// Read the project-intel widget's saved project cwd, if any.
 /// Used by App.tsx on startup so the daemon tracks the widget's last-used dir.

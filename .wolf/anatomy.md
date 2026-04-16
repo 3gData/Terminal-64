@@ -1,7 +1,7 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-04-15T19:28:19.725Z
-> Files: 136 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-04-16T16:00:00.439Z
+> Files: 137 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ./
 
@@ -42,13 +42,13 @@
 - `build.rs` (~177 tok)
 - `Cargo.toml` — Rust package manifest (~357 tok)
 - `Info.plist` (~127 tok)
-- `tauri.conf.json` — /*": "skill-creator/", "bundled-widgets/**/*": "bundled-widgets/"}, (~316 tok)
+- `tauri.conf.json` — /*": "skill-creator/", "bundled-widgets/**/*": "bundled-widgets/"}, (~426 tok)
 
 ## src-tauri/bundled-widgets/project-intel/
 
-- `index.html` — Project Intelligence (~1417 tok)
-- `main.js` — Project Intelligence Dashboard — main.js (~7938 tok)
-- `styles.css` — Styles: 84 rules, 17 vars, 2 animations (~3322 tok)
+- `index.html` — Project Intelligence (~1332 tok)
+- `main.js` — Project Intelligence Dashboard — main.js (~7475 tok)
+- `styles.css` — Styles: 94 rules, 17 vars, 1 animations (~3659 tok)
 
 ## src-tauri/capabilities/
 
@@ -113,11 +113,11 @@
 
 - `audio_manager.rs` — AudioManager: new, start, stop, is_active (~2789 tok)
 - `browser_manager.rs` — BrowserManager: new, create, navigate, set_bounds + 8 more (~1235 tok)
-- `claude_manager.rs` — ClaudeManager: resolve_claude_path, new, create_session, send_prompt + 1 more (~5812 tok)
-- `discord_bot.rs` — DiscordBot: new, start, stop, is_running + 4 more (~9248 tok)
-- `lib.rs` — Safe stderr logging — never panics if the pipe is broken. (~34532 tok)
+- `claude_manager.rs` — ClaudeManager: resolve_claude_path, shim_command, new, create_session (~6717 tok)
+- `discord_bot.rs` — DiscordBot: new, start, stop, is_running + 4 more (~10130 tok)
+- `lib.rs` — Safe stderr logging — never panics if the pipe is broken. (~38443 tok)
 - `main.rs` — Prevents additional console window on Windows in release, DO NOT REMOVE!! (~51 tok)
-- `permission_server.rs` — All Claude Code lifecycle hook events to register for each session. (~6457 tok)
+- `permission_server.rs` — All Claude Code lifecycle hook events to register for each session. (~6558 tok)
 - `pty_manager.rs` — PtyManager: new, create, write, resize + 1 more (~1667 tok)
 - `types.rs` — [derive(Debug, Clone, Serialize, Deserialize)] (~1382 tok)
 - `vector_store.rs` — Tables that the vector store manages. (~3282 tok)
@@ -126,7 +126,7 @@
 ## src/
 
 - `App.css` — Styles: 61 rules, 6 vars, 3 animations (~2828 tok)
-- `App.tsx` — appWindow — uses useState, useRef, useEffect (~5691 tok)
+- `App.tsx` — appWindow — uses useState, useRef, useEffect (~5769 tok)
 - `main.tsx` (~40 tok)
 - `vite-env.d.ts` — / <reference types="vite/client" /> (~11 tok)
 
@@ -136,8 +136,8 @@
 - `Canvas.tsx` — Safari/WebKit gesture events (non-standard, not in lib.dom.d.ts) (~3222 tok)
 - `ClaudeDialog.css` — Styles: 43 rules, 2 animations (~2108 tok)
 - `ClaudeDialog.tsx` — formatSize — uses useState, useEffect (~3934 tok)
-- `FloatingTerminal.css` — Styles: 42 rules, 4 vars (~1618 tok)
-- `FloatingTerminal.tsx` — Block iframes from stealing mouse events during drag/resize (~6276 tok)
+- `FloatingTerminal.css` — Styles: 41 rules, 3 vars (~1605 tok)
+- `FloatingTerminal.tsx` — Block iframes from stealing mouse events during drag/resize (~6522 tok)
 - `PopOutTerminal.css` — Styles: 13 rules, 1 vars (~589 tok)
 - `PopOutTerminal.tsx` — appWindow — uses useState, useCallback, useEffect (~1311 tok)
 - `TextEditor.css` — Styles: 21 rules, 4 vars (~840 tok)
@@ -145,16 +145,16 @@
 
 ## src/components/claude/
 
-- `ChatInput.tsx` — IMAGE_EXTS (~6375 tok)
+- `ChatInput.tsx` — IMAGE_EXTS (~6658 tok)
 - `ChatMessage.tsx` — DELEGATION_BLOCK_RE — renders table — uses useEffect, useState (~7163 tok)
-- `ClaudeChat.css` — Styles: 97 rules, 1 vars, 2 animations (~16419 tok)
-- `ClaudeChat.tsx` — Isolated streaming text component — subscribes only to streamingText, (~24590 tok)
+- `ClaudeChat.css` — Styles: 95 rules (~17524 tok)
+- `ClaudeChat.tsx` — Isolated streaming text component — subscribes only to streamingText, (~28197 tok)
 - `Delegation.css` — Styles: 109 rules, 6 vars, 2 animations (~4775 tok)
 - `DelegationBadge.tsx` — DelegationBadge (~820 tok)
 - `DelegationDialog.tsx` — DelegationDialog — uses useState, useEffect (~1577 tok)
 - `DelegationPanel.tsx` — STATUS_ICONS (~966 tok)
 - `DelegationStatus.tsx` — ElapsedTimer — uses useState, useEffect (~1238 tok)
-- `FileTree.tsx` — CODE_EXTS — uses useState, useCallback, useEffect (~3118 tok)
+- `FileTree.tsx` — CODE_EXTS — uses useState, useCallback, useEffect (~3133 tok)
 - `SharedChat.tsx` — TaskIndicator — uses useEffect (~1419 tok)
 
 ## src/components/command-palette/
@@ -170,29 +170,29 @@
 ## src/components/settings/
 
 - `SettingsPanel.css` — Styles: 61 rules, 1 vars, 3 animations (~2469 tok)
-- `SettingsPanel.tsx` — Toggle — uses useState, useEffect (~6462 tok)
+- `SettingsPanel.tsx` — Toggle — uses useState, useEffect (~6436 tok)
 
 ## src/components/skill/
 
 - `Skill.css` — Styles: 79 rules, 1 vars, 4 animations (~4655 tok)
-- `SkillDialog.tsx` — SKILL_CREATOR_PROMPT — uses useState, useEffect, useMemo (~7834 tok)
+- `SkillDialog.tsx` — SKILL_CREATOR_PROMPT — uses useState, useEffect, useMemo (~7840 tok)
 
 ## src/components/terminal/
 
 - `XTerminal.css` — Styles: 9 rules (~199 tok)
-- `XTerminal.tsx` — Safely decrement the WebGL counter (never goes below 0) (~3253 tok)
+- `XTerminal.tsx` — MAX_WEBGL_CONTEXTS — uses useRef, useCallback, useEffect (~3234 tok)
 
 ## src/components/widget/
 
 - `BrowserPanel.css` — Styles: 12 rules, 1 animations (~576 tok)
 - `BrowserPanel.tsx` — Ensure a URL has a protocol; default to https. (~1973 tok)
 - `Widget.css` — Styles: 57 rules, 5 vars, 3 animations (~2137 tok)
-- `WidgetDialog.tsx` — Remind Claude that theme is reactive — no hardcoded colors. (~5868 tok)
-- `WidgetPanel.tsx` — Build a snapshot of Terminal 64 state that widgets receive on init (~7239 tok)
+- `WidgetDialog.tsx` — Remind Claude that theme is reactive — no hardcoded colors. (~5874 tok)
+- `WidgetPanel.tsx` — Build a snapshot of Terminal 64 state that widgets receive on init (~7673 tok)
 
 ## src/hooks/
 
-- `useClaudeEvents.ts` — Loosely-typed parsed event from the Claude CLI stream-JSON output. (~7461 tok)
+- `useClaudeEvents.ts` — Loosely-typed parsed event from the Claude CLI stream-JSON output. (~7492 tok)
 - `useDelegationOrchestrator.ts` — Scan messages for a report_done tool call and extract its summary arg. (~3789 tok)
 - `useKeybindings.ts` — Exports useKeybindings (~321 tok)
 - `usePartyMode.ts` — Parse a hex color to HSL, returns [h, s, l] with h in degrees, s/l in 0-100 (~1481 tok)
@@ -205,12 +205,13 @@
 - `ai.ts` — Exports rewritePromptStream (~524 tok)
 - `claudeSlashCommands.ts` — Known Claude Code built-in slash commands. (~936 tok)
 - `commands.ts` — Exports registerCommand, executeCommand (~122 tok)
-- `constants.ts` — Format seconds into a compact duration string (e.g. "5s", "2m 15s") (~513 tok)
+- `constants.ts` — Format seconds into a compact duration string (e.g. "5s", "2m 15s") (~510 tok)
 - `fonts.ts` — Exports FONT_OPTIONS, fontStack (~366 tok)
-- `keybindingEngine.ts` — Exports findMatchingBinding, DEFAULT_KEYBINDINGS (~821 tok)
+- `keybindingEngine.ts` — Exports findMatchingBinding, DEFAULT_KEYBINDINGS (~817 tok)
 - `notifications.ts` — Simple in-app toast notification system (~284 tok)
-- `snapUtils.ts` — Exports SnapGuide, computeDragSnap, computeResizeSnap (~2117 tok)
-- `tauriApi.ts` — Read OpenWolf settings from persisted store (avoids circular imports). (~5555 tok)
+- `platform.ts` — Platform detection and cross-platform path helpers for the frontend. (~767 tok)
+- `snapUtils.ts` — Exports SnapGuide, computeDragSnap, computeResizeSnap (~2143 tok)
+- `tauriApi.ts` — Read OpenWolf settings from persisted store (avoids circular imports). (~5977 tok)
 - `themeEngine.ts` — Exports hexToRgba, applyTheme (~450 tok)
 - `types.ts` — Tauri event payload for claude-hook-* events (~1853 tok)
 - `updater.ts` — Exports UpdateInfo, checkForUpdate (~224 tok)
@@ -218,8 +219,8 @@
 
 ## src/stores/
 
-- `canvasStore.ts` — Get the center of the current viewport in canvas-space coordinates. (~4804 tok)
-- `claudeStore.ts` — Exports STORAGE_KEY, ClaudeTask, QuestionOption, PendingQuestionItem + 7 more (~7962 tok)
+- `canvasStore.ts` — Get the center of the current viewport in canvas-space coordinates. (~4813 tok)
+- `claudeStore.ts` — Exports STORAGE_KEY, ClaudeTask, QuestionOption, PendingQuestionItem + 7 more (~8021 tok)
 - `delegationStore.ts` — Exports useDelegationStore (~2126 tok)
 - `settingsStore.ts` — Exports QuickPaste, useSettingsStore (~1033 tok)
 - `themeStore.ts` — Exports useThemeStore (~1177 tok)

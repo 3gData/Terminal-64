@@ -21,6 +21,7 @@ import {
   SpectrumData,
   VectorSearchResult,
 } from "./types";
+import { joinPath } from "./platform";
 
 // PTY terminal commands
 
@@ -264,8 +265,8 @@ export async function setT64DelegationEnv(
 ): Promise<void> {
   const appDir = await getAppDir();
   const nodePath = await getNodePath();
-  const scriptPath = `${appDir}/mcp/t64-server.mjs`;
-  const mcpPath = `${cwd}/.mcp.json`;
+  const scriptPath = joinPath(appDir, "mcp", "t64-server.mjs");
+  const mcpPath = joinPath(cwd, ".mcp.json");
 
   console.log("[delegation] setT64DelegationEnv:", { cwd, mcpPath, scriptPath, nodePath, delegationPort, groupId });
 
@@ -312,8 +313,8 @@ export async function setT64DelegationEnv(
 export async function clearT64DelegationEnv(cwd: string): Promise<void> {
   const appDir = await getAppDir();
   const nodePath = await getNodePath();
-  const scriptPath = `${appDir}/mcp/t64-server.mjs`;
-  const mcpPath = `${cwd}/.mcp.json`;
+  const scriptPath = joinPath(appDir, "mcp", "t64-server.mjs");
+  const mcpPath = joinPath(cwd, ".mcp.json");
 
   const config: Record<string, any> = {};
   try {

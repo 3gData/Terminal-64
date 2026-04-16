@@ -6,9 +6,11 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
 pub fn resolve_claude_path() -> String {
-    // Try the platform-appropriate PATH lookup (GUI apps often have a limited PATH)
+    // Try the platform-appropriate PATH lookup (GUI apps often have a limited PATH).
+    // On Windows, pass the bare name (no extension) so `where` respects PATHEXT
+    // and finds `.cmd`/`.bat` shims (npm-installed claude is usually a .cmd).
     let lookup = {
-        let (cmd, arg) = if cfg!(windows) { ("where", "claude.exe") } else { ("which", "claude") };
+        let (cmd, arg) = if cfg!(windows) { ("where", "claude") } else { ("which", "claude") };
         let mut c = std::process::Command::new(cmd);
         c.arg(arg)
             .stdout(Stdio::piped())
@@ -61,7 +63,12 @@ pub fn resolve_claude_path() -> String {
     for c in &candidates {
         if std::path::Path::new(c).exists() { return c.clone(); }
     }
-    "claude".to_string()
+    // On Windows, bare "claude" won't resolve via PATHEXT through Command::new,
+    // so prefer ".cmd" (the npm shim form) as the last-resort name.
+    #[cfg(target_os = "windows")]
+    return "claude.cmd".to_string();
+    #[cfg(not(target_os = "windows"))]
+    return "claude".to_string();
 }
 
 struct ClaudeInstance {
@@ -75,6 +82,25 @@ use std::sync::Arc;
 
 pub struct ClaudeManager {
     instances: Arc<Mutex<HashMap<String, ClaudeInstance>>>,
+}
+
+/// Build a Command for a binary path that may be a Windows .cmd/.bat shim.
+/// On Windows, wraps in `cmd /C` so PATHEXT-style resolution works and arg
+/// escaping flows through cmd.exe's parser (CREATE_NO_WINDOW suppresses the
+/// console flash). On Unix, returns a plain Command.
+pub fn shim_command(bin: &str) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(bin);
+        c.creation_flags(0x08000000);
+        c
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new(bin)
+    }
 }
 
 fn build_command(
@@ -96,7 +122,7 @@ fn build_command(
     fork_session: &Option<String>,
 ) -> Command {
     let claude_bin = resolve_claude_path();
-    let mut cmd = Command::new(&claude_bin);
+    let mut cmd = shim_command(&claude_bin);
     cmd.arg("--print")
         .arg("--output-format").arg("stream-json")
         .arg("--verbose")
@@ -163,12 +189,6 @@ fn build_command(
     cmd.arg("--").arg(prompt);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
 
     cmd
 }
@@ -372,8 +392,9 @@ pub fn openwolf_env_path() -> String {
 }
 
 fn resolve_openwolf_path_inner() -> String {
+    // Bare name on Windows so `where` uses PATHEXT to find .cmd shims.
     let lookup = {
-        let (cmd, arg) = if cfg!(windows) { ("where", "openwolf.exe") } else { ("which", "openwolf") };
+        let (cmd, arg) = if cfg!(windows) { ("where", "openwolf") } else { ("which", "openwolf") };
         let mut c = std::process::Command::new(cmd);
         c.arg(arg)
             .stdout(Stdio::piped())
@@ -466,19 +487,13 @@ pub fn ensure_openwolf(cwd: &str, auto_init: bool) -> bool {
 
     safe_eprintln!("[openwolf] .wolf/ not found in {} — running init", cwd);
     let wolf_bin = resolve_openwolf_path();
-    let mut cmd = Command::new(&wolf_bin);
+    let mut cmd = shim_command(&wolf_bin);
     cmd.arg("init")
         .current_dir(cwd)
         .env("PATH", openwolf_env_path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
 
     match cmd.output() {
         Ok(output) => {

@@ -11,6 +11,7 @@ import {
 } from "../../lib/tauriApi";
 import { useThemeStore } from "../../stores/themeStore";
 import { hexToRgba } from "../../lib/themeEngine";
+import { IS_MAC } from "../../lib/platform";
 import "@xterm/xterm/css/xterm.css";
 import "./XTerminal.css";
 
@@ -211,8 +212,7 @@ export default function XTerminal({
     };
     xtermTA?.addEventListener("paste", killPaste, true);
 
-    const isMac = navigator.platform.includes("Mac");
-    const mod = (e: KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+    const mod = (e: KeyboardEvent) => (IS_MAC ? e.metaKey : e.ctrlKey);
 
     term.attachCustomKeyEventHandler((event) => {
       // Ctrl/Cmd+Shift combos → bubble up for app keybindings
@@ -249,11 +249,11 @@ export default function XTerminal({
       // Ctrl+Backspace (Windows) / Option+Backspace (Mac): delete word
       if (
         (event.ctrlKey && event.key === "Backspace") ||
-        (isMac && event.altKey && event.key === "Backspace")
+        (IS_MAC && event.altKey && event.key === "Backspace")
       ) {
         writeTerminal(
           terminalId,
-          isMac ? "\x17" : "\x08" // Mac shells use \x17 (Ctrl+W), Windows ConPTY uses \x08
+          IS_MAC ? "\x17" : "\x08" // Mac shells use \x17 (Ctrl+W), Windows ConPTY uses \x08
         ).catch(() => {});
         return false;
       }
