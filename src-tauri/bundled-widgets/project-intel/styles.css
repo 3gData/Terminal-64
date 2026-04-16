@@ -107,6 +107,48 @@ body {
   flex-shrink: 0;
 }
 
+/* ---- Daemon status pill ---- */
+
+.pi-daemon-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--pi-border);
+  background: var(--pi-bg-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color var(--pi-transition), border-color var(--pi-transition);
+}
+
+.pi-daemon-status .pi-daemon-dot {
+  font-size: 8px;
+  line-height: 1;
+}
+
+.pi-daemon-status[data-status="online"] {
+  color: var(--pi-green);
+  border-color: rgba(166, 227, 161, 0.4);
+}
+
+.pi-daemon-status[data-status="errored"] {
+  color: var(--pi-red);
+  border-color: rgba(243, 139, 168, 0.4);
+}
+
+.pi-daemon-status[data-status="switching"] {
+  color: var(--pi-yellow);
+  border-color: rgba(249, 226, 175, 0.4);
+}
+
+.pi-daemon-status[data-status="stopped"],
+.pi-daemon-status[data-status="unknown"] {
+  color: var(--pi-fg-muted);
+}
+
 /* ---- Buttons ---- */
 
 .pi-btn {

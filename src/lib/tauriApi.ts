@@ -545,6 +545,36 @@ export async function openwolfDaemonStatus(): Promise<boolean> {
   return invoke("openwolf_daemon_status");
 }
 
+export interface OpenWolfDaemonInfo {
+  running: boolean;
+  name: string | null;
+  cwd: string | null;
+  pid: number | null;
+  uptime_ms: number | null;
+  memory: number | null;
+  cpu: number | null;
+  restarts: number | null;
+  status: string | null;
+}
+
+/** Stop all openwolf daemons and start a new one in the given cwd. */
+export async function openwolfDaemonSwitch(cwd: string): Promise<void> {
+  return invoke("openwolf_daemon_switch", { cwd });
+}
+
+export async function openwolfDaemonInfo(): Promise<OpenWolfDaemonInfo> {
+  return invoke("openwolf_daemon_info");
+}
+
+export async function openwolfDaemonStopAll(): Promise<void> {
+  return invoke("openwolf_daemon_stop_all");
+}
+
+/** Returns the project-intel widget's saved project cwd (or null). */
+export async function openwolfProjectCwd(): Promise<string | null> {
+  return invoke("openwolf_project_cwd");
+}
+
 // Image paste commands
 
 export async function savePastedImage(base64Data: string, extension: string): Promise<string> {

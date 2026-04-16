@@ -72,11 +72,35 @@ function subscribe(topic) {
   post("t64:subscribe", { topic });
 }
 
+// OpenWolf daemon bridge
+function switchDaemon(cwd) {
+  return request("t64:openwolf:switch", { cwd }, "t64:openwolf:switched").then(r => {
+    if (r.error) throw new Error(r.error);
+    return r;
+  });
+}
+
+function daemonInfo() {
+  return request("t64:openwolf:info", {}, "t64:openwolf:info-result").then(r => {
+    if (r.error) throw new Error(r.error);
+    return r.info;
+  });
+}
+
+function stopDaemon() {
+  return request("t64:openwolf:stop", {}, "t64:openwolf:stopped").then(r => {
+    if (r.error) throw new Error(r.error);
+    return r;
+  });
+}
+
 // ---- State ----
 
 let activePanel = "anatomy";
 let themeColors = {};
 let projectCwd = ".";
+let daemonPollTimer = null;
+let lastDaemonInfo = null;
 
 // Data caches
 let anatomyData = null;
@@ -118,6 +142,7 @@ window.addEventListener("message", (e) => {
         updateProjectDisplay();
         setState("pi-project-cwd", projectCwd).catch(() => {});
         loadAllPanels();
+        syncDaemonToProject();
       }
       break;
     }
@@ -133,6 +158,94 @@ async function loadSavedProject() {
   } catch {}
   updateProjectDisplay();
   loadAllPanels();
+  syncDaemonToProject();
+  startDaemonPolling();
+}
+
+/** Switch daemon to projectCwd, but only if it's not already running there. */
+async function syncDaemonToProject() {
+  if (!projectCwd || projectCwd === ".") return;
+  try {
+    const info = await daemonInfo();
+    if (info && info.running && info.cwd === projectCwd) {
+      lastDaemonInfo = info;
+      renderDaemonStatus();
+      return;
+    }
+    renderDaemonStatus({ status: "switching" });
+    await switchDaemon(projectCwd);
+    lastDaemonInfo = await daemonInfo();
+    renderDaemonStatus();
+  } catch (err) {
+    renderDaemonStatus({ status: "errored", error: String(err.message || err) });
+  }
+}
+
+function startDaemonPolling() {
+  if (daemonPollTimer) clearInterval(daemonPollTimer);
+  daemonPollTimer = setInterval(async () => {
+    try {
+      lastDaemonInfo = await daemonInfo();
+      renderDaemonStatus();
+    } catch {
+      renderDaemonStatus({ status: "unknown" });
+    }
+  }, 5000);
+}
+
+function formatUptime(ms) {
+  if (!ms || ms < 0) return "";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+function formatBytes(b) {
+  if (!b) return "";
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderDaemonStatus(override) {
+  const el = document.getElementById("daemonStatus");
+  if (!el) return;
+  const info = override || lastDaemonInfo;
+  const status = override?.status || (info?.running ? "online" : (info?.status || "stopped"));
+
+  let icon = "\u25CF";
+  let label = "Daemon: stopped";
+  let title = "OpenWolf daemon is not running";
+
+  if (status === "online") {
+    label = `Daemon: online`;
+    const uptime = formatUptime(info?.uptime_ms);
+    const mem = formatBytes(info?.memory);
+    title = [
+      info?.name && `pm2: ${info.name}`,
+      info?.pid && `pid: ${info.pid}`,
+      uptime && `up ${uptime}`,
+      mem && `mem ${mem}`,
+      info?.restarts != null && `restarts: ${info.restarts}`,
+    ].filter(Boolean).join(" \u2022 ");
+  } else if (status === "errored") {
+    label = "Daemon: errored";
+    title = override?.error || info?.status || "pm2 process errored";
+  } else if (status === "switching") {
+    label = "Daemon: switching\u2026";
+    title = "Restarting daemon for new project directory";
+  } else if (status === "unknown") {
+    label = "Daemon: \u2014";
+    title = "Unable to reach pm2";
+  }
+
+  el.dataset.status = status;
+  el.title = title;
+  el.innerHTML = `<span class="pi-daemon-dot">${icon}</span><span class="pi-daemon-label">${label}</span>`;
 }
 
 function updateProjectDisplay() {

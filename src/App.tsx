@@ -20,7 +20,7 @@ import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, startOpenwolfDaemon, installBundledWidget } from "./lib/tauriApi";
+import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
 import { Toast, subscribeToasts, dismissToast, pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
 import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
@@ -134,13 +134,20 @@ function App() {
         discordCleanupOrphaned().catch(() => {});
       }).catch(() => {});
     }
-    // Auto-start OpenWolf daemon if enabled — find a CWD from saved sessions
+    // Auto-start OpenWolf daemon if enabled. Prefer the project-intel widget's
+    // saved project dir (since only one daemon can run at a time — port 18791).
+    // Fall back to any Claude session's cwd.
     if (saved.openwolfEnabled && saved.openwolfDaemon) {
-      const claudeSessions = useClaudeStore.getState().sessions;
-      const sessionWithCwd = Object.values(claudeSessions).find((s) => s.cwd);
-      if (sessionWithCwd?.cwd) {
-        startOpenwolfDaemon(sessionWithCwd.cwd).catch(() => {});
-      }
+      openwolfProjectCwd()
+        .then((widgetCwd) => {
+          let cwd = widgetCwd;
+          if (!cwd) {
+            const claudeSessions = useClaudeStore.getState().sessions;
+            cwd = Object.values(claudeSessions).find((s) => s.cwd)?.cwd ?? null;
+          }
+          if (cwd) openwolfDaemonSwitch(cwd).catch(() => {});
+        })
+        .catch(() => {});
     }
   }, []);
 

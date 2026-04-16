@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { getWidgetServerPort, widgetFileModified, widgetGetState, widgetSetState, widgetClearState, proxyFetch, createBrowser, setBrowserBounds, setBrowserZoom, setBrowserVisible, closeBrowser, navigateBrowser, browserEval, shellExec, readFile, writeFile, listDirectory, searchFiles, deleteFiles, createTerminal, closeTerminal, writeTerminal, createClaudeSession, sendClaudePrompt, onTerminalOutput } from "../../lib/tauriApi";
+import { getWidgetServerPort, widgetFileModified, widgetGetState, widgetSetState, widgetClearState, proxyFetch, createBrowser, setBrowserBounds, setBrowserZoom, setBrowserVisible, closeBrowser, navigateBrowser, browserEval, shellExec, readFile, writeFile, listDirectory, searchFiles, deleteFiles, createTerminal, closeTerminal, writeTerminal, createClaudeSession, sendClaudePrompt, onTerminalOutput, openwolfDaemonSwitch, openwolfDaemonInfo, openwolfDaemonStopAll } from "../../lib/tauriApi";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { pushToast } from "../../lib/notifications";
 import { useClaudeStore, ClaudeSession } from "../../stores/claudeStore";
@@ -565,6 +565,36 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           if (!title || typeof title !== "string") return;
           pushToast(title.slice(0, 256), notifBody ? String(notifBody).slice(0, 1024) : undefined);
           post({ type: "t64:notify-result", payload: { id: nId, error: null } });
+          return;
+        }
+
+        // ---- OpenWolf daemon control ----
+
+        case "t64:openwolf:switch": {
+          const { cwd: owCwd, id: owSwId } = msg.payload || {};
+          if (!owCwd || typeof owCwd !== "string") {
+            post({ type: "t64:openwolf:switched", payload: { id: owSwId, error: "cwd required" } });
+            return;
+          }
+          openwolfDaemonSwitch(owCwd)
+            .then(() => post({ type: "t64:openwolf:switched", payload: { id: owSwId, cwd: owCwd, error: null } }))
+            .catch((err) => post({ type: "t64:openwolf:switched", payload: { id: owSwId, cwd: owCwd, error: String(err) } }));
+          return;
+        }
+
+        case "t64:openwolf:info": {
+          const { id: owInfoId } = msg.payload || {};
+          openwolfDaemonInfo()
+            .then((info) => post({ type: "t64:openwolf:info-result", payload: { id: owInfoId, info, error: null } }))
+            .catch((err) => post({ type: "t64:openwolf:info-result", payload: { id: owInfoId, info: null, error: String(err) } }));
+          return;
+        }
+
+        case "t64:openwolf:stop": {
+          const { id: owStopId } = msg.payload || {};
+          openwolfDaemonStopAll()
+            .then(() => post({ type: "t64:openwolf:stopped", payload: { id: owStopId, error: null } }))
+            .catch((err) => post({ type: "t64:openwolf:stopped", payload: { id: owStopId, error: String(err) } }));
           return;
         }
 

@@ -15,3 +15,4 @@
 | 14:20 | rewrote streaming beam to use offset-path traveling dot + opacity fade-out | ClaudeChat.css, ChatInput.tsx | clean | ~800 |
 | 14:44 | replaced beam dots with SVG rect + stroke-dashoffset (3-layer glow/mid/core) | ChatInput.tsx, ClaudeChat.css | clean | ~1200 |
 | 15:22 | Windows compat pass: fixed 15 Windows bugs (node/openwolf/pm2/git/symlinks/zip-traversal/paths) | lib.rs,claude_manager.rs,discord_bot.rs,tauri.conf.json,ChatInput.tsx,ClaudeChat.tsx,tauriApi.ts | clean typecheck | ~8000 |
+| 17:05 | Tie openwolf daemon to project-intel widget's selected dir + bridge APIs (switch/info/stop) | lib.rs,tauriApi.ts,WidgetPanel.tsx,App.tsx,project-intel/{main.js,index.html,styles.css} | cargo+tsc clean | ~2500 |

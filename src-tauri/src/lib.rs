@@ -1498,6 +1498,142 @@ fn openwolf_daemon_status() -> Result<bool, String> {
     }
 }
 
+/// List all pm2 processes whose name starts with `openwolf-`.
+fn pm2_openwolf_processes() -> Vec<serde_json::Value> {
+    let output = shim_command("pm2")
+        .args(["jlist"])
+        .env("PATH", claude_manager::openwolf_env_path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .output();
+
+    let Ok(o) = output else { return vec![]; };
+    if !o.status.success() { return vec![]; }
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) else { return vec![]; };
+    arr.into_iter()
+        .filter(|p| {
+            p.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.starts_with("openwolf-"))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Delete a single pm2 process by name (removes from list, including errored ones).
+fn pm2_delete(name: &str) {
+    let _ = shim_command("pm2")
+        .args(["delete", name])
+        .env("PATH", claude_manager::openwolf_env_path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .status();
+}
+
+/// Stop all openwolf daemons (online or errored), then start one in the given cwd.
+/// Only one openwolf daemon can run at a time because it listens on a fixed port (18791).
+#[tauri::command]
+fn openwolf_daemon_switch(cwd: String) -> Result<(), String> {
+    for proc in pm2_openwolf_processes() {
+        if let Some(name) = proc.get("name").and_then(|v| v.as_str()) {
+            pm2_delete(name);
+        }
+    }
+    start_openwolf_daemon(cwd)
+}
+
+#[derive(serde::Serialize)]
+struct OpenWolfDaemonInfo {
+    running: bool,
+    name: Option<String>,
+    cwd: Option<String>,
+    pid: Option<i64>,
+    uptime_ms: Option<i64>,
+    memory: Option<u64>,
+    cpu: Option<f64>,
+    restarts: Option<i64>,
+    status: Option<String>,
+}
+
+/// Return detailed info on the openwolf daemon (prefers the online one,
+/// falls back to the most recently-restarted errored one).
+#[tauri::command]
+fn openwolf_daemon_info() -> Result<OpenWolfDaemonInfo, String> {
+    let procs = pm2_openwolf_processes();
+    if procs.is_empty() {
+        return Ok(OpenWolfDaemonInfo {
+            running: false, name: None, cwd: None, pid: None,
+            uptime_ms: None, memory: None, cpu: None, restarts: None, status: None,
+        });
+    }
+
+    let target = procs.iter().find(|p| {
+        p.get("pm2_env").and_then(|e| e.get("status")).and_then(|v| v.as_str()) == Some("online")
+    }).or_else(|| procs.first()).unwrap();
+
+    let env = target.get("pm2_env");
+    let monit = target.get("monit");
+    let status = env.and_then(|e| e.get("status")).and_then(|v| v.as_str()).map(String::from);
+    let running = status.as_deref() == Some("online");
+
+    let uptime_ms = if running {
+        env.and_then(|e| e.get("pm_uptime"))
+            .and_then(|v| v.as_i64())
+            .map(|started| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                (now - started).max(0)
+            })
+    } else { None };
+
+    Ok(OpenWolfDaemonInfo {
+        running,
+        name: target.get("name").and_then(|v| v.as_str()).map(String::from),
+        cwd: env.and_then(|e| e.get("pm_cwd").or_else(|| e.get("cwd"))).and_then(|v| v.as_str()).map(String::from),
+        pid: target.get("pid").and_then(|v| v.as_i64()).filter(|n| *n > 0),
+        uptime_ms,
+        memory: monit.and_then(|m| m.get("memory")).and_then(|v| v.as_u64()),
+        cpu: monit.and_then(|m| m.get("cpu")).and_then(|v| v.as_f64()),
+        restarts: env.and_then(|e| e.get("restart_time")).and_then(|v| v.as_i64()),
+        status,
+    })
+}
+
+/// Stop all openwolf daemons in pm2 (online or errored).
+#[tauri::command]
+fn openwolf_daemon_stop_all() -> Result<(), String> {
+    for proc in pm2_openwolf_processes() {
+        if let Some(name) = proc.get("name").and_then(|v| v.as_str()) {
+            pm2_delete(name);
+        }
+    }
+    Ok(())
+}
+
+/// Read the project-intel widget's saved project cwd, if any.
+/// Used by App.tsx on startup so the daemon tracks the widget's last-used dir.
+#[tauri::command]
+fn openwolf_project_cwd() -> Result<Option<String>, String> {
+    let path = match widget_state_path("project-intel") {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    Ok(json.get("pi-project-cwd").and_then(|v| v.as_str()).map(String::from))
+}
+
 #[tauri::command]
 fn unlink_session_from_discord(
     state: tauri::State<'_, AppState>,
@@ -3174,6 +3310,10 @@ pub fn run() {
             start_openwolf_daemon,
             stop_openwolf_daemon,
             openwolf_daemon_status,
+            openwolf_daemon_switch,
+            openwolf_daemon_info,
+            openwolf_daemon_stop_all,
+            openwolf_project_cwd,
             link_session_to_discord,
             unlink_session_from_discord,
             rename_discord_session,
