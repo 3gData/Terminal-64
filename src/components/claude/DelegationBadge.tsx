@@ -50,7 +50,7 @@ export default function DelegationBadge({ sessionId }: DelegationBadgeProps) {
           cwd: sibSession.cwd || ".",
           prompt: forwardMsg,
           permission_mode: "bypass_all",
-        }).catch((err) => console.warn(`[delegation] Manual forward failed:`, err));
+        }, sibSession.skipOpenwolf).catch((err) => console.warn(`[delegation] Manual forward failed:`, err));
       }
     }
   };

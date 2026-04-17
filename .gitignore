@@ -2,9 +2,32 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+
+# Bundle outputs
 *.exe
 *.msi
+*.dmg
+*.app/
+*.deb
+*.AppImage
+*.rpm
+
+# Editor / OS
 .vscode/
 .DS_Store
 **/.DS_Store
+
+# Secrets / local config
+.env
+.env.local
+.env.*.local
 .mcp.json
+.claude/settings.local.json
+
+# OpenWolf transient state (runtime, per-machine; shared knowledge files are tracked)
+.wolf/daemon.log
+.wolf/cron-state.json
+.wolf/designqc-report.json
+.wolf/designqc-captures/
+.wolf/token-ledger.json
+.wolf/suggestions.json

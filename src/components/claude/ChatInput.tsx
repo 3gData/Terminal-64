@@ -28,9 +28,11 @@ interface ChatInputProps {
   draftPrompt?: string;
   onDraftChange?: (text: string) => void;
   onPasteImage?: (file: File) => void;
+  contextPct?: number;
+  autoCompactAt?: number;
 }
 
-export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, accentColor, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, onPasteImage }: ChatInputProps) {
+export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, accentColor, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, onPasteImage, contextPct, autoCompactAt }: ChatInputProps) {
   const [text, setText] = useState(draftPrompt || "");
   const [elapsed, setElapsed] = useState("");
   const [inlineFiles, setInlineFiles] = useState<Set<string>>(new Set());
@@ -614,19 +616,31 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
       </div>
 
       <div className="cc-status-line">
-        {isStreaming ? (
-          <>
-            <span className="cc-streaming-dot" />
-            <span className="cc-streaming-label">Thinking{elapsed ? ` · ${elapsed}` : "..."}</span>
-            {(queueCount ?? 0) > 0 && <span className="cc-queue-badge">{queueCount} queued</span>}
-          </>
-        ) : permLabel ? (
-          <span className="cc-perm-line" onClick={onCyclePerm} title="Click or Shift+Tab to cycle">
-            <span className="cc-perm-chevrons" style={{ color: permColor }}>&#x203a;&#x203a;</span>
-            {" "}{permLabel}{" "}
-            <span className="cc-perm-hint">(shift+tab to cycle)</span>
-          </span>
-        ) : null}
+        <div className="cc-status-left">
+          {isStreaming ? (
+            <>
+              <span className="cc-streaming-dot" />
+              <span className="cc-streaming-label">Thinking{elapsed ? ` · ${elapsed}` : "..."}</span>
+              {(queueCount ?? 0) > 0 && <span className="cc-queue-badge">{queueCount} queued</span>}
+            </>
+          ) : permLabel ? (
+            <span className="cc-perm-line" onClick={onCyclePerm} title="Click or Shift+Tab to cycle">
+              <span className="cc-perm-chevrons" style={{ color: permColor }}>&#x203a;&#x203a;</span>
+              {" "}{permLabel}{" "}
+              <span className="cc-perm-hint">(shift+tab to cycle)</span>
+            </span>
+          ) : null}
+        </div>
+        {contextPct != null && contextPct > 0 && (
+          <div className="cc-status-right">
+            <span className={`cc-ctx-badge ${contextPct >= 80 ? "cc-ctx-badge--warn" : ""}`}>
+              Context {contextPct}%
+            </span>
+            {autoCompactAt != null && autoCompactAt > 0 && (
+              <span className="cc-ctx-compact-hint">Auto compact at {autoCompactAt}%</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

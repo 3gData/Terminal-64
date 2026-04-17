@@ -547,7 +547,7 @@
 .cc-msg-actions {
   position: absolute;
   right: 4px;
-  top: 2px;
+  bottom: 2px;
   opacity: 0;
   transition: opacity 0.1s;
   z-index: 10;
@@ -585,7 +585,7 @@
 .cc-ctx-menu {
   position: absolute;
   right: 0;
-  top: 100%;
+  bottom: 100%;
   background: var(--bg-secondary, #181825);
   border: 1px solid var(--border, #313244);
   border-radius: 6px;
@@ -631,6 +631,20 @@
 .cc-bubble--streaming {
   border-color: color-mix(in srgb, var(--ft-border, #cba6f7) 30%, transparent);
   box-shadow: 0 0 12px color-mix(in srgb, var(--ft-border, #cba6f7) 8%, transparent);
+}
+
+/* Mood-colored bubbles */
+.cc-bubble--problem {
+  background: color-mix(in srgb, #f38ba8 10%, var(--bg-secondary, #181825));
+  border-color: color-mix(in srgb, #f38ba8 25%, transparent);
+}
+.cc-bubble--success {
+  background: color-mix(in srgb, #a6e3a1 10%, var(--bg-secondary, #181825));
+  border-color: color-mix(in srgb, #a6e3a1 25%, transparent);
+}
+.cc-bubble--thinking {
+  background: color-mix(in srgb, #89b4fa 10%, var(--bg-secondary, #181825));
+  border-color: color-mix(in srgb, #89b4fa 25%, transparent);
 }
 
 /* Blinking cursor for streaming */
@@ -1646,13 +1660,35 @@
   z-index: 3;
 }
 
-/* Status line below input — permission mode or streaming */
+/* Status line below input — permission mode (left) + context % (right) */
 .cc-status-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
   padding: 3px 6px 0;
   min-height: 20px;
+}
+.cc-status-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cc-status-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cc-ctx-badge {
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+}
+.cc-ctx-badge--warn {
+  color: #f9e2af;
+}
+.cc-ctx-compact-hint {
+  font-size: 9px;
+  color: var(--fg-muted, #6c7086);
+  opacity: 0.6;
 }
 
 .cc-perm-line {

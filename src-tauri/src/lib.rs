@@ -724,8 +724,14 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
         if line.trim().is_empty() { continue; }
         if done {
             // After reaching the target, still keep tool-result-only user records
-            // (they pair with the last assistant's tool_use and don't produce visible messages)
-            let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => break };
+            // (they pair with the last assistant's tool_use and don't produce visible messages).
+            // A JSON parse failure must NOT abort the whole trailing sweep — pass the
+            // malformed line through and keep scanning. Any other record type means we've
+            // crossed into a later turn and must stop.
+            let val: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => { kept.push(line); continue; }
+            };
             if val["type"].as_str().unwrap_or("") == "user" {
                 let has_text = is_real_user_message(&val);
                 if !has_text {
@@ -869,11 +875,20 @@ fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Re
         }
     }
 
-    // Find leaf: last uuid not referenced as anyone's parentUuid
+    // Find leaf: last TRANSCRIPT uuid not referenced as anyone's parentUuid.
+    // Only user/assistant records participate in the conversation chain — summary,
+    // task-summary, context-collapse and other metadata entries have their own UUIDs
+    // that would otherwise be picked as "leaves" and send the chain walk down a dead end.
+    let is_transcript = |v: &serde_json::Value| -> bool {
+        matches!(v["type"].as_str(), Some("user") | Some("assistant"))
+    };
     let leaf = all_uuids.iter().rev()
-        .find(|u| !children.contains(u.as_str()))
+        .find(|u| {
+            if children.contains(u.as_str()) { return false; }
+            records.get(u.as_str()).map(is_transcript).unwrap_or(false)
+        })
         .cloned()
-        .ok_or_else(|| "No leaf message found in JSONL".to_string())?;
+        .ok_or_else(|| "No transcript leaf found in JSONL".to_string())?;
 
     // Walk backward from leaf via parentUuid to build active chain
     let mut chain: Vec<String> = Vec::new();

@@ -146,6 +146,18 @@
       "last_seen": "2026-04-16"
     },
     {
+      "id": "bug-rewind-001",
+      "timestamp": "2026-04-17",
+      "error_message": "Rewind does too much AND doesn't fully rewind delegation changes — git checkout HEAD wiped uncommitted work, and only the most recent delegation group's child files were tracked",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Two bugs. (A) handleRewind called revertFilesGit on delegation children's modified files; revert_files_git uses `git checkout HEAD -- path` which restores tracked files to the LAST COMMIT — wiping user's pre-session uncommitted edits, other sessions' changes, or parent-session edits not in checkpoints. (B) handleRewind read delState.parentToGroup[sessionId], a single-slot map that each new delegation overwrites (delegationStore L100). If the parent did delegation 1 → completed → delegation 2, rewinding past delegation 1 couldn't find its child modifiedFiles — they were orphaned.",
+      "fix": "(A) Replaced revertFilesGit with filterUntrackedFiles → deleteFiles for child files (matches parent handling): only delete untracked/new files; leave tracked-but-modified files alone so user doesn't lose uncommitted work. Log the tracked-left list so user knows. (B) Replaced `parentToGroup[sessionId]` lookup with `Object.values(delState.groups).filter(g => g.parentSessionId === sessionId)` to collect child modifiedFiles from ALL groups ever spawned by this parent, not just the current one. Also end-cancel any still-active groups.",
+      "tags": ["rewind", "delegation", "git-checkout", "data-loss", "parent-to-group"],
+      "related_bugs": ["bug-001"],
+      "occurrences": 1,
+      "last_seen": "2026-04-17"
+    },
+    {
       "id": "bug-002",
       "timestamp": "2026-04-16",
       "error_message": "Forked chat doesn't respond — sending a prompt in a newly forked session hangs with no streaming",

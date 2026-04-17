@@ -17,6 +17,7 @@ interface ClaudeUsage {
 interface ClaudeContentBlock {
   type: string;
   text?: string;
+  thinking?: string;
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
@@ -66,9 +67,21 @@ interface ClaudeStreamEvent {
   parent_tool_use_id?: string;
   model?: string;
   mcp_servers?: ClaudeMcpServerRaw[];
-  content_block?: { type: string; id?: string; name?: string };
-  delta?: { type: string; text?: string; partial_json?: string };
-  message?: { content?: ClaudeContentBlock[]; usage?: ClaudeUsage };
+  content_block?: { type: string; id?: string; name?: string; thinking?: string };
+  delta?: {
+    type: string;
+    text?: string;
+    thinking?: string;
+    partial_json?: string;
+    stop_reason?: string;
+    stop_sequence?: string | null;
+  };
+  message?: {
+    content?: ClaudeContentBlock[];
+    usage?: ClaudeUsage;
+    stop_reason?: string;
+    attachments?: ClaudeAttachment[];
+  };
   content?: ClaudeContentBlock[];
   usage?: ClaudeUsage;
   total_cost_usd?: number;
@@ -76,6 +89,17 @@ interface ClaudeStreamEvent {
   is_error?: boolean;
   result?: string;
   modelUsage?: Record<string, ClaudeModelUsageEntry>;
+  // Top-level error events from Claude CLI (rate limit, API error, overloaded, etc.)
+  error?: { type?: string; message?: string } | string;
+  message_text?: string;
+}
+
+interface ClaudeAttachment {
+  type: string;
+  message?: string;
+  path?: string;
+  stderr?: string;
+  max_turns?: number;
 }
 
 const sessionToolMaps = new Map<string, Map<string, string>>();
@@ -328,6 +352,32 @@ export function useClaudeEvents() {
           return;
         }
 
+        // Top-level error from the CLI (API rate limit, overloaded, auth failure, etc.)
+        // Without this handler the spinner never stops — the "safety net" above would
+        // keep re-enabling streaming on every subsequent event.
+        if (type === "error") {
+          const errMsg =
+            typeof parsed.error === "string"
+              ? parsed.error
+              : parsed.error?.message || parsed.result || parsed.message_text || "Claude reported an error.";
+          store.setError(session_id, errMsg);
+          store.setStreaming(session_id, false);
+          store.clearStreamingText(session_id);
+          pendingBlocks.delete(session_id);
+          assistantFinalized.delete(session_id);
+          return;
+        }
+
+        // Claude CLI emits stream_request_start at the beginning of each underlying
+        // API call in a multi-turn session. Treat it like message_start so stale
+        // pending blocks from a prior turn don't leak into the new one.
+        if (type === "stream_request_start") {
+          store.setStreaming(session_id, true);
+          pendingBlocks.delete(session_id);
+          assistantFinalized.delete(session_id);
+          return;
+        }
+
         // ---- Streaming content block events ----
 
         if (type === "content_block_start") {
@@ -337,20 +387,29 @@ export function useClaudeEvents() {
             blocks.push({ id: cb.id, type: "tool_use", name: cb.name, inputJson: "", parentToolUseId: streamParentToolUseId });
             pendingBlocks.set(session_id, blocks);
           }
+          // Other block types (text, thinking) don't need tracking here — text deltas
+          // go to pendingText directly, thinking deltas are discarded until we wire up
+          // a thinking-block UI. Explicitly ignoring thinking prevents its input_json_delta
+          // from ever being misattributed to a tool_use block.
           return;
         }
 
         if (type === "content_block_delta") {
-          if (parsed.delta?.type === "text_delta" && parsed.delta?.text) {
+          const d = parsed.delta;
+          if (d?.type === "text_delta" && d.text) {
             const existing = pendingText.get(session_id) || "";
-            pendingText.set(session_id, existing + parsed.delta.text);
+            pendingText.set(session_id, existing + d.text);
             scheduleFlush();
-          } else if (parsed.delta?.type === "input_json_delta" && parsed.delta?.partial_json) {
+          } else if (d?.type === "input_json_delta" && d.partial_json) {
             const blocks = pendingBlocks.get(session_id);
-            if (blocks && blocks.length > 0) {
-              blocks[blocks.length - 1].inputJson += parsed.delta.partial_json;
+            // Only accumulate onto a tool_use block. If the most recent content block
+            // was thinking/text (not tracked here), this delta is unrelated to any
+            // pending tool_use and must be ignored.
+            if (blocks && blocks.length > 0 && blocks[blocks.length - 1].type === "tool_use") {
+              blocks[blocks.length - 1].inputJson += d.partial_json;
             }
           }
+          // thinking_delta / signature_delta are intentionally dropped — no UI yet
           return;
         }
 
@@ -425,7 +484,7 @@ export function useClaudeEvents() {
           return;
         }
 
-        // message_delta: may contain usage info at end of turn
+        // message_delta: may contain usage info and stop_reason at end of turn
         if (type === "message_delta") {
           const totalIn = totalInputTokens(parsed.usage);
           if (totalIn > 0) {
@@ -433,6 +492,15 @@ export function useClaudeEvents() {
             const ctxMax = sess?.contextMax || getContextWindowForModel(sess?.model || "");
             store.setContextUsage(session_id, totalIn, ctxMax);
           }
+          // Surface non-normal stop reasons (refusal, pause_turn, max_tokens) — these
+          // currently vanish silently and leave the user wondering why the turn ended.
+          const sr = parsed.delta?.stop_reason;
+          if (sr === "refusal") {
+            store.setError(session_id, "Claude declined to continue (policy refusal).");
+          } else if (sr === "max_tokens") {
+            store.setError(session_id, "Response cut off — hit max_tokens. Ask Claude to continue.");
+          }
+          // pause_turn / tool_use / end_turn are normal flow — no surface needed
           return;
         }
 

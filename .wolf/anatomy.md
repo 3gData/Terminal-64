@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-04-16T16:00:00.439Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-04-17T16:00:00.118Z
 > Files: 137 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ./
@@ -113,9 +113,9 @@
 
 - `audio_manager.rs` — AudioManager: new, start, stop, is_active (~2789 tok)
 - `browser_manager.rs` — BrowserManager: new, create, navigate, set_bounds + 8 more (~1235 tok)
-- `claude_manager.rs` — ClaudeManager: resolve_claude_path, shim_command, new, create_session (~6717 tok)
+- `claude_manager.rs` — ClaudeManager: resolve_claude_path, shim_command (~6974 tok)
 - `discord_bot.rs` — DiscordBot: new, start, stop, is_running + 4 more (~10130 tok)
-- `lib.rs` — Safe stderr logging — never panics if the pipe is broken. (~38443 tok)
+- `lib.rs` — Safe stderr logging — never panics if the pipe is broken. (~38681 tok)
 - `main.rs` — Prevents additional console window on Windows in release, DO NOT REMOVE!! (~51 tok)
 - `permission_server.rs` — All Claude Code lifecycle hook events to register for each session. (~6558 tok)
 - `pty_manager.rs` — PtyManager: new, create, write, resize + 1 more (~1667 tok)
@@ -125,7 +125,7 @@
 
 ## src/
 
-- `App.css` — Styles: 61 rules, 6 vars, 3 animations (~2828 tok)
+- `App.css` — Styles: 63 rules, 6 vars, 3 animations (~2911 tok)
 - `App.tsx` — appWindow — uses useState, useRef, useEffect (~5769 tok)
 - `main.tsx` (~40 tok)
 - `vite-env.d.ts` — / <reference types="vite/client" /> (~11 tok)
@@ -145,12 +145,12 @@
 
 ## src/components/claude/
 
-- `ChatInput.tsx` — IMAGE_EXTS (~6658 tok)
-- `ChatMessage.tsx` — DELEGATION_BLOCK_RE — renders table — uses useEffect, useState (~7163 tok)
-- `ClaudeChat.css` — Styles: 95 rules (~17524 tok)
-- `ClaudeChat.tsx` — Isolated streaming text component — subscribes only to streamingText, (~28197 tok)
+- `ChatInput.tsx` — IMAGE_EXTS (~6829 tok)
+- `ChatMessage.tsx` — DELEGATION_BLOCK_RE — uses useEffect, useState (~7406 tok)
+- `ClaudeChat.css` — Styles: 95 rules (~17784 tok)
+- `ClaudeChat.tsx` — Isolated streaming text component — subscribes only to streamingText, (~28485 tok)
 - `Delegation.css` — Styles: 109 rules, 6 vars, 2 animations (~4775 tok)
-- `DelegationBadge.tsx` — DelegationBadge (~820 tok)
+- `DelegationBadge.tsx` — DelegationBadge (~828 tok)
 - `DelegationDialog.tsx` — DelegationDialog — uses useState, useEffect (~1577 tok)
 - `DelegationPanel.tsx` — STATUS_ICONS (~966 tok)
 - `DelegationStatus.tsx` — ElapsedTimer — uses useState, useEffect (~1238 tok)
@@ -192,7 +192,7 @@
 
 ## src/hooks/
 
-- `useClaudeEvents.ts` — Loosely-typed parsed event from the Claude CLI stream-JSON output. (~7492 tok)
+- `useClaudeEvents.ts` — Loosely-typed parsed event from the Claude CLI stream-JSON output. (~8340 tok)
 - `useDelegationOrchestrator.ts` — Scan messages for a report_done tool call and extract its summary arg. (~3789 tok)
 - `useKeybindings.ts` — Exports useKeybindings (~321 tok)
 - `usePartyMode.ts` — Parse a hex color to HSL, returns [h, s, l] with h in degrees, s/l in 0-100 (~1481 tok)

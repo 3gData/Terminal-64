@@ -6,6 +6,20 @@ const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
 const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
 const SLASH_CMD_RE = /^\/([a-zA-Z0-9_-]+)\s*([\s\S]*)$/;
 
+// Mood tag: «t64:normal|problem|success|thinking» — strip ALL occurrences,
+// use the last one found as the bubble color.
+const MOOD_TAG_G = /\s*«t64:(normal|problem|success|thinking)»\s*/g;
+export type MoodTag = "normal" | "problem" | "success" | "thinking";
+
+export function parseMood(text: string): { clean: string; mood: MoodTag } {
+  let mood: MoodTag = "normal";
+  let m;
+  while ((m = MOOD_TAG_G.exec(text)) !== null) mood = m[1] as MoodTag;
+  MOOD_TAG_G.lastIndex = 0; // reset stateful regex
+  const clean = text.replace(MOOD_TAG_G, "").trim();
+  return { clean, mood };
+}
+
 const IMAGE_EXTS = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i;
 const ATTACHED_FILE_RE = /\[Attached file: (.+?)\]/g;
 const EXT_TO_MIME: Record<string, string> = {
@@ -544,8 +558,8 @@ function buildCopyText(message: ChatMessageType): string {
   if (message.role === "user") {
     return message.content || "";
   }
-  // Assistant: text content + tool call summaries
-  const textPart = message.content?.replace(DELEGATION_BLOCK_RE, "").trim() || "";
+  // Assistant: text content + tool call summaries (strip mood tag)
+  const textPart = parseMood(message.content?.replace(DELEGATION_BLOCK_RE, "").trim() || "").clean;
   const parts: string[] = [];
   if (textPart) parts.push(textPart);
   if (message.toolCalls && message.toolCalls.length > 0) {
@@ -617,13 +631,14 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
     );
   }
 
-  // Strip [DELEGATION_START]...[DELEGATION_END] blocks from assistant text
-  const { delegationBlock, cleanContent } = useMemo(() => {
-    if (!message.content) return { delegationBlock: undefined, cleanContent: "" };
-    return {
-      delegationBlock: message.content.match(DELEGATION_BLOCK_RE)?.[0],
-      cleanContent: message.content.replace(DELEGATION_BLOCK_RE, "").trim(),
-    };
+  // Strip [DELEGATION_START]...[DELEGATION_END] blocks from assistant text,
+  // then extract mood tag for bubble coloring
+  const { delegationBlock, cleanContent, mood } = useMemo(() => {
+    if (!message.content) return { delegationBlock: undefined, cleanContent: "", mood: "normal" as MoodTag };
+    const delegation = message.content.match(DELEGATION_BLOCK_RE)?.[0];
+    const stripped = message.content.replace(DELEGATION_BLOCK_RE, "").trim();
+    const { clean, mood } = parseMood(stripped);
+    return { delegationBlock: delegation, cleanContent: clean, mood };
   }, [message.content]);
 
   const renderedContent = useMemo(() => cleanContent ? renderContent(cleanContent) : null, [cleanContent]);
@@ -632,7 +647,7 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
     <div className="cc-message cc-message--assistant">
       {menuBtn}
       {renderedContent && (
-        <div className="cc-bubble cc-bubble--assistant">
+        <div className={`cc-bubble cc-bubble--assistant${mood !== "normal" ? ` cc-bubble--${mood}` : ""}`}>
           {renderedContent}
         </div>
       )}

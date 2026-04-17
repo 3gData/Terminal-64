@@ -5,7 +5,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useThemeStore } from "../../stores/themeStore";
-import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, readFileBase64, writeFile, loadSessionHistory, mapHistoryMessages, findRewindUuid, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, revertFilesGit, deleteFiles, shellExec, filterUntrackedFiles, ensureT64Mcp, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage, resolveSkillPrompt } from "../../lib/tauriApi";
+import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, readFileBase64, writeFile, loadSessionHistory, mapHistoryMessages, findRewindUuid, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, ensureT64Mcp, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage, resolveSkillPrompt } from "../../lib/tauriApi";
 import { SlashCommand, PermissionMode, McpServer, HookEvent } from "../../lib/types";
 import type { McpServerStatus } from "../../stores/claudeStore";
 import { rewritePromptStream } from "../../lib/ai";
@@ -185,6 +185,9 @@ const MODELS = [
   { id: "haiku", label: "Haiku" },
   { id: "opusplan", label: "Opus Plan" },
   { id: "claude-opus-4-7", label: "Opus 4.7" },
+  { id: "sonnet[1m]", label: "Sonnet 1M" },
+  { id: "opus[1m]", label: "Opus 1M" },
+  { id: "claude-opus-4-7[1m]", label: "Opus 4.7 1M" },
 ];
 
 const EFFORTS = [
@@ -1031,23 +1034,29 @@ Rules:
       console.log("[rewind] Found rewind UUID:", uuid, "for keepMessages:", keepMessages);
       useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
 
-      // Force-cancel any active delegation group FIRST — rewind must not trigger a merge
+      // Force-cancel any active delegation group AND collect modifiedFiles from
+      // ALL groups ever spawned by this parent — parentToGroup only tracks the
+      // most recent group, so previous completed delegations' child files would
+      // be orphaned without this full scan.
       const delState = useDelegationStore.getState();
-      const delGroupId = delState.parentToGroup[sessionId];
-      const delGroup = delGroupId ? delState.groups[delGroupId] : undefined;
-      let childModifiedFiles: string[] = [];
-      if (delGroup) {
+      const childModifiedFiles: string[] = [];
+      const parentGroups = Object.values(delState.groups).filter(
+        (g) => g.parentSessionId === sessionId,
+      );
+      if (parentGroups.length > 0) {
         const claudeState = useClaudeStore.getState();
-        for (const task of delGroup.tasks) {
-          if (task.sessionId) {
-            const childSess = claudeState.sessions[task.sessionId];
-            if (childSess?.modifiedFiles?.length) {
-              childModifiedFiles.push(...childSess.modifiedFiles);
+        for (const group of parentGroups) {
+          for (const task of group.tasks) {
+            if (task.sessionId) {
+              const childSess = claudeState.sessions[task.sessionId];
+              if (childSess?.modifiedFiles?.length) {
+                childModifiedFiles.push(...childSess.modifiedFiles);
+              }
             }
           }
-        }
-        if (delGroup.status === "active") {
-          endDelegation(delGroup.id, true);
+          if (group.status === "active") {
+            endDelegation(group.id, true);
+          }
         }
       }
 
@@ -1079,12 +1088,28 @@ Rules:
           }
         }
 
-        // Revert ALL files modified by delegation children using git
+        // For delegation child files: only delete untracked (newly created) files.
+        // We deliberately do NOT `git checkout HEAD --` tracked files: that restores
+        // to the last commit and would wipe out unrelated uncommitted work (pre-session
+        // edits, other sessions' changes). If a tracked file was modified by a child,
+        // it stays modified — the user can `git diff` and decide.
         if (childModifiedFiles.length > 0) {
-          const uniqueFiles = [...new Set(childModifiedFiles)];
-          revertFilesGit(rewindCwd, uniqueFiles)
-            .then((reverted) => { if (reverted.length > 0) console.log("[rewind] Git-reverted delegation files:", reverted); })
-            .catch((err) => console.warn("[rewind] Failed to git-revert delegation files:", err));
+          const uniqueFiles = [...new Set(childModifiedFiles)].filter((f) => !restoredSet.has(f));
+          if (uniqueFiles.length > 0) {
+            try {
+              const created = await filterUntrackedFiles(rewindCwd, uniqueFiles);
+              if (created.length > 0) {
+                const deleted = await deleteFiles(created);
+                console.log("[rewind] Deleted delegation-created files:", deleted);
+              }
+              const trackedLeft = uniqueFiles.filter((f) => !created.includes(f));
+              if (trackedLeft.length > 0) {
+                console.log("[rewind] Tracked files modified by delegation (left alone — use git diff to review):", trackedLeft);
+              }
+            } catch (err) {
+              console.warn("[rewind] Failed to clean delegation-created files:", err);
+            }
+          }
         }
 
         cleanupCheckpoints(sessionId, keepTurns)
@@ -1523,15 +1548,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               {compactionCount}×
             </span>
           )}
-          {session.contextMax > 0 && (() => {
-            const ctxPct = Math.round((session.contextUsed / session.contextMax) * 100);
-            return (
-              <>
-                <span className={`cc-topbar-cost ${ctxPct >= 80 ? "cc-topbar-cost--warn" : ""}`}>Context {ctxPct}%</span>
-                {autoCompactEnabled && <span className="cc-topbar-compact-hint">Auto compact at {autoCompactThreshold}%</span>}
-              </>
-            );
-          })()}
+          {/* Context % moved to bottom-right status line in ChatInput */}
           <button
             className={`ch-log-toggle ${showHookLog ? "ch-log-toggle--active" : ""}`}
             onClick={() => setShowHookLog((v) => !v)}
@@ -1961,6 +1978,8 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                   draftPrompt={session.draftPrompt}
                   onDraftChange={(t) => setDraftPrompt(sessionId, t)}
                   onPasteImage={handlePasteImage}
+                  contextPct={session.contextMax > 0 ? Math.round((session.contextUsed / session.contextMax) * 100) : 0}
+                  autoCompactAt={autoCompactEnabled ? autoCompactThreshold : 0}
                 />
               </>
             )}
