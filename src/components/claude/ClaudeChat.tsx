@@ -267,7 +267,13 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   );
   const [permModeIdx, setPermModeIdx] = useState(() => {
     if (skipPermissions) return 4; // YOLO when skipPermissions is set
-    const stored = useSettingsStore.getState().claudePermMode;
+    const s = useSettingsStore.getState();
+    const fixedDefault = s.claudeDefaultPermMode;
+    if (fixedDefault) {
+      const idx = PERMISSION_MODES.findIndex((m) => m.id === fixedDefault);
+      if (idx >= 0) return idx;
+    }
+    const stored = s.claudePermMode;
     if (stored) {
       const idx = PERMISSION_MODES.findIndex((m) => m.id === stored);
       if (idx >= 0) return idx;
@@ -431,7 +437,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Tab" && e.shiftKey) {
         e.preventDefault();
-        setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; useSettingsStore.getState().set({ claudePermMode: PERMISSION_MODES[next].id }); return next; });
+        setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; const s = useSettingsStore.getState(); if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next].id }); return next; });
       }
     };
     window.addEventListener("keydown", handler);
@@ -1971,7 +1977,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                   onInitialTextConsumed={() => setRewindText(null)}
                   permLabel={`${permMode.id === "default" ? "ask permissions" : permMode.id === "bypass_all" ? "bypass permissions" : permMode.id === "accept_edits" ? "auto-accept edits" : permMode.id === "auto" ? "auto-approve" : "plan mode"} on`}
                   permColor={permMode.color}
-                  onCyclePerm={() => setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; useSettingsStore.getState().set({ claudePermMode: PERMISSION_MODES[next].id }); return next; })}
+                  onCyclePerm={() => setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; const s = useSettingsStore.getState(); if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next].id }); return next; })}
                   sessionName={session.name || undefined}
                   cwd={effectiveCwd}
                   queueCount={session.promptQueue.length}

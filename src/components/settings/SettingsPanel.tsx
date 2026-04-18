@@ -77,6 +77,9 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
   const autoCompactThreshold = useSettingsStore((s) => s.autoCompactThreshold);
 
+  // Claude window defaults
+  const claudeDefaultPermMode = useSettingsStore((s) => s.claudeDefaultPermMode);
+
   // OpenWolf
   const openwolfEnabled = useSettingsStore((s) => s.openwolfEnabled);
   const openwolfAutoInit = useSettingsStore((s) => s.openwolfAutoInit);
@@ -310,6 +313,25 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
           {/* Claude */}
           <Section label="Claude" icon="⬡">
+            <div className="sp-row">
+              <label className="sp-label">
+                New Window Permission Mode
+                <span className="sp-hint-inline">Mode each new Claude window starts in</span>
+              </label>
+              <select
+                className="sp-select"
+                value={claudeDefaultPermMode}
+                onChange={(e) => setSetting({ claudeDefaultPermMode: e.target.value })}
+              >
+                <option value="">Remember last used</option>
+                <option value="default">Default (ask)</option>
+                <option value="plan">Plan</option>
+                <option value="auto">Auto</option>
+                <option value="accept_edits">Accept Edits</option>
+                <option value="bypass_all">YOLO (bypass)</option>
+              </select>
+            </div>
+
             <div className="sp-row">
               <label className="sp-label">
                 Auto-Compact

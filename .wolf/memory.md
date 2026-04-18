@@ -26,3 +26,22 @@
 | 2026-04-17 | Event parser audit fixes: added top-level `error` handler (fixes ghost spinner on API errors/rate-limits), `stream_request_start` handler (clears stale pending blocks across API turns), thinking-block aware content_block_start/_delta (prevents thinking_delta misattribution onto tool_use inputJson), and stop_reason surface for refusal/max_tokens in message_delta. | src/hooks/useClaudeEvents.ts | tsc clean | ~2200 |
 | 2026-04-17 | Rewind/fork JSONL audit fixes: (1) `find_rewind_uuid` now filters leaf candidates to user/assistant transcript records only — summary/task-summary/context-collapse/mode-entry records no longer derail the parentUuid chain walk. (2) `truncate_session_jsonl_by_messages` trailing-records loop no longer aborts on JSON parse failure — malformed lines are kept and scanning continues so tool_result pairings survive. | src-tauri/src/lib.rs | cargo check clean | ~1500 |
 | 14:03 | Fix chat bg flicker — promote .floating-terminal to compositor layer (will-change/translateZ/contain/isolation) to stop border-radius+scaled-transform paint flicker | src/components/canvas/FloatingTerminal.css | fixed | ~600 |
+
+## Session: 2026-04-18 16:47
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+
+## Session: 2026-04-18 16:48
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 16:49 | Edited src/stores/settingsStore.ts | 4→5 lines | ~37 |
+| 16:49 | Edited src/stores/settingsStore.ts | 4→5 lines | ~36 |
+| 16:49 | Edited src/components/claude/ClaudeChat.tsx | added 2 condition(s) | ~167 |
+| 16:49 | Edited src/components/claude/ClaudeChat.tsx | inline fix | ~63 |
+| 16:49 | Edited src/components/claude/ClaudeChat.tsx | inline fix | ~71 |
+| 16:49 | Edited src/components/settings/SettingsPanel.tsx | 3→6 lines | ~82 |
+| 16:50 | Edited src/components/settings/SettingsPanel.tsx | CSS: claudeDefaultPermMode | ~364 |
+| 16:50 | add New Window Permission Mode setting | settingsStore.ts, ClaudeChat.tsx, SettingsPanel.tsx | ok | ~1200 |
+| 16:50 | Session end: 7 writes across 3 files (settingsStore.ts, ClaudeChat.tsx, SettingsPanel.tsx) | 2 reads | ~29966 tok |

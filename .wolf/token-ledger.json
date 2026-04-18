@@ -2,16 +2,103 @@
   "version": 1,
   "created_at": "2026-04-15T19:28:19.690Z",
   "lifetime": {
-    "total_tokens_estimated": 0,
-    "total_reads": 0,
-    "total_writes": 0,
-    "total_sessions": 0,
+    "total_tokens_estimated": 29966,
+    "total_reads": 3,
+    "total_writes": 7,
+    "total_sessions": 2,
     "anatomy_hits": 0,
-    "anatomy_misses": 0,
-    "repeated_reads_blocked": 0,
-    "estimated_savings_vs_bare_cli": 0
+    "anatomy_misses": 3,
+    "repeated_reads_blocked": 4,
+    "estimated_savings_vs_bare_cli": 116584
   },
-  "sessions": [],
+  "sessions": [
+    {
+      "id": "session-2026-04-18-1647",
+      "started": "2026-04-18T15:47:13.000Z",
+      "ended": "2026-04-18T15:47:49.715Z",
+      "reads": [
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/stores/settingsStore.ts",
+          "tokens_estimated": 0,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        }
+      ],
+      "writes": [],
+      "totals": {
+        "input_tokens_estimated": 0,
+        "output_tokens_estimated": 0,
+        "reads_count": 1,
+        "writes_count": 0,
+        "repeated_reads_blocked": 0,
+        "anatomy_lookups": 0
+      }
+    },
+    {
+      "id": "session-2026-04-18-1648",
+      "started": "2026-04-18T15:48:23.129Z",
+      "ended": "2026-04-18T15:50:22.714Z",
+      "reads": [
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/settings/SettingsPanel.tsx",
+          "tokens_estimated": 0,
+          "was_repeated": false,
+          "anatomy_had_description": false
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+          "tokens_estimated": 29146,
+          "was_repeated": true,
+          "anatomy_had_description": false
+        }
+      ],
+      "writes": [
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/stores/settingsStore.ts",
+          "tokens_estimated": 37,
+          "action": "edit"
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/stores/settingsStore.ts",
+          "tokens_estimated": 36,
+          "action": "edit"
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+          "tokens_estimated": 167,
+          "action": "edit"
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+          "tokens_estimated": 63,
+          "action": "edit"
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+          "tokens_estimated": 71,
+          "action": "edit"
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/settings/SettingsPanel.tsx",
+          "tokens_estimated": 82,
+          "action": "edit"
+        },
+        {
+          "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/settings/SettingsPanel.tsx",
+          "tokens_estimated": 364,
+          "action": "edit"
+        }
+      ],
+      "totals": {
+        "input_tokens_estimated": 29146,
+        "output_tokens_estimated": 820,
+        "reads_count": 2,
+        "writes_count": 7,
+        "repeated_reads_blocked": 4,
+        "anatomy_lookups": 0
+      }
+    }
+  ],
   "daemon_usage": [],
   "waste_flags": [],
   "optimization_report": {

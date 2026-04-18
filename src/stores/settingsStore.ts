@@ -11,6 +11,7 @@ interface Settings {
   claudeModel: string;
   claudeEffort: string;
   claudePermMode: string;
+  claudeDefaultPermMode: string;
   claudeFont: string;
   theme: string;
   bgAlpha: number;
@@ -44,6 +45,7 @@ const defaultSettings: Settings = {
   claudeModel: "sonnet",
   claudeEffort: "high",
   claudePermMode: "",
+  claudeDefaultPermMode: "",
   claudeFont: "system",
   theme: "Catppuccin Mocha",
   bgAlpha: 1,

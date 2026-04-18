@@ -1,0 +1,70 @@
+{
+  "session_id": "session-2026-04-18-1648",
+  "started": "2026-04-18T15:48:23.129Z",
+  "files_read": {
+    "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/settings/SettingsPanel.tsx": {
+      "count": 1,
+      "tokens": 0,
+      "first_read": "2026-04-18T15:48:32.968Z"
+    },
+    "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx": {
+      "count": 5,
+      "tokens": 29146,
+      "first_read": "2026-04-18T15:48:37.881Z"
+    }
+  },
+  "files_written": [
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/stores/settingsStore.ts",
+      "action": "edit",
+      "tokens": 37,
+      "at": "2026-04-18T15:49:21.518Z"
+    },
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/stores/settingsStore.ts",
+      "action": "edit",
+      "tokens": 36,
+      "at": "2026-04-18T15:49:25.037Z"
+    },
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+      "action": "edit",
+      "tokens": 167,
+      "at": "2026-04-18T15:49:31.183Z"
+    },
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+      "action": "edit",
+      "tokens": 63,
+      "at": "2026-04-18T15:49:42.268Z"
+    },
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/claude/ClaudeChat.tsx",
+      "action": "edit",
+      "tokens": 71,
+      "at": "2026-04-18T15:49:49.398Z"
+    },
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/settings/SettingsPanel.tsx",
+      "action": "edit",
+      "tokens": 82,
+      "at": "2026-04-18T15:49:54.882Z"
+    },
+    {
+      "file": "C:/Users/bradl/OneDrive/GitHub/Terminal-64/src/components/settings/SettingsPanel.tsx",
+      "action": "edit",
+      "tokens": 364,
+      "at": "2026-04-18T15:50:03.791Z"
+    }
+  ],
+  "edit_counts": {
+    "src/stores/settingsStore.ts": 2,
+    "src/components/claude/ClaudeChat.tsx": 3,
+    "src/components/settings/SettingsPanel.tsx": 2
+  },
+  "anatomy_hits": 0,
+  "anatomy_misses": 2,
+  "repeated_reads_warned": 4,
+  "cerebrum_warnings": 0,
+  "stop_count": 1
+}

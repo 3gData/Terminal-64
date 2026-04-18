@@ -281,6 +281,18 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           return;
         }
 
+        case "t64:pick-file": {
+          const reqId = msg.payload?.id;
+          const title = typeof msg.payload?.title === "string" ? msg.payload.title : "Select file";
+          const filters = Array.isArray(msg.payload?.filters) ? msg.payload.filters : undefined;
+          openDialog({ directory: false, multiple: false, title, filters }).then((path) => {
+            post({ type: "t64:file-picked", payload: { id: reqId, path: path || null } });
+          }).catch(() => {
+            post({ type: "t64:file-picked", payload: { id: reqId, path: null } });
+          });
+          return;
+        }
+
         case "t64:open-url": {
           const url = msg.payload?.url;
           if (url && typeof url === "string") {
