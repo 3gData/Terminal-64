@@ -527,9 +527,9 @@ pub fn openwolf_env_path() -> String {
         let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
         let program_files =
             std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
-        return format!(
+        format!(
             "{appdata}\\npm;{home}\\.cargo\\bin;{home}\\.npm-global;{localappdata}\\Programs\\nodejs;{program_files}\\nodejs;{existing}"
-        );
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {

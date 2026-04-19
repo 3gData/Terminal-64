@@ -746,7 +746,7 @@ fn list_disk_sessions(cwd: String) -> Result<Vec<DiskSession>, String> {
         }
     }
     // Sort newest first
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
     Ok(sessions)
 }
 
@@ -2273,7 +2273,7 @@ fn resolve_node_path() -> &'static str {
                     }
                 }
             }
-            return "node.exe".to_string();
+            "node.exe".to_string()
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -2482,13 +2482,10 @@ fn create_dir_link(target: &std::path::Path, link: &std::path::Path) -> std::io:
         if out.status.success() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "mklink /J failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            ))
+            Err(std::io::Error::other(format!(
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )))
         }
     }
 }
@@ -3554,7 +3551,7 @@ fn revert_files_git(cwd: String, paths: Vec<String>) -> Result<Vec<String>, Stri
             use std::os::windows::process::CommandExt;
             let mut c = c;
             c.creation_flags(0x08000000);
-            return c;
+            c
         }
         #[cfg(not(target_os = "windows"))]
         c
@@ -3634,7 +3631,7 @@ fn filter_untracked_files(cwd: String, paths: Vec<String>) -> Result<Vec<String>
             use std::os::windows::process::CommandExt;
             let mut c = c;
             c.creation_flags(0x08000000);
-            return c;
+            c
         }
         #[cfg(not(target_os = "windows"))]
         c

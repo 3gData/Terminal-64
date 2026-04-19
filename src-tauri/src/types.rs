@@ -100,6 +100,7 @@ pub struct McpServer {
 
 // Party Mode audio types
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectrumData {
     pub bands: Vec<f32>, // 64 frequency band magnitudes, normalized 0.0-1.0
