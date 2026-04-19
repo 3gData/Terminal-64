@@ -1,7 +1,8 @@
 {
   "name": "terminal-64",
-  "version": "1.0.0",
-  "description": "",
+  "version": "0.1.0",
+  "description": "Canvas-based terminal emulator with multi-agent Claude Code, widgets, and MCP",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +13,6 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
   "engines": {
     "node": ">=20"
   },
