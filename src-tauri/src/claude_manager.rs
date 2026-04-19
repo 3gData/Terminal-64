@@ -10,7 +10,11 @@ pub fn resolve_claude_path() -> String {
     // On Windows, pass the bare name (no extension) so `where` respects PATHEXT
     // and finds `.cmd`/`.bat` shims (npm-installed claude is usually a .cmd).
     let lookup = {
-        let (cmd, arg) = if cfg!(windows) { ("where", "claude") } else { ("which", "claude") };
+        let (cmd, arg) = if cfg!(windows) {
+            ("where", "claude")
+        } else {
+            ("which", "claude")
+        };
         let mut c = std::process::Command::new(cmd);
         c.arg(arg)
             .stdout(Stdio::piped())
@@ -27,8 +31,14 @@ pub fn resolve_claude_path() -> String {
         if p.status.success() {
             // `where` on Windows may return multiple lines; take the first
             let s = String::from_utf8_lossy(&p.stdout)
-                .lines().next().unwrap_or("").trim().to_string();
-            if !s.is_empty() { return s; }
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !s.is_empty() {
+                return s;
+            }
         }
     }
 
@@ -61,7 +71,9 @@ pub fn resolve_claude_path() -> String {
     }
 
     for c in &candidates {
-        if std::path::Path::new(c).exists() { return c.clone(); }
+        if std::path::Path::new(c).exists() {
+            return c.clone();
+        }
     }
     // On Windows, bare "claude" won't resolve via PATHEXT through Command::new,
     // so prefer ".cmd" (the npm shim form) as the last-resort name.
@@ -124,37 +136,60 @@ fn build_command(
     let claude_bin = resolve_claude_path();
     let mut cmd = shim_command(&claude_bin);
     cmd.arg("--print")
-        .arg("--output-format").arg("stream-json")
+        .arg("--output-format")
+        .arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
-        .arg(session_flag).arg(session_value);
+        .arg(session_flag)
+        .arg(session_value);
 
     match permission_mode {
-        "bypass_all" => { cmd.arg("--permission-mode").arg("bypassPermissions"); }
-        "accept_edits" => { cmd.arg("--permission-mode").arg("acceptEdits"); }
-        "plan" => { cmd.arg("--permission-mode").arg("plan"); }
-        "auto" => { cmd.arg("--permission-mode").arg("auto"); }
-        _ => { cmd.arg("--permission-mode").arg("default"); }
+        "bypass_all" => {
+            cmd.arg("--permission-mode").arg("bypassPermissions");
+        }
+        "accept_edits" => {
+            cmd.arg("--permission-mode").arg("acceptEdits");
+        }
+        "plan" => {
+            cmd.arg("--permission-mode").arg("plan");
+        }
+        "auto" => {
+            cmd.arg("--permission-mode").arg("auto");
+        }
+        _ => {
+            cmd.arg("--permission-mode").arg("default");
+        }
     }
 
     if let Some(m) = model {
-        if !m.is_empty() { cmd.arg("--model").arg(m); }
+        if !m.is_empty() {
+            cmd.arg("--model").arg(m);
+        }
     }
     if let Some(e) = effort {
-        if !e.is_empty() { cmd.arg("--effort").arg(e); }
+        if !e.is_empty() {
+            cmd.arg("--effort").arg(e);
+        }
     }
     if let Some(dt) = disallowed_tools {
-        if !dt.is_empty() { cmd.arg("--disallowed-tools").arg(dt); }
+        if !dt.is_empty() {
+            cmd.arg("--disallowed-tools").arg(dt);
+        }
     }
     if let Some(sp) = settings_path {
-        if !sp.is_empty() { cmd.arg("--settings").arg(sp); }
+        if !sp.is_empty() {
+            cmd.arg("--settings").arg(sp);
+        }
     }
     if let Some(ch) = channel_server {
         if !ch.is_empty() {
-            cmd.arg("--dangerously-load-development-channels").arg(format!("server:{}", ch));
+            cmd.arg("--dangerously-load-development-channels")
+                .arg(format!("server:{}", ch));
         }
     }
-    if !cwd.is_empty() && cwd != "." { cmd.current_dir(cwd); }
+    if !cwd.is_empty() && cwd != "." {
+        cmd.current_dir(cwd);
+    }
     if let Some(mc) = mcp_config {
         if !mc.is_empty() {
             cmd.arg("--mcp-config").arg(mc);
@@ -190,7 +225,9 @@ fn build_command(
     // arguments at literal newline characters, silently losing multi-line
     // prompts. Claude CLI's --print mode reads stdin when no positional
     // prompt is given.
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::piped());
 
     cmd
 }
@@ -213,7 +250,9 @@ fn spawn_and_stream(
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
     // Write prompt to stdin and close it. Done in a thread so a very large
     // prompt cannot block this function if the child's stdin pipe buffer fills
@@ -239,11 +278,17 @@ fn spawn_and_stream(
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                safe_eprintln!("[claude:stderr:{}] {}", &sid_for_stderr[..8.min(sid_for_stderr.len())], line);
+                safe_eprintln!(
+                    "[claude:stderr:{}] {}",
+                    &sid_for_stderr[..8.min(sid_for_stderr.len())],
+                    line
+                );
                 match buf.lock() {
                     Ok(mut b) => {
                         if b.len() < 4000 {
-                            if !b.is_empty() { b.push('\n'); }
+                            if !b.is_empty() {
+                                b.push('\n');
+                            }
                             b.push_str(&line);
                         }
                     }
@@ -267,10 +312,13 @@ fn spawn_and_stream(
                 Ok(line) if line.trim().is_empty() => continue,
                 Ok(line) => {
                     had_output = true;
-                    if let Err(e) = handle.emit("claude-event", ClaudeEvent {
-                        session_id: sid.clone(),
-                        data: line,
-                    }) {
+                    if let Err(e) = handle.emit(
+                        "claude-event",
+                        ClaudeEvent {
+                            session_id: sid.clone(),
+                            data: line,
+                        },
+                    ) {
                         safe_eprintln!("[claude] Failed to emit claude-event for {}: {}", sid, e);
                     }
                 }
@@ -290,16 +338,24 @@ fn spawn_and_stream(
             } else {
                 stderr_msg
             };
-            safe_eprintln!("[claude] No stdout output for {} — emitting error: {}", sid, &error_msg[..error_msg.len().min(200)]);
-            if let Err(e) = handle.emit("claude-event", ClaudeEvent {
-                session_id: sid.clone(),
-                data: serde_json::json!({
-                    "type": "result",
-                    "subtype": "error",
-                    "is_error": true,
-                    "result": error_msg
-                }).to_string(),
-            }) {
+            safe_eprintln!(
+                "[claude] No stdout output for {} — emitting error: {}",
+                sid,
+                &error_msg[..error_msg.len().min(200)]
+            );
+            if let Err(e) = handle.emit(
+                "claude-event",
+                ClaudeEvent {
+                    session_id: sid.clone(),
+                    data: serde_json::json!({
+                        "type": "result",
+                        "subtype": "error",
+                        "is_error": true,
+                        "result": error_msg
+                    })
+                    .to_string(),
+                },
+            ) {
                 safe_eprintln!("[claude] Failed to emit error event for {}: {}", sid, e);
             }
         }
@@ -323,42 +379,113 @@ fn spawn_and_stream(
             true // lock failed, emit anyway to avoid silent hangs
         };
         if is_current {
-            if let Err(e) = handle.emit("claude-done", ClaudeDone { session_id: sid.clone() }) {
+            if let Err(e) = handle.emit(
+                "claude-done",
+                ClaudeDone {
+                    session_id: sid.clone(),
+                },
+            ) {
                 safe_eprintln!("[claude] Failed to emit claude-done for {}: {}", sid, e);
             }
         }
     });
 
-    instances.lock().map_err(|e| e.to_string())?
-        .insert(session_id, ClaudeInstance { child, generation: gen });
+    instances.lock().map_err(|e| e.to_string())?.insert(
+        session_id,
+        ClaudeInstance {
+            child,
+            generation: gen,
+        },
+    );
 
     Ok(())
 }
 
 impl ClaudeManager {
     pub fn new() -> Self {
-        Self { instances: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            instances: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-
-    pub fn create_session(&self, app_handle: &AppHandle, req: CreateClaudeRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
-        safe_eprintln!("[claude] Creating session id={} cwd={} mcp_config={:?}", req.session_id, req.cwd, req.mcp_config.as_deref().map(|s| &s[..s.len().min(80)]));
-        let cmd = build_command(
-            "--session-id", &req.session_id, &req.prompt,
-            &req.permission_mode, &req.model, &req.effort, &req.cwd, &None, &settings_path, &channel_server, &req.mcp_config, &None,
-            &req.max_turns, &req.max_budget_usd, &req.no_session_persistence, &None,
+    pub fn create_session(
+        &self,
+        app_handle: &AppHandle,
+        req: CreateClaudeRequest,
+        settings_path: Option<String>,
+        channel_server: Option<String>,
+    ) -> Result<(), String> {
+        safe_eprintln!(
+            "[claude] Creating session id={} cwd={} mcp_config={:?}",
+            req.session_id,
+            req.cwd,
+            req.mcp_config.as_deref().map(|s| &s[..s.len().min(80)])
         );
-        spawn_and_stream(&self.instances, app_handle, req.session_id, cmd, &req.prompt)
+        let cmd = build_command(
+            "--session-id",
+            &req.session_id,
+            &req.prompt,
+            &req.permission_mode,
+            &req.model,
+            &req.effort,
+            &req.cwd,
+            &None,
+            &settings_path,
+            &channel_server,
+            &req.mcp_config,
+            &None,
+            &req.max_turns,
+            &req.max_budget_usd,
+            &req.no_session_persistence,
+            &None,
+        );
+        spawn_and_stream(
+            &self.instances,
+            app_handle,
+            req.session_id,
+            cmd,
+            &req.prompt,
+        )
     }
 
-    pub fn send_prompt(&self, app_handle: &AppHandle, req: SendClaudePromptRequest, settings_path: Option<String>, channel_server: Option<String>) -> Result<(), String> {
-        safe_eprintln!("[claude] Sending prompt to session {} (cwd: {}) resume_session_at={:?}", req.session_id, req.cwd, req.resume_session_at);
-        let cmd = build_command(
-            "--resume", &req.session_id, &req.prompt,
-            &req.permission_mode, &req.model, &req.effort, &req.cwd, &req.disallowed_tools, &settings_path, &channel_server, &None, &req.resume_session_at,
-            &req.max_turns, &req.max_budget_usd, &req.no_session_persistence, &req.fork_session,
+    pub fn send_prompt(
+        &self,
+        app_handle: &AppHandle,
+        req: SendClaudePromptRequest,
+        settings_path: Option<String>,
+        channel_server: Option<String>,
+    ) -> Result<(), String> {
+        safe_eprintln!(
+            "[claude] Sending prompt to session {} (cwd: {}) resume_session_at={:?}",
+            req.session_id,
+            req.cwd,
+            req.resume_session_at
         );
-        spawn_and_stream(&self.instances, app_handle, req.session_id, cmd, &req.prompt)
+        let cmd = build_command(
+            "--resume",
+            &req.session_id,
+            &req.prompt,
+            &req.permission_mode,
+            &req.model,
+            &req.effort,
+            &req.cwd,
+            &req.disallowed_tools,
+            &settings_path,
+            &channel_server,
+            &None,
+            &req.resume_session_at,
+            &req.max_turns,
+            &req.max_budget_usd,
+            &req.no_session_persistence,
+            &req.fork_session,
+        );
+        spawn_and_stream(
+            &self.instances,
+            app_handle,
+            req.session_id,
+            cmd,
+            &req.prompt,
+        )
     }
 
     pub fn cancel(&self, session_id: &str) -> Result<(), String> {
@@ -395,7 +522,8 @@ pub fn openwolf_env_path() -> String {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         let appdata = std::env::var("APPDATA").unwrap_or_default();
         let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let program_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
         return format!(
             "{appdata}\\npm;{home}\\.cargo\\bin;{home}\\.npm-global;{localappdata}\\Programs\\nodejs;{program_files}\\nodejs;{existing}"
         );
@@ -412,7 +540,11 @@ pub fn openwolf_env_path() -> String {
 fn resolve_openwolf_path_inner() -> String {
     // Bare name on Windows so `where` uses PATHEXT to find .cmd shims.
     let lookup = {
-        let (cmd, arg) = if cfg!(windows) { ("where", "openwolf") } else { ("which", "openwolf") };
+        let (cmd, arg) = if cfg!(windows) {
+            ("where", "openwolf")
+        } else {
+            ("which", "openwolf")
+        };
         let mut c = std::process::Command::new(cmd);
         c.arg(arg)
             .stdout(Stdio::piped())
@@ -428,8 +560,14 @@ fn resolve_openwolf_path_inner() -> String {
     if let Ok(p) = lookup {
         if p.status.success() {
             let s = String::from_utf8_lossy(&p.stdout)
-                .lines().next().unwrap_or("").trim().to_string();
-            if !s.is_empty() { return s; }
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !s.is_empty() {
+                return s;
+            }
         }
     }
 
@@ -451,7 +589,11 @@ fn resolve_openwolf_path_inner() -> String {
             let npx_dir = format!("{}\\AppData\\Local\\npm-cache\\_npx", h);
             if let Ok(entries) = std::fs::read_dir(&npx_dir) {
                 for entry in entries.flatten() {
-                    let bin = entry.path().join("node_modules").join(".bin").join("openwolf.cmd");
+                    let bin = entry
+                        .path()
+                        .join("node_modules")
+                        .join(".bin")
+                        .join("openwolf.cmd");
                     if bin.exists() {
                         candidates.push(bin.to_string_lossy().to_string());
                     }
@@ -468,7 +610,11 @@ fn resolve_openwolf_path_inner() -> String {
             let npx_dir = format!("{}/.npm/_npx", h);
             if let Ok(entries) = std::fs::read_dir(&npx_dir) {
                 for entry in entries.flatten() {
-                    let bin = entry.path().join("node_modules").join(".bin").join("openwolf");
+                    let bin = entry
+                        .path()
+                        .join("node_modules")
+                        .join(".bin")
+                        .join("openwolf");
                     if bin.exists() {
                         candidates.push(bin.to_string_lossy().to_string());
                     }
@@ -480,7 +626,9 @@ fn resolve_openwolf_path_inner() -> String {
     }
 
     for c in &candidates {
-        if std::path::Path::new(c).exists() { return c.clone(); }
+        if std::path::Path::new(c).exists() {
+            return c.clone();
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -499,7 +647,10 @@ pub fn ensure_openwolf(cwd: &str, auto_init: bool) -> bool {
     }
 
     if !auto_init {
-        safe_eprintln!("[openwolf] .wolf/ not found in {} and auto-init disabled", cwd);
+        safe_eprintln!(
+            "[openwolf] .wolf/ not found in {} and auto-init disabled",
+            cwd
+        );
         return false;
     }
 
@@ -546,30 +697,48 @@ fn openwolf_hook_entries(_cwd: &str, _design_qc: bool) -> Vec<(&'static str, ser
     };
 
     vec![
-        ("SessionStart", serde_json::json!({
-            "matcher": "",
-            "hooks": [mk("session-start.js", 5)]
-        })),
-        ("PreToolUse", serde_json::json!({
-            "matcher": "Read",
-            "hooks": [mk("pre-read.js", 5)]
-        })),
-        ("PreToolUse", serde_json::json!({
-            "matcher": "Write|Edit|MultiEdit",
-            "hooks": [mk("pre-write.js", 5)]
-        })),
-        ("PostToolUse", serde_json::json!({
-            "matcher": "Read",
-            "hooks": [mk("post-read.js", 5)]
-        })),
-        ("PostToolUse", serde_json::json!({
-            "matcher": "Write|Edit|MultiEdit",
-            "hooks": [mk("post-write.js", 10)]
-        })),
-        ("Stop", serde_json::json!({
-            "matcher": "",
-            "hooks": [mk("stop.js", 10)]
-        })),
+        (
+            "SessionStart",
+            serde_json::json!({
+                "matcher": "",
+                "hooks": [mk("session-start.js", 5)]
+            }),
+        ),
+        (
+            "PreToolUse",
+            serde_json::json!({
+                "matcher": "Read",
+                "hooks": [mk("pre-read.js", 5)]
+            }),
+        ),
+        (
+            "PreToolUse",
+            serde_json::json!({
+                "matcher": "Write|Edit|MultiEdit",
+                "hooks": [mk("pre-write.js", 5)]
+            }),
+        ),
+        (
+            "PostToolUse",
+            serde_json::json!({
+                "matcher": "Read",
+                "hooks": [mk("post-read.js", 5)]
+            }),
+        ),
+        (
+            "PostToolUse",
+            serde_json::json!({
+                "matcher": "Write|Edit|MultiEdit",
+                "hooks": [mk("post-write.js", 10)]
+            }),
+        ),
+        (
+            "Stop",
+            serde_json::json!({
+                "matcher": "",
+                "hooks": [mk("stop.js", 10)]
+            }),
+        ),
     ]
 }
 
@@ -577,10 +746,10 @@ fn openwolf_hook_entries(_cwd: &str, _design_qc: bool) -> Vec<(&'static str, ser
 /// Reads the file, adds OpenWolf hooks alongside T64's existing hooks
 /// (combining arrays, not overwriting), and writes back.
 pub fn merge_openwolf_hooks(settings_path: &str, cwd: &str, design_qc: bool) -> Result<(), String> {
-    let content = std::fs::read_to_string(settings_path)
-        .map_err(|e| format!("read settings: {}", e))?;
-    let mut settings: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("parse settings: {}", e))?;
+    let content =
+        std::fs::read_to_string(settings_path).map_err(|e| format!("read settings: {}", e))?;
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("parse settings: {}", e))?;
 
     let hooks_obj = settings
         .as_object_mut()
@@ -591,43 +760,52 @@ pub fn merge_openwolf_hooks(settings_path: &str, cwd: &str, design_qc: bool) -> 
     let hooks_map = hooks_obj.as_object_mut().ok_or("hooks not an object")?;
 
     let is_openwolf_entry = |entry: &serde_json::Value| -> bool {
-        entry.get("hooks")
+        entry
+            .get("hooks")
             .and_then(|h| h.as_array())
-            .map(|hooks| hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.contains(".wolf/hooks/") || s.contains("openwolf hook"))
-                    .unwrap_or(false)
-            }))
+            .map(|hooks| {
+                hooks.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.contains(".wolf/hooks/") || s.contains("openwolf hook"))
+                        .unwrap_or(false)
+                })
+            })
             .unwrap_or(false)
     };
 
-    // Snapshot desired entries to detect whether a rewrite is needed.
     let desired = openwolf_hook_entries(cwd, design_qc);
-    let current_ow: std::collections::HashMap<String, Vec<serde_json::Value>> = hooks_map
-        .iter()
-        .map(|(k, v)| {
-            let filtered = v.as_array()
-                .map(|arr| arr.iter().filter(|e| is_openwolf_entry(e)).cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            (k.clone(), filtered)
-        })
-        .collect();
-
-    let mut desired_grouped: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    let mut desired_grouped: std::collections::HashMap<&'static str, Vec<&serde_json::Value>> =
+        std::collections::HashMap::new();
     for (event, entry) in &desired {
-        desired_grouped.entry((*event).to_string()).or_default().push(entry.clone());
+        desired_grouped.entry(*event).or_default().push(entry);
     }
 
-    let already_correct = desired_grouped.iter().all(|(k, v)| {
-        current_ow.get(k).map(|cur| cur == v).unwrap_or(false)
-    }) && current_ow.iter().all(|(k, v)| {
-        v.is_empty() || desired_grouped.contains_key(k)
+    // Equality check using refs (no clones). Rewrite only if the current set
+    // of openwolf entries differs from desired.
+    let already_correct = desired_grouped.iter().all(|(k, desired_vec)| {
+        hooks_map
+            .get(*k)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                let cur: Vec<&serde_json::Value> =
+                    arr.iter().filter(|e| is_openwolf_entry(e)).collect();
+                cur.len() == desired_vec.len()
+                    && cur.iter().zip(desired_vec.iter()).all(|(a, b)| a == b)
+            })
+            .unwrap_or(false)
+    }) && hooks_map.iter().all(|(k, v)| {
+        let has_ow = v
+            .as_array()
+            .map(|arr| arr.iter().any(|e| is_openwolf_entry(e)))
+            .unwrap_or(false);
+        !has_ow || desired_grouped.contains_key(k.as_str())
     });
 
-    if already_correct { return Ok(()); }
+    if already_correct {
+        return Ok(());
+    }
 
-    // Remove all existing OpenWolf hook entries, then insert the fresh set.
     for (_event, arr_val) in hooks_map.iter_mut() {
         if let Some(arr) = arr_val.as_array_mut() {
             arr.retain(|e| !is_openwolf_entry(e));

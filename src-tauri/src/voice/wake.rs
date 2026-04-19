@@ -161,14 +161,14 @@ impl WakeDetector {
                     return None;
                 }
             };
-            let (shape, data) =
-                match mel_outputs[self.mel_out.as_str()].try_extract_tensor::<f32>() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        safe_eprintln!("[voice/wake] mel extract: {}", e);
-                        return None;
-                    }
-                };
+            let (shape, data) = match mel_outputs[self.mel_out.as_str()].try_extract_tensor::<f32>()
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    safe_eprintln!("[voice/wake] mel extract: {}", e);
+                    return None;
+                }
+            };
             let total = data.len();
             if total == 0 || total % bins_per_frame != 0 {
                 safe_eprintln!(
@@ -233,8 +233,7 @@ impl WakeDetector {
                         break;
                     }
                 };
-                let (_s, edata) = match emb_out[self.emb_out.as_str()].try_extract_tensor::<f32>()
-                {
+                let (_s, edata) = match emb_out[self.emb_out.as_str()].try_extract_tensor::<f32>() {
                     Ok(v) => v,
                     Err(e) => {
                         safe_eprintln!("[voice/wake] emb extract: {}", e);
@@ -298,8 +297,7 @@ impl WakeDetector {
         // Push score into the rolling window (FIFO via modular index).
         self.recent_scores[self.score_idx] = score;
         self.score_idx = (self.score_idx + 1) % SCORE_WINDOW;
-        let window_mean: f32 =
-            self.recent_scores.iter().sum::<f32>() / SCORE_WINDOW as f32;
+        let window_mean: f32 = self.recent_scores.iter().sum::<f32>() / SCORE_WINDOW as f32;
         // Dual trigger: clean spike OR sustained-but-quiet hit.
         let fire = score > self.threshold || window_mean > self.threshold * 0.85;
         if fire {

@@ -143,8 +143,8 @@ pub struct VadAdapter {
 
 impl VadAdapter {
     pub fn try_load() -> Result<Self, String> {
-        let info =
-            find(ModelKind::Vad, "silero").ok_or_else(|| "vad model not in registry".to_string())?;
+        let info = find(ModelKind::Vad, "silero")
+            .ok_or_else(|| "vad model not in registry".to_string())?;
         if !is_downloaded(info) {
             return Err("vad model not downloaded".to_string());
         }

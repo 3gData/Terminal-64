@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "voice-dictation")]
 use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
-    WhisperGrammarElement, WhisperGrammarElementType,
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperGrammarElement,
+    WhisperGrammarElementType,
 };
 
 pub const SAMPLE_RATE: usize = 16_000;
@@ -205,7 +205,13 @@ pub fn snap_to_canonical(raw: &str) -> String {
         .trim()
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
     if tokens.is_empty() {
@@ -341,11 +347,26 @@ pub fn build_command_grammar() -> Vec<WhisperGrammarElement> {
     out.push(WhisperGrammarElement::new(T::CharacterAlternate, 0));
     // First freetext char: letter or digit.
     out.push(WhisperGrammarElement::new(T::Character, 'a' as u32));
-    out.push(WhisperGrammarElement::new(T::CharacterRangeUpper, 'z' as u32));
-    out.push(WhisperGrammarElement::new(T::CharacterAlternate, 'A' as u32));
-    out.push(WhisperGrammarElement::new(T::CharacterRangeUpper, 'Z' as u32));
-    out.push(WhisperGrammarElement::new(T::CharacterAlternate, '0' as u32));
-    out.push(WhisperGrammarElement::new(T::CharacterRangeUpper, '9' as u32));
+    out.push(WhisperGrammarElement::new(
+        T::CharacterRangeUpper,
+        'z' as u32,
+    ));
+    out.push(WhisperGrammarElement::new(
+        T::CharacterAlternate,
+        'A' as u32,
+    ));
+    out.push(WhisperGrammarElement::new(
+        T::CharacterRangeUpper,
+        'Z' as u32,
+    ));
+    out.push(WhisperGrammarElement::new(
+        T::CharacterAlternate,
+        '0' as u32,
+    ));
+    out.push(WhisperGrammarElement::new(
+        T::CharacterRangeUpper,
+        '9' as u32,
+    ));
 
     out.push(WhisperGrammarElement::new(T::End, 0));
     out

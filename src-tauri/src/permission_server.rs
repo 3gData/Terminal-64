@@ -34,8 +34,9 @@ fn build_hook_settings(port: u16, secret: &str, run_token: &str) -> serde_json::
         // Events with a `matcher` field (tool name / source / trigger) need a non-empty
         // regex to fire. "." matches any single char, covering all values.
         let matcher = match *event {
-            "PreToolUse" | "PostToolUse" | "PermissionRequest"
-            | "SessionStart" | "PreCompact" => ".",
+            "PreToolUse" | "PostToolUse" | "PermissionRequest" | "SessionStart" | "PreCompact" => {
+                "."
+            }
             _ => "",
         };
         hooks.insert(
@@ -88,8 +89,7 @@ impl PermissionServer {
         let alive = Arc::new(AtomicBool::new(false));
         let pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let session_map: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let session_map: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -137,7 +137,9 @@ impl PermissionServer {
                 let app = app_handle.clone();
                 let deleg = delegation_messages.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, &secret, &pending, &sessions, &app, &deleg) {
+                    if let Err(e) =
+                        handle_connection(stream, &secret, &pending, &sessions, &app, &deleg)
+                    {
                         safe_eprintln!("[perm-server] Connection error: {}", e);
                     }
                 });
@@ -162,7 +164,11 @@ impl PermissionServer {
             match self.spawn_listener() {
                 Ok(()) => {
                     let new_port = self.port.load(Ordering::SeqCst);
-                    safe_eprintln!("[perm-server] Restarted on port {} (attempt {})", new_port, attempt);
+                    safe_eprintln!(
+                        "[perm-server] Restarted on port {} (attempt {})",
+                        new_port,
+                        attempt
+                    );
                     // Re-register all existing sessions with the new port
                     self.reregister_sessions();
                     return Ok(new_port);
@@ -180,20 +186,37 @@ impl PermissionServer {
     /// After a restart on a new port, re-write all temp settings files with the new URL.
     fn reregister_sessions(&self) {
         let new_port = self.port.load(Ordering::SeqCst);
-        let tokens: Vec<(String, String)> = self.session_map
-            .lock().unwrap_or_else(|e| e.into_inner())
-            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let tokens: Vec<(String, String)> = self
+            .session_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         for (run_token, session_id) in &tokens {
             let settings = build_hook_settings(new_port, &self.secret, run_token);
-            if let Some(path) = self.settings_files.lock().unwrap_or_else(|e| e.into_inner()).get(run_token) {
+            if let Some(path) = self
+                .settings_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(run_token)
+            {
                 if let Err(e) = std::fs::write(path, settings.to_string()) {
-                    safe_eprintln!("[perm-server] Failed to rewrite settings for session {}: {}", session_id, e);
+                    safe_eprintln!(
+                        "[perm-server] Failed to rewrite settings for session {}: {}",
+                        session_id,
+                        e
+                    );
                 }
             }
         }
         if !tokens.is_empty() {
-            safe_eprintln!("[perm-server] Re-registered {} sessions on new port {}", tokens.len(), new_port);
+            safe_eprintln!(
+                "[perm-server] Re-registered {} sessions on new port {}",
+                tokens.len(),
+                new_port
+            );
         }
     }
 
@@ -203,8 +226,13 @@ impl PermissionServer {
 
     pub fn cleanup_delegation_group(&self, group_id: &str) {
         match self.delegation_messages.lock() {
-            Ok(mut store) => { store.remove(group_id); }
-            Err(e) => safe_eprintln!("[perm-server] Lock poisoned in cleanup_delegation_group: {}", e),
+            Ok(mut store) => {
+                store.remove(group_id);
+            }
+            Err(e) => safe_eprintln!(
+                "[perm-server] Lock poisoned in cleanup_delegation_group: {}",
+                e
+            ),
         }
     }
 
@@ -219,7 +247,12 @@ impl PermissionServer {
             let map = self.session_map.lock().map_err(|e| e.to_string())?;
             for (token, sid) in map.iter() {
                 if sid == session_id {
-                    if let Some(path) = self.settings_files.lock().map_err(|e| e.to_string())?.get(token) {
+                    if let Some(path) = self
+                        .settings_files
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .get(token)
+                    {
                         return Ok((token.clone(), path.clone()));
                     }
                 }
@@ -230,8 +263,12 @@ impl PermissionServer {
         let port = self.port.load(Ordering::SeqCst);
         let settings = build_hook_settings(port, &self.secret, &run_token);
 
-        let path = std::env::temp_dir().join(format!("t64-hook-{}.json", &run_token[..run_token.len().min(12)]));
-        std::fs::write(&path, settings.to_string()).map_err(|e| format!("write settings: {}", e))?;
+        let path = std::env::temp_dir().join(format!(
+            "t64-hook-{}.json",
+            &run_token[..run_token.len().min(12)]
+        ));
+        std::fs::write(&path, settings.to_string())
+            .map_err(|e| format!("write settings: {}", e))?;
 
         self.session_map
             .lock()
@@ -252,15 +289,28 @@ impl PermissionServer {
 
     /// Unregister a session: remove mapping, delete temp file, deny pending requests.
     pub fn unregister_session(&self, run_token: &str) {
-        self.session_map.lock().unwrap_or_else(|e| e.into_inner()).remove(run_token);
-        if let Some(path) = self.settings_files.lock().unwrap_or_else(|e| e.into_inner()).remove(run_token) {
+        self.session_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(run_token);
+        if let Some(path) = self
+            .settings_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(run_token)
+        {
             let _ = std::fs::remove_file(path);
         }
     }
 
     /// Resolve a pending permission request.
     pub fn resolve(&self, request_id: &str, allow: bool, reason: &str) {
-        if let Some(tx) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(request_id) {
+        if let Some(tx) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(request_id)
+        {
             let _ = tx.send((allow, reason.to_string()));
         }
     }
@@ -274,9 +324,7 @@ fn handle_connection(
     app_handle: &AppHandle,
     delegation_messages: &Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>,
 ) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
 
     // Read headers (cap at 16KB to prevent DoS)
     const MAX_HEADER_SIZE: usize = 16 * 1024;
@@ -317,8 +365,12 @@ fn handle_connection(
             .unwrap_or(false);
 
         if !auth_valid {
-            safe_eprintln!("[delegation] AUTH FAILED for {} {} (got: {:?})",
-                method, path, auth_header.map(|h| h.chars().take(20).collect::<String>()));
+            safe_eprintln!(
+                "[delegation] AUTH FAILED for {} {} (got: {:?})",
+                method,
+                path,
+                auth_header.map(|h| h.chars().take(20).collect::<String>())
+            );
             send_http(&mut stream, 403, r#"{"error":"forbidden"}"#);
             return Ok(());
         }
@@ -336,7 +388,9 @@ fn handle_connection(
         if method == "POST" && (path == "/delegation/message" || path == "/delegation/complete") {
             let mut body = vec![0u8; content_length];
             if content_length > 0 {
-                reader.read_exact(&mut body).map_err(|e| format!("body: {}", e))?;
+                reader
+                    .read_exact(&mut body)
+                    .map_err(|e| format!("body: {}", e))?;
             }
             let body_text = String::from_utf8_lossy(&body);
             let parsed: serde_json::Value = match serde_json::from_str(&body_text) {
@@ -353,7 +407,11 @@ fn handle_connection(
             } else {
                 parsed["message"].as_str().unwrap_or("").to_string()
             };
-            let msg_type = if path == "/delegation/complete" { "complete" } else { "chat" };
+            let msg_type = if path == "/delegation/complete" {
+                "complete"
+            } else {
+                "chat"
+            };
 
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -370,13 +428,24 @@ fn handle_connection(
 
             // Store message
             match delegation_messages.lock() {
-                Ok(mut store) => { store.entry(group_id.clone()).or_default().push(del_msg.clone()); }
+                Ok(mut store) => {
+                    store
+                        .entry(group_id.clone())
+                        .or_default()
+                        .push(del_msg.clone());
+                }
                 Err(e) => safe_eprintln!("[delegation] Lock poisoned storing message: {}", e),
             }
 
             let _ = app_handle.emit("delegation-message", &del_msg);
 
-            safe_eprintln!("[delegation] {} from {} in group {}: {}", msg_type, agent, &group_id[..group_id.len().min(8)], &message[..message.len().min(80)]);
+            safe_eprintln!(
+                "[delegation] {} from {} in group {}: {}",
+                msg_type,
+                agent,
+                &group_id[..group_id.len().min(8)],
+                &message[..message.len().min(80)]
+            );
 
             send_http(&mut stream, 200, r#"{"ok":true}"#);
             return Ok(());
@@ -384,11 +453,13 @@ fn handle_connection(
 
         if method == "GET" && path.starts_with("/delegation/messages") {
             let query = path.split('?').nth(1).unwrap_or("");
-            let params: HashMap<&str, &str> = query.split('&')
-                .filter_map(|p| p.split_once('='))
-                .collect();
+            let params: HashMap<&str, &str> =
+                query.split('&').filter_map(|p| p.split_once('=')).collect();
             let group_id = params.get("group").unwrap_or(&"");
-            let last_n: usize = params.get("last").and_then(|v| v.parse().ok()).unwrap_or(20);
+            let last_n: usize = params
+                .get("last")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20);
 
             let recent: Vec<DelegationMessage> = match delegation_messages.lock() {
                 Ok(store) => {
@@ -426,7 +497,11 @@ fn handle_connection(
     }
     let run_token = parts[3].to_string();
     // Event name is the 5th path segment; default to PermissionRequest for backwards compat
-    let event_name = if parts.len() >= 5 { parts[4] } else { "PermissionRequest" };
+    let event_name = if parts.len() >= 5 {
+        parts[4]
+    } else {
+        "PermissionRequest"
+    };
 
     // Parse Content-Length (cap at 1MB to prevent DoS)
     const MAX_BODY: usize = 1024 * 1024;
@@ -449,7 +524,10 @@ fn handle_connection(
     let parsed: serde_json::Value = match serde_json::from_str(&body_str) {
         Ok(v) => v,
         Err(e) => {
-            safe_eprintln!("[perm-server] Failed to parse permission request body: {}", e);
+            safe_eprintln!(
+                "[perm-server] Failed to parse permission request body: {}",
+                e
+            );
             serde_json::Value::default()
         }
     };
@@ -492,11 +570,17 @@ fn handle_connection(
             let request_id = next_id();
             safe_eprintln!(
                 "[perm-server] Permission request {} for {} in session {}: {}",
-                request_id, tool_name, &session_id[..session_id.len().min(8)], tool_name
+                request_id,
+                tool_name,
+                &session_id[..session_id.len().min(8)],
+                tool_name
             );
 
             let (tx, rx) = mpsc::sync_channel(1);
-            pending.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), tx);
+            pending
+                .lock()
+                .map_err(|e| e.to_string())?
+                .insert(request_id.clone(), tx);
 
             let _ = app_handle.emit(
                 "permission-request",
@@ -514,7 +598,10 @@ fn handle_connection(
             let (allow, reason) = match rx.recv_timeout(Duration::from_secs(300)) {
                 Ok(decision) => decision,
                 Err(_) => {
-                    pending.lock().map_err(|e| e.to_string())?.remove(&request_id);
+                    pending
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .remove(&request_id);
                     safe_eprintln!("[perm-server] Timeout for request {}", request_id);
                     (false, "Permission request timed out".to_string())
                 }

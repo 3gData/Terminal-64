@@ -71,7 +71,10 @@ impl DiscordBot {
         rt.block_on(async {
             let channels = match fetch_guild_channels(&state_for_init, &token_for_init).await {
                 Ok(ch) => ch,
-                Err(e) => { safe_eprintln!("[discord] Failed to fetch channels: {}", e); return; }
+                Err(e) => {
+                    safe_eprintln!("[discord] Failed to fetch channels: {}", e);
+                    return;
+                }
             };
             if let Err(e) = ensure_category(&state_for_init, &token_for_init, &channels).await {
                 safe_eprintln!("[discord] Failed to ensure category: {}", e);
@@ -95,12 +98,25 @@ impl DiscordBot {
 
         rt.spawn(async move {
             loop {
-                if *shutdown_rx_gw.borrow() { break; }
-                if let Err(e) = run_gateway(&token_for_gw, &state_for_gw, &ah, &mut shutdown_rx_gw, &typing_stops_for_gw, &http_for_typing).await {
+                if *shutdown_rx_gw.borrow() {
+                    break;
+                }
+                if let Err(e) = run_gateway(
+                    &token_for_gw,
+                    &state_for_gw,
+                    &ah,
+                    &mut shutdown_rx_gw,
+                    &typing_stops_for_gw,
+                    &http_for_typing,
+                )
+                .await
+                {
                     safe_eprintln!("[discord] Gateway error: {}, reconnecting in 5s...", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
-                if *shutdown_rx_gw.borrow() { break; }
+                if *shutdown_rx_gw.borrow() {
+                    break;
+                }
             }
             safe_eprintln!("[discord] Gateway loop ended");
         });
@@ -118,7 +134,8 @@ impl DiscordBot {
                 // Look up channel with a brief lock, then release before sending
                 let channel_id = {
                     let s = state_for_queue.lock().await;
-                    s.as_ref().and_then(|bs| bs.session_to_channel.get(&session_id).copied())
+                    s.as_ref()
+                        .and_then(|bs| bs.session_to_channel.get(&session_id).copied())
                 };
                 if let Some(channel_id) = channel_id {
                     // Stop the typing indicator — a real message is going out
@@ -131,7 +148,13 @@ impl DiscordBot {
                         Err(e) => safe_eprintln!("[discord] Lock poisoned (typing stops): {}", e),
                     }
                     for chunk in split_msg(&text, 1900) {
-                        let _ = send_discord_message(&http_for_queue, &token_for_queue, channel_id, &chunk).await;
+                        let _ = send_discord_message(
+                            &http_for_queue,
+                            &token_for_queue,
+                            channel_id,
+                            &chunk,
+                        )
+                        .await;
                     }
                 }
             }
@@ -140,15 +163,25 @@ impl DiscordBot {
         // Listen for claude-event — forward assistant messages to Discord
         let tx1 = msg_tx.clone();
         let unlisten1 = app_handle.listen("claude-event", move |event| {
-            let Ok(payload) = serde_json::from_str::<ClaudeEvent>(event.payload()) else { return };
-            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload.data) else { return };
-            if parsed["type"].as_str() != Some("assistant") { return; }
-            let Some(content) = parsed["message"]["content"].as_array() else { return };
+            let Ok(payload) = serde_json::from_str::<ClaudeEvent>(event.payload()) else {
+                return;
+            };
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload.data) else {
+                return;
+            };
+            if parsed["type"].as_str() != Some("assistant") {
+                return;
+            }
+            let Some(content) = parsed["message"]["content"].as_array() else {
+                return;
+            };
 
             let mut text = String::new();
             for block in content {
                 if block["type"] == "text" {
-                    if let Some(t) = block["text"].as_str() { text.push_str(t); }
+                    if let Some(t) = block["text"].as_str() {
+                        text.push_str(t);
+                    }
                 } else if block["type"] == "tool_use" {
                     let name = block["name"].as_str().unwrap_or("Tool");
                     let detail = summarize_tool(name, &block["input"]);
@@ -163,7 +196,9 @@ impl DiscordBot {
         // Listen for GUI messages — forward as "ADMIN: message"
         let tx2 = msg_tx.clone();
         let unlisten2 = app_handle.listen("gui-message", move |event| {
-            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(event.payload()) else { return };
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
+                return;
+            };
             let sid = parsed["session_id"].as_str().unwrap_or("").to_string();
             let content = parsed["content"].as_str().unwrap_or("").to_string();
             if !sid.is_empty() && !content.is_empty() {
@@ -172,10 +207,8 @@ impl DiscordBot {
         });
 
         // Store unlisten handles for cleanup
-        *self._unlisten_handles.lock().map_err(|e| e.to_string())? = vec![
-            Box::new(unlisten1),
-            Box::new(unlisten2),
-        ];
+        *self._unlisten_handles.lock().map_err(|e| e.to_string())? =
+            vec![Box::new(unlisten1), Box::new(unlisten2)];
 
         self.shutdown_tx = Some(shutdown_tx);
         self.runtime = Some(rt);
@@ -196,10 +229,15 @@ impl DiscordBot {
         let state = self.state.clone();
         let new_rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => Some(rt),
-            Err(e) => { safe_eprintln!("[discord] Failed to create runtime for cleanup: {}", e); None }
+            Err(e) => {
+                safe_eprintln!("[discord] Failed to create runtime for cleanup: {}", e);
+                None
+            }
         };
         if let Some(rt) = new_rt {
-            rt.block_on(async { *state.lock().await = None; });
+            rt.block_on(async {
+                *state.lock().await = None;
+            });
         }
         Ok(())
     }
@@ -209,22 +247,33 @@ impl DiscordBot {
     }
 
     pub fn unlink_session(&self, session_id: &str) -> Result<(), String> {
-        if self.runtime.is_none() { return Ok(()); }
+        if self.runtime.is_none() {
+            return Ok(());
+        }
         let state = self.state.clone();
         let sid = session_id.to_string();
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().map_err(|e| e.to_string())?;
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
             rt.block_on(async {
                 let mut s = state.lock().await;
                 let bs = s.as_mut().ok_or("No state".to_string())?;
                 if let Some(channel_id) = bs.session_to_channel.remove(&sid) {
                     bs.channel_to_session.remove(&channel_id);
-                    let _ = bs.http.delete(format!("{}/channels/{}", DISCORD_API, channel_id))
+                    let _ = bs
+                        .http
+                        .delete(format!("{}/channels/{}", DISCORD_API, channel_id))
                         .header("Authorization", format!("Bot {}", bs.token))
-                        .send().await;
-                    safe_eprintln!("[discord] Deleted channel {} for session {}", channel_id, sid);
+                        .send()
+                        .await;
+                    safe_eprintln!(
+                        "[discord] Deleted channel {} for session {}",
+                        channel_id,
+                        sid
+                    );
                 }
                 Ok(())
             })
@@ -232,7 +281,12 @@ impl DiscordBot {
         handle.join().map_err(|_| "Thread panicked".to_string())?
     }
 
-    pub fn link_session(&self, session_id: String, session_name: String, cwd: String) -> Result<(), String> {
+    pub fn link_session(
+        &self,
+        session_id: String,
+        session_name: String,
+        cwd: String,
+    ) -> Result<(), String> {
         if self.runtime.is_none() {
             return Err("Bot not running".into());
         }
@@ -267,12 +321,16 @@ impl DiscordBot {
     }
 
     pub fn cleanup_orphaned(&self) -> Result<(), String> {
-        if self.runtime.is_none() { return Ok(()); }
+        if self.runtime.is_none() {
+            return Ok(());
+        }
         let state = self.state.clone();
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().map_err(|e| e.to_string())?;
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
             rt.block_on(async {
                 let s = state.lock().await;
                 let bs = s.as_ref().ok_or("No state".to_string())?;
@@ -284,13 +342,22 @@ impl DiscordBot {
         handle.join().map_err(|_| "Thread panicked".to_string())?
     }
 
-    pub fn rename_or_link_session(&self, session_id: String, session_name: String, cwd: String) -> Result<(), String> {
-        if self.runtime.is_none() { return Ok(()); }
+    pub fn rename_or_link_session(
+        &self,
+        session_id: String,
+        session_name: String,
+        cwd: String,
+    ) -> Result<(), String> {
+        if self.runtime.is_none() {
+            return Ok(());
+        }
         let state = self.state.clone();
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all().build().map_err(|e| e.to_string())?;
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
             rt.block_on(async {
                 let mut s = state.lock().await;
                 let bs = s.as_mut().ok_or("No state".to_string())?;
@@ -299,10 +366,13 @@ impl DiscordBot {
                     // Channel exists — rename it
                     let new_name = sanitize_name(&session_name);
                     let body = serde_json::json!({ "name": new_name });
-                    let _ = bs.http.patch(format!("{}/channels/{}", DISCORD_API, channel_id))
+                    let _ = bs
+                        .http
+                        .patch(format!("{}/channels/{}", DISCORD_API, channel_id))
                         .header("Authorization", format!("Bot {}", bs.token))
                         .json(&body)
-                        .send().await;
+                        .send()
+                        .await;
                     safe_eprintln!("[discord] Renamed channel {} to #{}", channel_id, new_name);
                     Ok(())
                 } else if !session_name.is_empty() {
@@ -319,16 +389,27 @@ impl DiscordBot {
 }
 
 /// Fetch all guild channels once. Used by ensure_category and restore_channel_mappings.
-async fn fetch_guild_channels(state: &Arc<TokioMutex<Option<BotState>>>, token: &str) -> Result<Vec<serde_json::Value>, String> {
+async fn fetch_guild_channels(
+    state: &Arc<TokioMutex<Option<BotState>>>,
+    token: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     let s = state.lock().await;
     let bs = s.as_ref().ok_or("No state")?;
-    let resp = bs.http.get(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
+    let resp = bs
+        .http
+        .get(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
         .header("Authorization", format!("Bot {}", token))
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     resp.json().await.map_err(|e| e.to_string())
 }
 
-async fn ensure_category(state: &Arc<TokioMutex<Option<BotState>>>, token: &str, channels: &[serde_json::Value]) -> Result<(), String> {
+async fn ensure_category(
+    state: &Arc<TokioMutex<Option<BotState>>>,
+    token: &str,
+    channels: &[serde_json::Value],
+) -> Result<(), String> {
     let mut s = state.lock().await;
     let bs = s.as_mut().ok_or("No state")?;
 
@@ -342,13 +423,21 @@ async fn ensure_category(state: &Arc<TokioMutex<Option<BotState>>>, token: &str,
     }
 
     let body = serde_json::json!({ "name": "Terminal 64", "type": 4 });
-    let resp = bs.http.post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
+    let resp = bs
+        .http
+        .post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
         .header("Authorization", format!("Bot {}", token))
         .json(&body)
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let cat: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let id = cat["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+    let id = cat["id"]
+        .as_str()
+        .unwrap_or("0")
+        .parse::<u64>()
+        .unwrap_or(0);
     bs.category_id = Some(id);
     safe_eprintln!("[discord] Created category: {}", id);
     Ok(())
@@ -365,9 +454,12 @@ async fn run_gateway(
     typing_http: &HttpClient,
 ) -> Result<(), String> {
     let http = reqwest::Client::new();
-    let gw_resp = http.get(format!("{}/gateway/bot", DISCORD_API))
+    let gw_resp = http
+        .get(format!("{}/gateway/bot", DISCORD_API))
         .header("Authorization", format!("Bot {}", token))
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let gw: serde_json::Value = gw_resp.json().await.map_err(|e| e.to_string())?;
     let url = gw["url"].as_str().unwrap_or("wss://gateway.discord.gg");
@@ -376,7 +468,8 @@ async fn run_gateway(
     safe_eprintln!("[discord] Connecting to gateway: {}", ws_url);
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
-        .await.map_err(|e| format!("WS connect: {}", e))?;
+        .await
+        .map_err(|e| format!("WS connect: {}", e))?;
 
     let (mut write, mut read) = ws_stream.split();
     let mut sequence: Option<u64> = None;
@@ -577,29 +670,62 @@ async fn run_gateway(
     Ok(())
 }
 
-async fn send_discord_message(http: &HttpClient, token: &str, channel_id: u64, content: &str) -> Result<(), String> {
+async fn send_discord_message(
+    http: &HttpClient,
+    token: &str,
+    channel_id: u64,
+    content: &str,
+) -> Result<(), String> {
     http.post(format!("{}/channels/{}/messages", DISCORD_API, channel_id))
         .header("Authorization", format!("Bot {}", token))
         .json(&serde_json::json!({ "content": content }))
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 async fn trigger_typing(http: &HttpClient, token: &str, channel_id: u64) {
-    let _ = http.post(format!("{}/channels/{}/typing", DISCORD_API, channel_id))
+    let _ = http
+        .post(format!("{}/channels/{}/typing", DISCORD_API, channel_id))
         .header("Authorization", format!("Bot {}", token))
-        .send().await;
+        .send()
+        .await;
 }
 
 fn sanitize_name(name: &str) -> String {
-    let s: String = name.to_lowercase().chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    let s: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
     let t = s.trim_matches('-').to_string();
-    if t.is_empty() { "session".into() } else if t.len() > 90 { t[..90].into() } else { t }
+    if t.is_empty() {
+        "session".into()
+    } else if t.len() > 90 {
+        t[..90].into()
+    } else {
+        t
+    }
 }
 
 fn summarize_tool(name: &str, input: &serde_json::Value) -> String {
     match name {
-        "Bash" => format!("`{}`", input["command"].as_str().unwrap_or("").chars().take(60).collect::<String>()),
+        "Bash" => format!(
+            "`{}`",
+            input["command"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>()
+        ),
         "Read" | "Edit" | "Write" => format!("`{}`", input["file_path"].as_str().unwrap_or("")),
         "Glob" => format!("`{}`", input["pattern"].as_str().unwrap_or("")),
         "Grep" => format!("`/{}/`", input["pattern"].as_str().unwrap_or("")),
@@ -607,7 +733,10 @@ fn summarize_tool(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-async fn restore_channel_mappings(state: &Arc<TokioMutex<Option<BotState>>>, channels: &[serde_json::Value]) -> Result<(), String> {
+async fn restore_channel_mappings(
+    state: &Arc<TokioMutex<Option<BotState>>>,
+    channels: &[serde_json::Value],
+) -> Result<(), String> {
     let mut s = state.lock().await;
     let bs = s.as_mut().ok_or("No state")?;
     let cat_id = bs.category_id.ok_or("No category")?;
@@ -615,11 +744,17 @@ async fn restore_channel_mappings(state: &Arc<TokioMutex<Option<BotState>>>, cha
     let mut restored = 0usize;
     for ch in channels {
         let parent = ch["parent_id"].as_str().and_then(|s| s.parse::<u64>().ok());
-        if parent != Some(cat_id) { continue; }
-        if ch["type"] != 0 { continue; }
+        if parent != Some(cat_id) {
+            continue;
+        }
+        if ch["type"] != 0 {
+            continue;
+        }
 
         let ch_id = ch["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
-        if ch_id == 0 { continue; }
+        if ch_id == 0 {
+            continue;
+        }
 
         // Channel topics are "Terminal 64: {session_id} | {cwd}"
         if let Some(topic) = ch["topic"].as_str() {
@@ -641,25 +776,39 @@ async fn restore_channel_mappings(state: &Arc<TokioMutex<Option<BotState>>>, cha
         }
     }
 
-    safe_eprintln!("[discord] Restored {} channel mappings from existing channels", restored);
+    safe_eprintln!(
+        "[discord] Restored {} channel mappings from existing channels",
+        restored
+    );
     Ok(())
 }
 
-async fn cleanup_orphaned_channels(state: &Arc<TokioMutex<Option<BotState>>>, token: &str) -> Result<(), String> {
+async fn cleanup_orphaned_channels(
+    state: &Arc<TokioMutex<Option<BotState>>>,
+    token: &str,
+) -> Result<(), String> {
     let s = state.lock().await;
     let bs = s.as_ref().ok_or("No state")?;
     let cat_id = bs.category_id.ok_or("No category")?;
 
-    let resp = bs.http.get(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
+    let resp = bs
+        .http
+        .get(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
         .header("Authorization", format!("Bot {}", token))
-        .send().await.map_err(|e| e.to_string())?;
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let channels: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
 
     for ch in &channels {
         let parent = ch["parent_id"].as_str().and_then(|s| s.parse::<u64>().ok());
-        if parent != Some(cat_id) { continue; }
-        if ch["type"] != 0 { continue; } // Only text channels
+        if parent != Some(cat_id) {
+            continue;
+        }
+        if ch["type"] != 0 {
+            continue;
+        } // Only text channels
 
         let ch_id_str = ch["id"].as_str().unwrap_or("0");
         let ch_id = ch_id_str.parse::<u64>().unwrap_or(0);
@@ -667,10 +816,17 @@ async fn cleanup_orphaned_channels(state: &Arc<TokioMutex<Option<BotState>>>, to
 
         // If this channel isn't in our session map, it's orphaned
         if !bs.channel_to_session.contains_key(&ch_id) {
-            safe_eprintln!("[discord] Deleting orphaned channel #{} ({})", ch_name, ch_id);
-            let _ = bs.http.delete(format!("{}/channels/{}", DISCORD_API, ch_id))
+            safe_eprintln!(
+                "[discord] Deleting orphaned channel #{} ({})",
+                ch_name,
+                ch_id
+            );
+            let _ = bs
+                .http
+                .delete(format!("{}/channels/{}", DISCORD_API, ch_id))
                 .header("Authorization", format!("Bot {}", token))
-                .send().await;
+                .send()
+                .await;
         }
     }
 
@@ -697,16 +853,23 @@ async fn create_session_channel(
         },
     });
 
-    safe_eprintln!("[discord] Creating channel #{} for session {}", channel_name, session_id);
+    safe_eprintln!(
+        "[discord] Creating channel #{} for session {}",
+        channel_name,
+        session_id
+    );
 
     let mut channel: serde_json::Value;
     let mut status;
     let mut attempts = 0;
     loop {
-        let resp = bs.http.post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
+        let resp = bs
+            .http
+            .post(format!("{}/guilds/{}/channels", DISCORD_API, bs.guild_id))
             .header("Authorization", format!("Bot {}", bs.token))
             .json(&body)
-            .send().await
+            .send()
+            .await
             .map_err(|e| format!("HTTP error: {}", e))?;
 
         status = resp.status();
@@ -726,32 +889,62 @@ async fn create_session_channel(
         return Err(format!("Discord API error {}: {:?}", status, channel));
     }
 
-    let channel_id = channel["id"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+    let channel_id = channel["id"]
+        .as_str()
+        .unwrap_or("0")
+        .parse::<u64>()
+        .unwrap_or(0);
     if channel_id == 0 {
         return Err(format!("Failed to parse channel ID: {:?}", channel));
     }
 
-    safe_eprintln!("[discord] Created #{} (ID: {}) for session {}", channel_name, channel_id, session_id);
-    bs.session_to_channel.insert(session_id.to_string(), channel_id);
-    bs.channel_to_session.insert(channel_id, session_id.to_string());
+    safe_eprintln!(
+        "[discord] Created #{} (ID: {}) for session {}",
+        channel_name,
+        channel_id,
+        session_id
+    );
+    bs.session_to_channel
+        .insert(session_id.to_string(), channel_id);
+    bs.channel_to_session
+        .insert(channel_id, session_id.to_string());
     if !cwd.is_empty() {
-        bs.session_cwd.insert(session_id.to_string(), cwd.to_string());
+        bs.session_cwd
+            .insert(session_id.to_string(), cwd.to_string());
     }
 
     Ok(channel_id)
 }
 
 fn split_msg(text: &str, max: usize) -> Vec<String> {
-    if max == 0 { return vec![text.to_string()]; }
-    if text.len() <= max { return vec![text.to_string()]; }
+    if max == 0 {
+        return vec![text.to_string()];
+    }
+    if text.len() <= max {
+        return vec![text.to_string()];
+    }
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
         let mut end = (start + max).min(text.len());
         // Ensure we don't split in the middle of a multi-byte UTF-8 character
-        while end > start && !text.is_char_boundary(end) { end -= 1; }
-        if end == start { end = start + 1; while end < text.len() && !text.is_char_boundary(end) { end += 1; } }
-        let split = if end < text.len() { text[start..end].rfind('\n').map(|i| start + i + 1).unwrap_or(end) } else { end };
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = start + 1;
+            while end < text.len() && !text.is_char_boundary(end) {
+                end += 1;
+            }
+        }
+        let split = if end < text.len() {
+            text[start..end]
+                .rfind('\n')
+                .map(|i| start + i + 1)
+                .unwrap_or(end)
+        } else {
+            end
+        };
         chunks.push(text[start..split].to_string());
         start = split;
     }

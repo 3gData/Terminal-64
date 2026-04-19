@@ -39,12 +39,21 @@ mod widget_server;
 fn validate_shell_command(command: &str) -> Result<(), String> {
     let lower = command.to_lowercase();
     let blocked_patterns: &[(&str, &str)] = &[
-        ("rm -rf /", "Refusing to run destructive command targeting root"),
-        ("rm -rf ~", "Refusing to run destructive command targeting home directory"),
+        (
+            "rm -rf /",
+            "Refusing to run destructive command targeting root",
+        ),
+        (
+            "rm -rf ~",
+            "Refusing to run destructive command targeting home directory",
+        ),
         ("mkfs", "Refusing to run filesystem format command"),
         ("dd if=", "Refusing to run raw disk write command"),
         (":(){", "Refusing to run fork bomb"),
-        ("chmod -r 777 /", "Refusing to run recursive permission change on root"),
+        (
+            "chmod -r 777 /",
+            "Refusing to run recursive permission change on root",
+        ),
         ("chown -r", "Refusing to run recursive ownership change"),
         ("> /dev/sd", "Refusing to write to raw block device"),
         ("> /dev/nvme", "Refusing to write to raw block device"),
@@ -86,14 +95,23 @@ use discord_bot::DiscordBot;
 use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use pty_manager::PtyManager;
-use vector_store::VectorStore;
-use voice_manager::VoiceManager;
-use widget_server::WidgetServer;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use types::*;
+use vector_store::VectorStore;
+use voice_manager::VoiceManager;
+use widget_server::WidgetServer;
 
-const SKIP_DIRS: &[&str] = &["node_modules", ".git", "target", "dist", ".next", "__pycache__", ".venv", "vendor"];
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "target",
+    "dist",
+    ".next",
+    "__pycache__",
+    ".venv",
+    "vendor",
+];
 
 fn session_project_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
     let home = dirs::home_dir().ok_or("No home dir")?;
@@ -147,16 +165,30 @@ fn resize_terminal(
 }
 
 #[tauri::command]
-fn close_terminal(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+fn close_terminal(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     state.pty_manager.close(&id)
 }
 
 /// If OpenWolf is enabled, ensure .wolf/ exists and merge its hooks into the settings file.
-fn maybe_apply_openwolf(settings_path: &Option<String>, cwd: &str, enabled: bool, auto_init: bool, design_qc: bool) {
-    if !enabled { return; }
+/// Hard safety net: never init OpenWolf inside T64's own managed directories
+/// (widgets, skills). Guards against stale session state or frontend bugs where
+/// skipOpenwolf wasn't propagated.
+fn is_t64_managed_dir(cwd: &str) -> bool {
+    let Some(home) = dirs::home_dir() else { return false; };
+    let t64 = home.join(".terminal64");
+    std::path::Path::new(cwd).starts_with(&t64)
+}
+
+fn maybe_apply_openwolf(
+    settings_path: &Option<String>,
+    cwd: &str,
+    enabled: bool,
+    auto_init: bool,
+    design_qc: bool,
+) {
+    if !enabled || is_t64_managed_dir(cwd) {
+        return;
+    }
     claude_manager::ensure_openwolf(cwd, auto_init);
     if let Some(ref sp) = settings_path {
         if let Err(e) = claude_manager::merge_openwolf_hooks(sp, cwd, design_qc) {
@@ -174,16 +206,22 @@ fn create_claude_session(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    let settings_path = state.permission_server.register_session(&req.session_id)
-        .ok().map(|(_, p)| p.to_string_lossy().to_string());
+    let settings_path = state
+        .permission_server
+        .register_session(&req.session_id)
+        .ok()
+        .map(|(_, p)| p.to_string_lossy().to_string());
     maybe_apply_openwolf(
-        &settings_path, &req.cwd,
+        &settings_path,
+        &req.cwd,
         openwolf_enabled.unwrap_or(false),
         openwolf_auto_init.unwrap_or(true),
         openwolf_design_qc.unwrap_or(false),
     );
     let channel = req.channel_server.clone();
-    state.claude_manager.create_session(&app_handle, req, settings_path, channel)
+    state
+        .claude_manager
+        .create_session(&app_handle, req, settings_path, channel)
 }
 
 #[tauri::command]
@@ -195,23 +233,26 @@ fn send_claude_prompt(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    let settings_path = state.permission_server.register_session(&req.session_id)
-        .ok().map(|(_, p)| p.to_string_lossy().to_string());
+    let settings_path = state
+        .permission_server
+        .register_session(&req.session_id)
+        .ok()
+        .map(|(_, p)| p.to_string_lossy().to_string());
     maybe_apply_openwolf(
-        &settings_path, &req.cwd,
+        &settings_path,
+        &req.cwd,
         openwolf_enabled.unwrap_or(false),
         openwolf_auto_init.unwrap_or(true),
         openwolf_design_qc.unwrap_or(false),
     );
     let channel = req.channel_server.clone();
-    state.claude_manager.send_prompt(&app_handle, req, settings_path, channel)
+    state
+        .claude_manager
+        .send_prompt(&app_handle, req, settings_path, channel)
 }
 
 #[tauri::command]
-fn cancel_claude(
-    state: tauri::State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
+fn cancel_claude(state: tauri::State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.claude_manager.cancel(&session_id)
 }
 
@@ -222,8 +263,15 @@ fn close_claude_session(
 ) -> Result<(), String> {
     // Clean up permission server temp files for this session
     let tokens_to_remove: Vec<String> = {
-        let map = state.permission_server.session_map.lock().unwrap_or_else(|e| e.into_inner());
-        map.iter().filter(|(_, sid)| **sid == session_id).map(|(t, _)| t.clone()).collect()
+        let map = state
+            .permission_server
+            .session_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.iter()
+            .filter(|(_, sid)| **sid == session_id)
+            .map(|(t, _)| t.clone())
+            .collect()
     };
     for token in tokens_to_remove {
         state.permission_server.unregister_session(&token);
@@ -245,7 +293,10 @@ fn rewrite_prompt(
     const VOICE_ADDENDUM: &str = "\n\nVoice-message handling:\n- The user dictated this prompt via speech-to-text (whisper.cpp).\n- Expect missing/extra punctuation, homophones (\"their/there\", \"to/too\"), misheard technical terms, run-on sentences, and filler words (\"um\", \"uh\", \"like\", \"you know\").\n- Infer the intended technical terms from context (e.g. \"react\" not \"wrecked\", \"async\" not \"a sync\").\n- Fix punctuation/capitalisation silently; don't flag these as issues.\n- Preserve the user's actual request — don't invent requirements they didn't state.\n- Treat the trailing \"This message was a voice message.\" marker as metadata, NOT part of the prompt content. Do not echo it.";
 
     static REWRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let rewrite_id = format!("rw-{}", REWRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let rewrite_id = format!(
+        "rw-{}",
+        REWRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
 
     let voice = is_voice.unwrap_or(false);
     let system = if voice {
@@ -261,12 +312,16 @@ fn rewrite_prompt(
     let full_prompt = format!("{}\n\nRewrite this prompt:\n{}", system, user_prompt);
     let claude_bin = claude_manager::resolve_claude_path();
     let mut cmd = claude_manager::shim_command(&claude_bin);
-    cmd.arg("-p").arg(&full_prompt)
-        .arg("--output-format").arg("stream-json")
+    cmd.arg("-p")
+        .arg(&full_prompt)
+        .arg("--output-format")
+        .arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
-        .arg("--model").arg("haiku")
-        .arg("--effort").arg("high")
+        .arg("--model")
+        .arg("haiku")
+        .arg("--effort")
+        .arg("high")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
@@ -278,7 +333,9 @@ fn rewrite_prompt(
     // project-specific conventions.
     cmd.current_dir(std::env::temp_dir());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
 
     // Log stderr for debugging
@@ -297,19 +354,27 @@ fn rewrite_prompt(
         use std::io::BufRead;
         let reader = std::io::BufReader::new(stdout);
         for line in reader.lines().flatten() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                 let event_type = parsed["type"].as_str().unwrap_or("");
                 if event_type == "content_block_delta" {
                     if let Some(text) = parsed["delta"]["text"].as_str() {
-                        let _ = app_handle.emit("rewrite-chunk", serde_json::json!({ "id": rid, "text": text }));
+                        let _ = app_handle.emit(
+                            "rewrite-chunk",
+                            serde_json::json!({ "id": rid, "text": text }),
+                        );
                     }
                 } else if event_type == "assistant" {
                     if let Some(content) = parsed["message"]["content"].as_array() {
                         for block in content {
                             if block["type"].as_str() == Some("text") {
                                 if let Some(text) = block["text"].as_str() {
-                                    let _ = app_handle.emit("rewrite-chunk", serde_json::json!({ "id": rid, "text": text }));
+                                    let _ = app_handle.emit(
+                                        "rewrite-chunk",
+                                        serde_json::json!({ "id": rid, "text": text }),
+                                    );
                                 }
                             }
                         }
@@ -361,17 +426,24 @@ Rules:
 - The name should be creative and short (2-3 words max)."##;
 
     static THEME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let gen_id = format!("theme-{}", THEME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let gen_id = format!(
+        "theme-{}",
+        THEME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
 
     let full_prompt = format!("{}\n\nGenerate a theme for: {}", SYSTEM_PROMPT, prompt);
     let claude_bin = claude_manager::resolve_claude_path();
     let mut cmd = claude_manager::shim_command(&claude_bin);
-    cmd.arg("-p").arg(&full_prompt)
-        .arg("--output-format").arg("stream-json")
+    cmd.arg("-p")
+        .arg(&full_prompt)
+        .arg("--output-format")
+        .arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
-        .arg("--model").arg("haiku")
-        .arg("--effort").arg("high")
+        .arg("--model")
+        .arg("haiku")
+        .arg("--effort")
+        .arg("high")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
@@ -379,7 +451,9 @@ Rules:
     // we don't inherit this repo's CLAUDE.md into the theme prompt.
     cmd.current_dir(std::env::temp_dir());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
 
     if let Some(stderr) = child.stderr.take() {
@@ -398,13 +472,18 @@ Rules:
         let reader = std::io::BufReader::new(stdout);
         let mut full_text = String::new();
         for line in reader.lines().flatten() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                 let event_type = parsed["type"].as_str().unwrap_or("");
                 if event_type == "content_block_delta" {
                     if let Some(text) = parsed["delta"]["text"].as_str() {
                         full_text.push_str(text);
-                        let _ = app_handle.emit("theme-gen-chunk", serde_json::json!({ "id": gid, "text": text }));
+                        let _ = app_handle.emit(
+                            "theme-gen-chunk",
+                            serde_json::json!({ "id": gid, "text": text }),
+                        );
                     }
                 } else if event_type == "assistant" {
                     if let Some(content) = parsed["message"]["content"].as_array() {
@@ -412,7 +491,10 @@ Rules:
                             if block["type"].as_str() == Some("text") {
                                 if let Some(text) = block["text"].as_str() {
                                     full_text.push_str(text);
-                                    let _ = app_handle.emit("theme-gen-chunk", serde_json::json!({ "id": gid, "text": text }));
+                                    let _ = app_handle.emit(
+                                        "theme-gen-chunk",
+                                        serde_json::json!({ "id": gid, "text": text }),
+                                    );
                                 }
                             }
                         }
@@ -420,7 +502,10 @@ Rules:
                 }
             }
         }
-        let _ = app_handle.emit("theme-gen-done", serde_json::json!({ "id": gid, "text": full_text }));
+        let _ = app_handle.emit(
+            "theme-gen-done",
+            serde_json::json!({ "id": gid, "text": full_text }),
+        );
         safe_eprintln!("[theme-gen] Done ({})", gid);
     });
 
@@ -428,26 +513,38 @@ Rules:
 }
 
 #[tauri::command]
-fn generate_rewind_summary(app_handle: tauri::AppHandle, summary: String) -> Result<String, String> {
+fn generate_rewind_summary(
+    app_handle: tauri::AppHandle,
+    summary: String,
+) -> Result<String, String> {
     const SYSTEM_PROMPT: &str = "You are a concise code change summarizer. Given a list of tool calls (file writes, edits, bash commands) that an AI made during a coding session, write a 1-3 sentence description of what was accomplished. Focus on the PURPOSE and EFFECT of the changes, not individual file operations. Use past tense. Be specific but brief. Output ONLY the description, nothing else.";
 
     static REWIND_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let gen_id = format!("rwdesc-{}", REWIND_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let gen_id = format!(
+        "rwdesc-{}",
+        REWIND_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
 
     let full_prompt = format!("{}\n\nSummarize these changes:\n{}", SYSTEM_PROMPT, summary);
     let claude_bin = claude_manager::resolve_claude_path();
     let mut cmd = claude_manager::shim_command(&claude_bin);
-    cmd.arg("-p").arg(&full_prompt)
-        .arg("--output-format").arg("stream-json")
+    cmd.arg("-p")
+        .arg(&full_prompt)
+        .arg("--output-format")
+        .arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
-        .arg("--model").arg("haiku")
-        .arg("--effort").arg("high")
+        .arg("--model")
+        .arg("haiku")
+        .arg("--effort")
+        .arg("high")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
 
     if let Some(stderr) = child.stderr.take() {
@@ -465,19 +562,27 @@ fn generate_rewind_summary(app_handle: tauri::AppHandle, summary: String) -> Res
         use std::io::BufRead;
         let reader = std::io::BufReader::new(stdout);
         for line in reader.lines().flatten() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                 let event_type = parsed["type"].as_str().unwrap_or("");
                 if event_type == "content_block_delta" {
                     if let Some(text) = parsed["delta"]["text"].as_str() {
-                        let _ = app_handle.emit("rewind-desc-chunk", serde_json::json!({ "id": gid, "text": text }));
+                        let _ = app_handle.emit(
+                            "rewind-desc-chunk",
+                            serde_json::json!({ "id": gid, "text": text }),
+                        );
                     }
                 } else if event_type == "assistant" {
                     if let Some(content) = parsed["message"]["content"].as_array() {
                         for block in content {
                             if block["type"].as_str() == Some("text") {
                                 if let Some(text) = block["text"].as_str() {
-                                    let _ = app_handle.emit("rewind-desc-chunk", serde_json::json!({ "id": gid, "text": text }));
+                                    let _ = app_handle.emit(
+                                        "rewind-desc-chunk",
+                                        serde_json::json!({ "id": gid, "text": text }),
+                                    );
                                 }
                             }
                         }
@@ -498,7 +603,8 @@ fn save_pasted_image(base64_data: String, extension: String) -> Result<String, S
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&base64_data)
         .map_err(|e| format!("Invalid base64: {}", e))?;
-    let tmp = std::env::temp_dir().join(format!("t64-paste-{}.{}", uuid::Uuid::new_v4(), extension));
+    let tmp =
+        std::env::temp_dir().join(format!("t64-paste-{}.{}", uuid::Uuid::new_v4(), extension));
     std::fs::write(&tmp, &bytes).map_err(|e| format!("Failed to write temp file: {}", e))?;
     Ok(tmp.to_string_lossy().to_string())
 }
@@ -515,18 +621,39 @@ async fn search_files(cwd: String, query: String) -> Result<Vec<String>, String>
     // Run filesystem walk on a blocking thread to avoid freezing the UI
     tauri::async_runtime::spawn_blocking(move || {
         let root = std::path::Path::new(&cwd);
-        if !root.is_dir() { return vec![]; }
+        if !root.is_dir() {
+            return vec![];
+        }
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
-        fn walk(dir: &std::path::Path, root: &std::path::Path, query: &str, results: &mut Vec<String>, skip: &[&str], depth: u8) {
-            if depth > 6 || results.len() >= 20 { return; }
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+        fn walk(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            query: &str,
+            results: &mut Vec<String>,
+            skip: &[&str],
+            depth: u8,
+        ) {
+            if depth > 6 || results.len() >= 20 {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for entry in entries.flatten() {
-                if results.len() >= 20 { return; }
+                if results.len() >= 20 {
+                    return;
+                }
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if skip.iter().any(|s| name == *s) { continue; }
-                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+                if skip.iter().any(|s| name == *s) {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 if rel.to_lowercase().contains(query) || name.to_lowercase().contains(query) {
                     results.push(rel);
                 }
@@ -539,22 +666,32 @@ async fn search_files(cwd: String, query: String) -> Result<Vec<String>, String>
         results.sort_by_key(|a| a.len());
         results.truncate(12);
         results
-    }).await.map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 fn extract_session_summary(path: &std::path::Path) -> String {
     use std::io::{Read, Seek, SeekFrom};
     // Read the tail of the file to find the last "last-prompt" event
-    let mut file = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return String::new() };
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let tail_size = 4096u64.min(len);
-    if tail_size == 0 { return String::new(); }
+    if tail_size == 0 {
+        return String::new();
+    }
     let _ = file.seek(SeekFrom::End(-(tail_size as i64)));
     let mut buf = String::new();
     let _ = file.read_to_string(&mut buf);
 
     for line in buf.lines().rev() {
-        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         if val["type"] == "last-prompt" {
             if let Some(s) = val["lastPrompt"].as_str() {
                 return s.chars().take(120).collect();
@@ -567,24 +704,40 @@ fn extract_session_summary(path: &std::path::Path) -> String {
 #[tauri::command]
 fn list_disk_sessions(cwd: String) -> Result<Vec<DiskSession>, String> {
     let project_dir = session_project_dir(&cwd)?;
-    if !project_dir.exists() { return Ok(vec![]); }
+    if !project_dir.exists() {
+        return Ok(vec![]);
+    }
 
     let mut sessions = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&project_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
-            let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            if id.is_empty() { continue; }
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
             let meta = std::fs::metadata(&path).ok();
-            let modified = meta.as_ref()
+            let modified = meta
+                .as_ref()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let size = meta.map(|m| m.len()).unwrap_or(0);
             let summary = extract_session_summary(&path);
-            sessions.push(DiskSession { id, modified, size, summary });
+            sessions.push(DiskSession {
+                id,
+                modified,
+                size,
+                summary,
+            });
         }
     }
     // Sort newest first
@@ -627,16 +780,22 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
     };
     let mut messages: Vec<HistoryMessage> = Vec::new();
     // Track tool_use_id → index in messages vec + index in tool_calls vec for result merging
-    let mut tool_index: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    let mut tool_index: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
 
     for line in content.lines() {
-        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let rec_type = val["type"].as_str().unwrap_or("");
 
         if rec_type == "user" {
             let msg = &val["message"];
             let role = msg["role"].as_str().unwrap_or("user");
-            if role != "user" { continue; }
+            if role != "user" {
+                continue;
+            }
 
             let content_val = &msg["content"];
             // Content can be a string (simple prompt) or array (with tool_results)
@@ -646,7 +805,11 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                 let cleaned = strip_system_reminders(text);
                 if !cleaned.is_empty() {
                     messages.push(HistoryMessage {
-                        id: uuid, role: "user".to_string(), content: cleaned, timestamp: ts, tool_calls: None,
+                        id: uuid,
+                        role: "user".to_string(),
+                        content: cleaned,
+                        timestamp: ts,
+                        tool_calls: None,
                     });
                 }
             } else if let Some(blocks) = content_val.as_array() {
@@ -660,10 +823,16 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                                 let result_text = if let Some(s) = block["content"].as_str() {
                                     s.to_string()
                                 } else if let Some(arr) = block["content"].as_array() {
-                                    arr.iter().filter_map(|c| {
-                                        if c["type"].as_str() == Some("text") { c["text"].as_str().map(|s| s.to_string()) }
-                                        else { None }
-                                    }).collect::<Vec<_>>().join("\n")
+                                    arr.iter()
+                                        .filter_map(|c| {
+                                            if c["type"].as_str() == Some("text") {
+                                                c["text"].as_str().map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
                                 } else {
                                     String::new()
                                 };
@@ -673,7 +842,9 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                         }
                     } else if block["type"].as_str() == Some("text") {
                         if let Some(t) = block["text"].as_str() {
-                            if !user_text.is_empty() { user_text.push('\n'); }
+                            if !user_text.is_empty() {
+                                user_text.push('\n');
+                            }
                             user_text.push_str(t);
                         }
                     }
@@ -684,13 +855,20 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                     let uuid = val["uuid"].as_str().unwrap_or("").to_string();
                     let ts = parse_timestamp(val["timestamp"].as_str().unwrap_or(""));
                     messages.push(HistoryMessage {
-                        id: uuid, role: "user".to_string(), content: cleaned, timestamp: ts, tool_calls: None,
+                        id: uuid,
+                        role: "user".to_string(),
+                        content: cleaned,
+                        timestamp: ts,
+                        tool_calls: None,
                     });
                 }
             }
         } else if rec_type == "assistant" {
             let msg = &val["message"];
-            let content_arr = match msg["content"].as_array() { Some(a) => a, None => continue };
+            let content_arr = match msg["content"].as_array() {
+                Some(a) => a,
+                None => continue,
+            };
             let uuid = val["uuid"].as_str().unwrap_or("").to_string();
             let ts = parse_timestamp(val["timestamp"].as_str().unwrap_or(""));
 
@@ -709,7 +887,11 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                         let tc_name = block["name"].as_str().unwrap_or("").to_string();
                         let tc_input = block["input"].clone();
                         tool_calls.push(HistoryToolCall {
-                            id: tc_id.clone(), name: tc_name, input: tc_input, result: None, is_error: false,
+                            id: tc_id.clone(),
+                            name: tc_name,
+                            input: tc_input,
+                            result: None,
+                            is_error: false,
                         });
                         // Register for result merging
                         tool_index.insert(tc_id, (messages.len(), tool_calls.len() - 1));
@@ -725,7 +907,11 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
                     role: "assistant".to_string(),
                     content: trimmed,
                     timestamp: ts,
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                 });
             }
         }
@@ -740,40 +926,82 @@ fn collect_jsonl_lines_up_to_turns(content: &str, keep_turns: usize) -> Vec<&str
     let mut kept: Vec<&str> = Vec::new();
     let mut user_turn_count = 0;
     for line in content.lines() {
-        if line.trim().is_empty() { continue; }
-        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => { kept.push(line); continue; } };
-        if val["type"].as_str().unwrap_or("") == "user" {
-            let is_real = val["message"]["content"].as_str().map(|s| !s.is_empty()).unwrap_or_else(||
-                val["message"]["content"].as_array().map(|arr| arr.iter().any(|b| {
-                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
-                })).unwrap_or(false)
-            );
-            if is_real { user_turn_count += 1; }
+        if line.trim().is_empty() {
+            continue;
         }
-        if user_turn_count > keep_turns { break; }
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => {
+                kept.push(line);
+                continue;
+            }
+        };
+        if val["type"].as_str().unwrap_or("") == "user" {
+            let is_real = val["message"]["content"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    val["message"]["content"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter().any(|b| {
+                                b["type"].as_str() == Some("text")
+                                    && b["text"]
+                                        .as_str()
+                                        .map(|t| !t.trim().is_empty())
+                                        .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false)
+                });
+            if is_real {
+                user_turn_count += 1;
+            }
+        }
+        if user_turn_count > keep_turns {
+            break;
+        }
         kept.push(line);
     }
     kept
 }
 
 #[tauri::command]
-fn truncate_session_jsonl(session_id: String, cwd: String, keep_turns: usize) -> Result<(), String> {
+fn truncate_session_jsonl(
+    session_id: String,
+    cwd: String,
+    keep_turns: usize,
+) -> Result<(), String> {
     let path = session_jsonl_path(&cwd, &session_id)?;
     let content = std::fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
     let kept = collect_jsonl_lines_up_to_turns(&content, keep_turns);
     let truncated = kept.join("\n") + "\n";
     std::fs::write(&path, truncated).map_err(|e| format!("write: {}", e))?;
-    safe_eprintln!("[rewind] Truncated JSONL to {} turns (was {} lines, now {} lines)", keep_turns, content.lines().count(), kept.len());
+    safe_eprintln!(
+        "[rewind] Truncated JSONL to {} turns (was {} lines, now {} lines)",
+        keep_turns,
+        content.lines().count(),
+        kept.len()
+    );
     Ok(())
 }
 
 /// Truncate JSONL to keep exactly `keep_messages` visible messages (as load_session_history would produce).
 /// This matches the frontend's message count precisely — no turn-counting mismatches.
 #[tauri::command]
-fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_messages: usize) -> Result<serde_json::Value, String> {
+fn truncate_session_jsonl_by_messages(
+    session_id: String,
+    cwd: String,
+    keep_messages: usize,
+) -> Result<serde_json::Value, String> {
     let path = session_jsonl_path(&cwd, &session_id)?;
-    safe_eprintln!("[rewind] truncate_session_jsonl_by_messages: path={} keep_messages={}", path.display(), keep_messages);
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    safe_eprintln!(
+        "[rewind] truncate_session_jsonl_by_messages: path={} keep_messages={}",
+        path.display(),
+        keep_messages
+    );
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     let original_lines = content.lines().count();
     let original_bytes = content.len();
 
@@ -785,7 +1013,9 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
     let mut last_visible_preview = String::new();
 
     for line in content.lines() {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         if done {
             // After reaching the target, still keep tool-result-only user records
             // (they pair with the last assistant's tool_use and don't produce visible messages).
@@ -794,7 +1024,10 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
             // crossed into a later turn and must stop.
             let val: serde_json::Value = match serde_json::from_str(line) {
                 Ok(v) => v,
-                Err(_) => { kept.push(line); continue; }
+                Err(_) => {
+                    kept.push(line);
+                    continue;
+                }
             };
             if val["type"].as_str().unwrap_or("") == "user" {
                 let has_text = is_real_user_message(&val);
@@ -805,7 +1038,13 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
             }
             break;
         }
-        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => { kept.push(line); continue; } };
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => {
+                kept.push(line);
+                continue;
+            }
+        };
         let rec_type = val["type"].as_str().unwrap_or("");
         // Count visible messages the same way load_session_history does
         if rec_type == "user" && is_real_user_message(&val) {
@@ -818,28 +1057,53 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
             last_visible_preview = if let Some(s) = c.as_str() {
                 s.chars().take(80).collect()
             } else if let Some(arr) = c.as_array() {
-                arr.iter().filter_map(|b| {
-                    if b["type"].as_str() == Some("text") { b["text"].as_str().map(|t| t.chars().take(80).collect::<String>()) }
-                    else { None }
-                }).next().unwrap_or_default()
-            } else { String::new() };
+                arr.iter()
+                    .filter_map(|b| {
+                        if b["type"].as_str() == Some("text") {
+                            b["text"]
+                                .as_str()
+                                .map(|t| t.chars().take(80).collect::<String>())
+                        } else {
+                            None
+                        }
+                    })
+                    .next()
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
         } else if rec_type == "assistant" {
             let msg = &val["message"];
             if let Some(content_arr) = msg["content"].as_array() {
                 let has_text = content_arr.iter().any(|b| {
-                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
+                    b["type"].as_str() == Some("text")
+                        && b["text"]
+                            .as_str()
+                            .map(|t| !t.trim().is_empty())
+                            .unwrap_or(false)
                 });
-                let has_tools = content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use"));
+                let has_tools = content_arr
+                    .iter()
+                    .any(|b| b["type"].as_str() == Some("tool_use"));
                 if has_text || has_tools {
                     visible_count += 1;
                     if visible_count > keep_messages {
                         break;
                     }
                     last_visible_role = "assistant".to_string();
-                    last_visible_preview = content_arr.iter().filter_map(|b| {
-                        if b["type"].as_str() == Some("text") { b["text"].as_str().map(|t| t.chars().take(80).collect::<String>()) }
-                        else { None }
-                    }).next().unwrap_or_else(|| "[tool calls]".to_string());
+                    last_visible_preview = content_arr
+                        .iter()
+                        .filter_map(|b| {
+                            if b["type"].as_str() == Some("text") {
+                                b["text"]
+                                    .as_str()
+                                    .map(|t| t.chars().take(80).collect::<String>())
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                        .unwrap_or_else(|| "[tool calls]".to_string());
                 }
             }
         }
@@ -847,7 +1111,10 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
         if visible_count == keep_messages && rec_type == "assistant" {
             // Check if this assistant has tool_use — if so, keep trailing tool-result records
             if let Some(content_arr) = val["message"]["content"].as_array() {
-                if content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use")) {
+                if content_arr
+                    .iter()
+                    .any(|b| b["type"].as_str() == Some("tool_use"))
+                {
                     done = true;
                     continue; // Enter trailing mode
                 }
@@ -856,7 +1123,11 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
     }
 
     if visible_count == 0 && keep_messages > 0 {
-        return Err(format!("No visible messages found in JSONL at {}. Total lines: {}", path.display(), original_lines));
+        return Err(format!(
+            "No visible messages found in JSONL at {}. Total lines: {}",
+            path.display(),
+            original_lines
+        ));
     }
 
     let truncated = kept.join("\n") + "\n";
@@ -864,13 +1135,22 @@ fn truncate_session_jsonl_by_messages(session_id: String, cwd: String, keep_mess
     std::fs::write(&path, &truncated).map_err(|e| format!("write {}: {}", path.display(), e))?;
 
     // Verification: re-read and count
-    let verify = std::fs::read_to_string(&path).map_err(|e| format!("verify-read {}: {}", path.display(), e))?;
+    let verify = std::fs::read_to_string(&path)
+        .map_err(|e| format!("verify-read {}: {}", path.display(), e))?;
     let verify_lines = verify.lines().filter(|l| !l.trim().is_empty()).count();
 
     safe_eprintln!("[rewind] Truncated JSONL: keep_messages={} actual_kept={} original_lines={} new_lines={} original_bytes={} new_bytes={}",
         keep_messages, visible_count, original_lines, kept.len(), original_bytes, new_bytes);
-    safe_eprintln!("[rewind] Last kept message: [{}] {}", last_visible_role, &last_visible_preview[..last_visible_preview.len().min(80)]);
-    safe_eprintln!("[rewind] Verify: file now has {} non-empty lines (expected {})", verify_lines, kept.len());
+    safe_eprintln!(
+        "[rewind] Last kept message: [{}] {}",
+        last_visible_role,
+        &last_visible_preview[..last_visible_preview.len().min(80)]
+    );
+    safe_eprintln!(
+        "[rewind] Verify: file now has {} non-empty lines (expected {})",
+        verify_lines,
+        kept.len()
+    );
 
     Ok(serde_json::json!({
         "path": path.display().to_string(),
@@ -894,21 +1174,36 @@ fn is_real_user_message(val: &serde_json::Value) -> bool {
     }
     if let Some(arr) = content.as_array() {
         return arr.iter().any(|b| {
-            b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
+            b["type"].as_str() == Some("text")
+                && b["text"]
+                    .as_str()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false)
         });
     }
     false
 }
 
 #[tauri::command]
-fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: String, keep_messages: usize) -> Result<String, String> {
+fn fork_session_jsonl(
+    parent_session_id: String,
+    new_session_id: String,
+    cwd: String,
+    keep_messages: usize,
+) -> Result<String, String> {
     let src = session_jsonl_path(&cwd, &parent_session_id)?;
     let dest = session_jsonl_path(&cwd, &new_session_id)?;
     // Copy the full JSONL to preserve the parentUuid chain
     std::fs::copy(&src, &dest).map_err(|e| format!("copy: {}", e))?;
     // Reuse find_rewind_uuid (chain-walking) to locate the fork point UUID
     let uuid = find_rewind_uuid(new_session_id.clone(), cwd, keep_messages)?;
-    safe_eprintln!("[fork] Copied full JSONL {} -> {} (fork at msg {}, uuid={})", parent_session_id, new_session_id, keep_messages, &uuid);
+    safe_eprintln!(
+        "[fork] Copied full JSONL {} -> {} (fork at msg {}, uuid={})",
+        parent_session_id,
+        new_session_id,
+        keep_messages,
+        &uuid
+    );
     Ok(uuid)
 }
 
@@ -916,19 +1211,29 @@ fn fork_session_jsonl(parent_session_id: String, new_session_id: String, cwd: St
 /// buildConversationChain works) and return the UUID of the Nth visible message.
 /// Correct even after prior rewinds leave orphaned branches in append-only JSONL.
 #[tauri::command]
-fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Result<String, String> {
+fn find_rewind_uuid(
+    session_id: String,
+    cwd: String,
+    keep_messages: usize,
+) -> Result<String, String> {
     use std::collections::{HashMap, HashSet};
 
     let path = session_jsonl_path(&cwd, &session_id)?;
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
 
     let mut records: HashMap<String, serde_json::Value> = HashMap::new();
     let mut all_uuids: Vec<String> = Vec::new();
     let mut children: HashSet<String> = HashSet::new();
 
     for line in content.lines() {
-        if line.trim().is_empty() { continue; }
-        let val: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         if let Some(uuid) = val["uuid"].as_str() {
             let uuid = uuid.to_string();
             if let Some(parent) = val["parentUuid"].as_str() {
@@ -946,9 +1251,13 @@ fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Re
     let is_transcript = |v: &serde_json::Value| -> bool {
         matches!(v["type"].as_str(), Some("user") | Some("assistant"))
     };
-    let leaf = all_uuids.iter().rev()
+    let leaf = all_uuids
+        .iter()
+        .rev()
         .find(|u| {
-            if children.contains(u.as_str()) { return false; }
+            if children.contains(u.as_str()) {
+                return false;
+            }
             records.get(u.as_str()).map(is_transcript).unwrap_or(false)
         })
         .cloned()
@@ -959,7 +1268,8 @@ fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Re
     let mut current = Some(leaf);
     while let Some(uuid) = current {
         chain.push(uuid.clone());
-        current = records.get(&uuid)
+        current = records
+            .get(&uuid)
             .and_then(|v| v["parentUuid"].as_str())
             .map(|s| s.to_string());
     }
@@ -970,22 +1280,35 @@ fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Re
     let mut last_uuid = String::new();
 
     for uuid in &chain {
-        let val = match records.get(uuid) { Some(v) => v, None => continue };
+        let val = match records.get(uuid) {
+            Some(v) => v,
+            None => continue,
+        };
         let rec_type = val["type"].as_str().unwrap_or("");
 
         if rec_type == "user" && is_real_user_message(val) {
             visible_count += 1;
-            if visible_count > keep_messages { break; }
+            if visible_count > keep_messages {
+                break;
+            }
             last_uuid = uuid.clone();
         } else if rec_type == "assistant" {
             if let Some(content_arr) = val["message"]["content"].as_array() {
-                let has_text = content_arr.iter().any(|b|
-                    b["type"].as_str() == Some("text") && b["text"].as_str().map(|t| !t.trim().is_empty()).unwrap_or(false)
-                );
-                let has_tools = content_arr.iter().any(|b| b["type"].as_str() == Some("tool_use"));
+                let has_text = content_arr.iter().any(|b| {
+                    b["type"].as_str() == Some("text")
+                        && b["text"]
+                            .as_str()
+                            .map(|t| !t.trim().is_empty())
+                            .unwrap_or(false)
+                });
+                let has_tools = content_arr
+                    .iter()
+                    .any(|b| b["type"].as_str() == Some("tool_use"));
                 if has_text || has_tools {
                     visible_count += 1;
-                    if visible_count > keep_messages { break; }
+                    if visible_count > keep_messages {
+                        break;
+                    }
                     last_uuid = uuid.clone();
                 }
             }
@@ -993,9 +1316,20 @@ fn find_rewind_uuid(session_id: String, cwd: String, keep_messages: usize) -> Re
     }
 
     if last_uuid.is_empty() {
-        return Err(format!("No visible message at position {} in chain ({} records, {} in chain)", keep_messages, records.len(), chain.len()));
+        return Err(format!(
+            "No visible message at position {} in chain ({} records, {} in chain)",
+            keep_messages,
+            records.len(),
+            chain.len()
+        ));
     }
-    safe_eprintln!("[rewind] find_rewind_uuid: keep_messages={} uuid={} (chain={}, total={})", keep_messages, &last_uuid, chain.len(), records.len());
+    safe_eprintln!(
+        "[rewind] find_rewind_uuid: keep_messages={} uuid={} (chain={}, total={})",
+        keep_messages,
+        &last_uuid,
+        chain.len(),
+        records.len()
+    );
     Ok(last_uuid)
 }
 
@@ -1012,7 +1346,11 @@ fn resolve_permission(
     request_id: String,
     allow: bool,
 ) -> Result<(), String> {
-    let reason = if allow { "Approved by user" } else { "Denied by user" };
+    let reason = if allow {
+        "Approved by user"
+    } else {
+        "Denied by user"
+    };
     state.permission_server.resolve(&request_id, allow, reason);
     Ok(())
 }
@@ -1020,13 +1358,21 @@ fn resolve_permission(
 #[tauri::command]
 fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     let root = std::path::Path::new(&path);
-    if !root.is_dir() { return Err("Not a directory".into()); }
+    if !root.is_dir() {
+        return Err("Not a directory".into());
+    }
     let mut entries = Vec::new();
-    let Ok(rd) = std::fs::read_dir(root) else { return Ok(entries); };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return Ok(entries);
+    };
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if SKIP_DIRS.iter().any(|s| name == *s) { continue; }
-        if name.starts_with('.') && name != ".." { continue; }
+        if SKIP_DIRS.iter().any(|s| name == *s) {
+            continue;
+        }
+        if name.starts_with('.') && name != ".." {
+            continue;
+        }
         let is_dir = entry.path().is_dir();
         entries.push(DirEntry { name, is_dir });
     }
@@ -1046,12 +1392,15 @@ async fn shell_exec(command: String, cwd: Option<String>) -> Result<serde_json::
     let shell = if cfg!(windows) { "cmd" } else { "sh" };
     let flag = if cfg!(windows) { "/C" } else { "-c" };
     let mut cmd = std::process::Command::new(shell);
-    cmd.arg(flag).arg(&command)
+    cmd.arg(flag)
+        .arg(&command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
     if let Some(ref dir) = cwd {
-        if !dir.is_empty() { cmd.current_dir(dir); }
+        if !dir.is_empty() {
+            cmd.current_dir(dir);
+        }
     }
     // Ensure common tools are on PATH for macOS GUI apps
     if cfg!(target_os = "macos") {
@@ -1084,20 +1433,36 @@ fn write_file(path: String, content: String) -> Result<(), String> {
 
 #[tauri::command]
 fn parse_mcp_server(name: &str, cfg: &serde_json::Value, scope: &str) -> McpServer {
-    let transport = cfg.get("type").or(cfg.get("transport"))
-        .and_then(|v| v.as_str()).unwrap_or("stdio").to_string();
-    let url = cfg.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let command = cfg.get("command").and_then(|v| v.as_str())
+    let transport = cfg
+        .get("type")
+        .or(cfg.get("transport"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("stdio")
+        .to_string();
+    let url = cfg
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let command = cfg
+        .get("command")
+        .and_then(|v| v.as_str())
         .or(url.as_deref())
-        .unwrap_or("").to_string();
-    let args = cfg.get("args").and_then(|v| v.as_array()).map(|arr|
-        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
-    );
+        .unwrap_or("")
+        .to_string();
+    let args = cfg.get("args").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    });
     let env = cfg.get("env").and_then(|v| v.as_object()).map(|obj| {
-        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()
+        obj.iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect()
     });
     let headers = cfg.get("headers").and_then(|v| v.as_object()).map(|obj| {
-        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()
+        obj.iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect()
     });
     McpServer {
         name: name.to_string(),
@@ -1158,21 +1523,57 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
 
     // Built-in Claude Code commands — (name, description, usage hint)
     let builtins: Vec<(&str, &str, Option<&str>)> = vec![
-        ("add-dir", "Add a working directory for file access", Some("/add-dir <path>")),
+        (
+            "add-dir",
+            "Add a working directory for file access",
+            Some("/add-dir <path>"),
+        ),
         ("agents", "Manage agent configurations", None),
-        ("branch", "Branch the conversation at this point", Some("/branch [name] — alias: /fork")),
-        ("btw", "Ask a side question without adding to context", Some("/btw <question>")),
+        (
+            "branch",
+            "Branch the conversation at this point",
+            Some("/branch [name] — alias: /fork"),
+        ),
+        (
+            "btw",
+            "Ask a side question without adding to context",
+            Some("/btw <question>"),
+        ),
         ("clear", "Clear conversation history", None),
-        ("color", "Set session prompt bar color", Some("/color [red|blue|green|yellow|purple|orange|pink|cyan|default]")),
-        ("compact", "Compact conversation to save context", Some("/compact [instructions]")),
+        (
+            "color",
+            "Set session prompt bar color",
+            Some("/color [red|blue|green|yellow|purple|orange|pink|cyan|default]"),
+        ),
+        (
+            "compact",
+            "Compact conversation to save context",
+            Some("/compact [instructions]"),
+        ),
         ("config", "Open settings interface", None),
         ("context", "Visualize current context usage", None),
-        ("copy", "Copy last assistant response to clipboard", Some("/copy [N] — N=2 for second-to-last")),
+        (
+            "copy",
+            "Copy last assistant response to clipboard",
+            Some("/copy [N] — N=2 for second-to-last"),
+        ),
         ("cost", "Show token usage and cost for this session", None),
-        ("diff", "Interactive diff viewer for uncommitted changes", None),
+        (
+            "diff",
+            "Interactive diff viewer for uncommitted changes",
+            None,
+        ),
         ("doctor", "Check Claude Code setup for issues", None),
-        ("effort", "Set model effort level", Some("/effort [low|medium|high|max|auto]")),
-        ("export", "Export conversation as plain text", Some("/export [filename]")),
+        (
+            "effort",
+            "Set model effort level",
+            Some("/effort [low|medium|high|max|auto]"),
+        ),
+        (
+            "export",
+            "Export conversation as plain text",
+            Some("/export [filename]"),
+        ),
         ("fast", "Toggle fast mode", Some("/fast [on|off]")),
         ("feedback", "Submit feedback about Claude Code", None),
         ("help", "Show help and available commands", None),
@@ -1184,23 +1585,55 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
         ("logout", "Sign out from your Anthropic account", None),
         ("mcp", "Manage MCP server connections", None),
         ("memory", "Edit CLAUDE.md memory files", None),
-        ("model", "Switch the AI model", Some("/model [sonnet|opus|haiku]")),
+        (
+            "model",
+            "Switch the AI model",
+            Some("/model [sonnet|opus|haiku]"),
+        ),
         ("permissions", "View and manage tool permissions", None),
         ("plan", "Enter plan mode", Some("/plan [description]")),
         ("plugin", "Manage Claude Code plugins", None),
-        ("pr-comments", "Fetch comments from a GitHub PR", Some("/pr-comments [PR number or URL]")),
+        (
+            "pr-comments",
+            "Fetch comments from a GitHub PR",
+            Some("/pr-comments [PR number or URL]"),
+        ),
         ("release-notes", "View the full changelog", None),
-        ("rename", "Rename the current session", Some("/rename [name]")),
-        ("resume", "Resume a conversation by ID or name", Some("/resume [session]")),
+        (
+            "rename",
+            "Rename the current session",
+            Some("/rename [name]"),
+        ),
+        (
+            "resume",
+            "Resume a conversation by ID or name",
+            Some("/resume [session]"),
+        ),
         ("rewind", "Rewind conversation to a previous point", None),
-        ("schedule", "Create, update, or list scheduled remote agents", Some("/schedule [create|list|run] ...")),
-        ("security-review", "Analyze pending changes for security vulnerabilities", None),
+        (
+            "schedule",
+            "Create, update, or list scheduled remote agents",
+            Some("/schedule [create|list|run] ..."),
+        ),
+        (
+            "security-review",
+            "Analyze pending changes for security vulnerabilities",
+            None,
+        ),
         ("skills", "List available skills", None),
         ("stats", "Visualize daily usage and session history", None),
-        ("status", "Show version, model, account, and connectivity", None),
+        (
+            "status",
+            "Show version, model, account, and connectivity",
+            None,
+        ),
         ("tasks", "List and manage background tasks", None),
         ("theme", "Change the color theme", None),
-        ("usage", "Show plan usage limits and rate limit status", None),
+        (
+            "usage",
+            "Show plan usage limits and rate limit status",
+            None,
+        ),
         ("voice", "Toggle push-to-talk voice dictation", None),
     ];
     for (name, desc, usage) in &builtins {
@@ -1213,7 +1646,9 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
     }
 
     fn scan_dir(dir: &std::path::Path, commands: &mut Vec<SlashCommand>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -1242,7 +1677,11 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
                             }
                         }
                     }
-                } else if path.file_name().map(|n| n == "node_modules" || n == ".git").unwrap_or(false) {
+                } else if path
+                    .file_name()
+                    .map(|n| n == "node_modules" || n == ".git")
+                    .unwrap_or(false)
+                {
                     // Skip
                 } else {
                     scan_dir(&path, commands);
@@ -1253,7 +1692,9 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
 
     fn parse_frontmatter(content: &str) -> Option<(&str, &str)> {
         let content = content.trim_start();
-        if !content.starts_with("---") { return None; }
+        if !content.starts_with("---") {
+            return None;
+        }
         let rest = &content[3..];
         let end = rest.find("---")?;
         Some((rest[..end].trim(), rest[end + 3..].trim()))
@@ -1292,8 +1733,7 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
     fn parse_skill_md(path: &std::path::Path, skill_dir: &std::path::Path) -> Option<SlashCommand> {
         let content = std::fs::read_to_string(path).ok()?;
         let (yaml, _) = parse_frontmatter(&content)?;
-        let name = extract_yaml_field(yaml, "name")
-            .or_else(|| skill_dir.file_name()?.to_str())?;
+        let name = extract_yaml_field(yaml, "name").or_else(|| skill_dir.file_name()?.to_str())?;
         let desc = extract_yaml_field(yaml, "description").unwrap_or("");
         let source = derive_source(path);
         Some(SlashCommand {
@@ -1308,7 +1748,9 @@ fn list_slash_commands() -> Result<Vec<SlashCommand>, String> {
         let content = std::fs::read_to_string(path).ok()?;
         let name = path.file_stem()?.to_str()?;
         let desc = if let Some((yaml, _)) = parse_frontmatter(&content) {
-            extract_yaml_field(yaml, "description").unwrap_or("").to_string()
+            extract_yaml_field(yaml, "description")
+                .unwrap_or("")
+                .to_string()
         } else {
             String::new()
         };
@@ -1490,10 +1932,15 @@ fn start_openwolf_daemon(cwd: String) -> Result<(), String> {
     let combined = format!("{} {}", stdout, stderr).to_lowercase();
 
     if combined.contains("pm2 not found") || combined.contains("pm2: not found") {
-        return Err("pm2 is required for the OpenWolf daemon. Install with: npm install -g pm2".into());
+        return Err(
+            "pm2 is required for the OpenWolf daemon. Install with: npm install -g pm2".into(),
+        );
     }
     if combined.contains("not initialized") {
-        return Err(format!("OpenWolf not initialized in {}. Run: openwolf init", cwd));
+        return Err(format!(
+            "OpenWolf not initialized in {}. Run: openwolf init",
+            cwd
+        ));
     }
 
     if !output.status.success() && !combined.contains("already") {
@@ -1569,10 +2016,16 @@ fn pm2_openwolf_processes() -> Vec<serde_json::Value> {
         .stdin(std::process::Stdio::null())
         .output();
 
-    let Ok(o) = output else { return vec![]; };
-    if !o.status.success() { return vec![]; }
+    let Ok(o) = output else {
+        return vec![];
+    };
+    if !o.status.success() {
+        return vec![];
+    }
     let stdout = String::from_utf8_lossy(&o.stdout);
-    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) else { return vec![]; };
+    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) else {
+        return vec![];
+    };
     arr.into_iter()
         .filter(|p| {
             p.get("name")
@@ -1626,18 +2079,35 @@ fn openwolf_daemon_info() -> Result<OpenWolfDaemonInfo, String> {
     let procs = pm2_openwolf_processes();
     if procs.is_empty() {
         return Ok(OpenWolfDaemonInfo {
-            running: false, name: None, cwd: None, pid: None,
-            uptime_ms: None, memory: None, cpu: None, restarts: None, status: None,
+            running: false,
+            name: None,
+            cwd: None,
+            pid: None,
+            uptime_ms: None,
+            memory: None,
+            cpu: None,
+            restarts: None,
+            status: None,
         });
     }
 
-    let target = procs.iter().find(|p| {
-        p.get("pm2_env").and_then(|e| e.get("status")).and_then(|v| v.as_str()) == Some("online")
-    }).or_else(|| procs.first()).unwrap();
+    let target = procs
+        .iter()
+        .find(|p| {
+            p.get("pm2_env")
+                .and_then(|e| e.get("status"))
+                .and_then(|v| v.as_str())
+                == Some("online")
+        })
+        .or_else(|| procs.first())
+        .unwrap();
 
     let env = target.get("pm2_env");
     let monit = target.get("monit");
-    let status = env.and_then(|e| e.get("status")).and_then(|v| v.as_str()).map(String::from);
+    let status = env
+        .and_then(|e| e.get("status"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let running = status.as_deref() == Some("online");
 
     let uptime_ms = if running {
@@ -1650,17 +2120,30 @@ fn openwolf_daemon_info() -> Result<OpenWolfDaemonInfo, String> {
                     .unwrap_or(0);
                 (now - started).max(0)
             })
-    } else { None };
+    } else {
+        None
+    };
 
     Ok(OpenWolfDaemonInfo {
         running,
-        name: target.get("name").and_then(|v| v.as_str()).map(String::from),
-        cwd: env.and_then(|e| e.get("pm_cwd").or_else(|| e.get("cwd"))).and_then(|v| v.as_str()).map(String::from),
-        pid: target.get("pid").and_then(|v| v.as_i64()).filter(|n| *n > 0),
+        name: target
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        cwd: env
+            .and_then(|e| e.get("pm_cwd").or_else(|| e.get("cwd")))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        pid: target
+            .get("pid")
+            .and_then(|v| v.as_i64())
+            .filter(|n| *n > 0),
         uptime_ms,
         memory: monit.and_then(|m| m.get("memory")).and_then(|v| v.as_u64()),
         cpu: monit.and_then(|m| m.get("cpu")).and_then(|v| v.as_f64()),
-        restarts: env.and_then(|e| e.get("restart_time")).and_then(|v| v.as_i64()),
+        restarts: env
+            .and_then(|e| e.get("restart_time"))
+            .and_then(|v| v.as_i64()),
         status,
     })
 }
@@ -1675,7 +2158,6 @@ fn openwolf_daemon_stop_all() -> Result<(), String> {
     }
     Ok(())
 }
-
 
 /// Read the project-intel widget's saved project cwd, if any.
 /// Used by App.tsx on startup so the daemon tracks the widget's last-used dir.
@@ -1693,7 +2175,10 @@ fn openwolf_project_cwd() -> Result<Option<String>, String> {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
-    Ok(json.get("pi-project-cwd").and_then(|v| v.as_str()).map(String::from))
+    Ok(json
+        .get("pi-project-cwd")
+        .and_then(|v| v.as_str())
+        .map(String::from))
 }
 
 #[tauri::command]
@@ -1728,24 +2213,18 @@ fn rename_discord_session(
 }
 
 #[tauri::command]
-fn discord_cleanup_orphaned(
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn discord_cleanup_orphaned(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let bot = state.discord_bot.lock().map_err(|e| e.to_string())?;
     bot.cleanup_orphaned()
 }
 
 #[tauri::command]
-fn get_delegation_port(
-    state: tauri::State<'_, AppState>,
-) -> Result<u16, String> {
+fn get_delegation_port(state: tauri::State<'_, AppState>) -> Result<u16, String> {
     state.permission_server.ensure_alive()
 }
 
 #[tauri::command]
-fn get_delegation_secret(
-    state: tauri::State<'_, AppState>,
-) -> String {
+fn get_delegation_secret(state: tauri::State<'_, AppState>) -> String {
     state.permission_server.secret().to_string()
 }
 
@@ -1766,7 +2245,9 @@ fn resolve_node_path() -> &'static str {
                 cands.push(format!("{}\\AppData\\Roaming\\nvm\\node.exe", h));
             }
             for p in &cands {
-                if std::path::Path::new(p).exists() { return p.clone(); }
+                if std::path::Path::new(p).exists() {
+                    return p.clone();
+                }
             }
             let mut c = std::process::Command::new("where");
             c.arg("node.exe")
@@ -1777,16 +2258,28 @@ fn resolve_node_path() -> &'static str {
             if let Ok(output) = c.output() {
                 if output.status.success() {
                     let s = String::from_utf8_lossy(&output.stdout)
-                        .lines().next().unwrap_or("").trim().to_string();
-                    if !s.is_empty() && std::path::Path::new(&s).exists() { return s; }
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !s.is_empty() && std::path::Path::new(&s).exists() {
+                        return s;
+                    }
                 }
             }
             return "node.exe".to_string();
         }
         #[cfg(not(target_os = "windows"))]
         {
-            for p in &["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"] {
-                if std::path::Path::new(p).exists() { return p.to_string(); }
+            for p in &[
+                "/opt/homebrew/bin/node",
+                "/usr/local/bin/node",
+                "/usr/bin/node",
+            ] {
+                if std::path::Path::new(p).exists() {
+                    return p.to_string();
+                }
             }
             if let Ok(output) = std::process::Command::new("/bin/sh")
                 .args(["-lc", "which node"])
@@ -1796,7 +2289,9 @@ fn resolve_node_path() -> &'static str {
             {
                 if output.status.success() {
                     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !s.is_empty() && std::path::Path::new(&s).exists() { return s; }
+                    if !s.is_empty() && std::path::Path::new(&s).exists() {
+                        return s;
+                    }
                 }
             }
             "node".to_string()
@@ -1834,7 +2329,11 @@ fn create_mcp_config_file(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let filename = format!("{}.json", uuid::Uuid::new_v4());
     let path = dir.join(&filename);
-    std::fs::write(&path, serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     safe_eprintln!("[mcp] Created config file: {}", path.display());
     Ok(path.to_string_lossy().to_string())
 }
@@ -1865,7 +2364,11 @@ fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Strin
     // Only write if missing or command/args changed
     if let Some(existing) = servers.get("terminal-64") {
         if existing.get("command").and_then(|v| v.as_str()) == Some(node_path)
-            && existing.get("args").and_then(|v| v.get(0)).and_then(|v| v.as_str()) == Some(&script_path)
+            && existing
+                .get("args")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str())
+                == Some(&script_path)
         {
             return Ok(());
         }
@@ -1876,8 +2379,11 @@ fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Strin
         serde_json::json!({ "command": node_path, "args": [script_path] }),
     );
 
-    std::fs::write(&mcp_path, serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &mcp_path,
+        serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     safe_eprintln!("[mcp] Updated .mcp.json with node_path={}", node_path);
     Ok(())
 }
@@ -1913,15 +2419,23 @@ fn get_delegation_messages(
     state: tauri::State<'_, AppState>,
     group_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let msgs = state.permission_server.delegation_messages
-        .lock().map_err(|e| e.to_string())?;
+    let msgs = state
+        .permission_server
+        .delegation_messages
+        .lock()
+        .map_err(|e| e.to_string())?;
     let group_msgs = msgs.get(&group_id).cloned().unwrap_or_default();
-    Ok(group_msgs.iter().map(|m| serde_json::json!({
-        "agent": m.agent,
-        "message": m.message,
-        "timestamp": m.timestamp,
-        "msg_type": m.msg_type,
-    })).collect())
+    Ok(group_msgs
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "agent": m.agent,
+                "message": m.message,
+                "timestamp": m.timestamp,
+                "msg_type": m.msg_type,
+            })
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1945,7 +2459,9 @@ fn widgets_base_dir() -> Result<std::path::PathBuf, String> {
 /// so we fall back to `mklink /J` when symlink_dir fails.
 fn create_dir_link(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    { std::os::unix::fs::symlink(target, link) }
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
     #[cfg(windows)]
     {
         if std::os::windows::fs::symlink_dir(target, link).is_ok() {
@@ -1992,16 +2508,24 @@ fn read_widget_html(widget_id: String) -> Result<String, String> {
 #[tauri::command]
 fn list_widget_folders() -> Result<Vec<serde_json::Value>, String> {
     let base = widgets_base_dir()?;
-    if !base.exists() { return Ok(vec![]); }
+    if !base.exists() {
+        return Ok(vec![]);
+    }
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { continue; }
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         let index_exists = entry.path().join("index.html").exists();
-        let modified = entry.metadata()
+        let modified = entry
+            .metadata()
             .and_then(|m| m.modified())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| std::io::Error::other("time")))
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| std::io::Error::other("time"))
+            })
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         out.push(serde_json::json!({
@@ -2036,7 +2560,9 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
     // otherwise fall back to the zip filename (without extension).
     let mut top_dirs = std::collections::HashSet::<String>::new();
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| format!("zip entry: {}", e))?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry: {}", e))?;
         let name: &str = entry.name();
         if let Some(first) = name.split('/').next() {
             if !first.is_empty() {
@@ -2046,11 +2572,15 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
     }
     let (widget_id, strip_prefix) = if top_dirs.len() == 1 {
         let name = top_dirs.into_iter().next().unwrap();
-        let id = name.to_lowercase().replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
+        let id = name
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
         (id, true)
     } else {
         let stem = src.file_stem().unwrap_or_default().to_string_lossy();
-        let id = stem.to_lowercase().replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
+        let id = stem
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
         (id, false)
     };
 
@@ -2061,7 +2591,9 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
     std::fs::create_dir_all(&dest).map_err(|e| format!("mkdir: {}", e))?;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {}", e))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry: {}", e))?;
         let raw_name = entry.name().to_string();
 
         let rel = if strip_prefix {
@@ -2074,24 +2606,34 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
             &raw_name
         };
 
-        if rel.is_empty() { continue; }
+        if rel.is_empty() {
+            continue;
+        }
 
         // Reject path traversal BEFORE joining — PathBuf::starts_with is a
         // lexical prefix check that doesn't collapse ".." segments, so a
         // crafted zip with "..\..\foo" would escape `dest` on Windows.
         let rel_norm = rel.replace('\\', "/");
         let rel_path = std::path::Path::new(&rel_norm);
-        if rel_path.is_absolute() { continue; }
-        let has_traversal = rel_path.components().any(|c| matches!(
-            c,
-            std::path::Component::ParentDir
-                | std::path::Component::RootDir
-                | std::path::Component::Prefix(_)
-        ));
-        if has_traversal { continue; }
+        if rel_path.is_absolute() {
+            continue;
+        }
+        let has_traversal = rel_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+        if has_traversal {
+            continue;
+        }
 
         let out_path = dest.join(rel_path);
-        if !out_path.starts_with(&dest) { continue; }
+        if !out_path.starts_with(&dest) {
+            continue;
+        }
 
         if entry.is_dir() {
             std::fs::create_dir_all(&out_path).map_err(|e| format!("mkdir: {}", e))?;
@@ -2112,25 +2654,38 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
 #[tauri::command]
 fn widget_file_modified(widget_id: String) -> Result<u64, String> {
     let dir = widgets_base_dir()?.join(&widget_id);
-    if !dir.exists() { return Ok(0); }
+    if !dir.exists() {
+        return Ok(0);
+    }
     fn newest_mtime(dir: &std::path::Path) -> u64 {
         let mut max = 0u64;
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                let ft = match entry.file_type() { Ok(ft) => ft, Err(_) => continue };
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
                 if ft.is_dir() {
                     // Skip node_modules and hidden dirs
                     let name = entry.file_name();
                     let n = name.to_string_lossy();
-                    if n.starts_with('.') || n == "node_modules" { continue; }
+                    if n.starts_with('.') || n == "node_modules" {
+                        continue;
+                    }
                     max = max.max(newest_mtime(&entry.path()));
                 } else {
                     // Skip state.json — written by widget state API, not user edits
                     let name = entry.file_name();
-                    if name.to_string_lossy() == "state.json" { continue; }
-                    let mt = entry.metadata()
+                    if name.to_string_lossy() == "state.json" {
+                        continue;
+                    }
+                    let mt = entry
+                        .metadata()
                         .and_then(|m| m.modified())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| std::io::Error::other("time")))
+                        .and_then(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .map_err(|_| std::io::Error::other("time"))
+                        })
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     max = max.max(mt);
@@ -2150,7 +2705,12 @@ fn get_widget_server_port(state: tauri::State<'_, AppState>) -> u16 {
 // ---- Widget persistent state ----
 
 fn validate_widget_id(id: &str) -> Result<(), String> {
-    if id.is_empty() || id.contains("..") || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if id.is_empty()
+        || id.contains("..")
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Invalid widget id".into());
     }
     Ok(())
@@ -2176,9 +2736,14 @@ fn widget_get_state(widget_id: String, key: Option<String>) -> Result<serde_json
 }
 
 #[tauri::command]
-fn widget_set_state(widget_id: String, key: String, value: serde_json::Value) -> Result<(), String> {
+fn widget_set_state(
+    widget_id: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
     let path = widget_state_path(&widget_id)?;
-    let mut data: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(&path) {
+    let mut data: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(&path)
+    {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
         Err(_) => serde_json::Map::new(),
     };
@@ -2236,17 +2801,25 @@ fn create_skill_folder(skill_id: String) -> Result<String, String> {
 #[tauri::command]
 fn list_skills() -> Result<Vec<serde_json::Value>, String> {
     let base = skills_base_dir()?;
-    if !base.exists() { return Ok(vec![]); }
+    if !base.exists() {
+        return Ok(vec![]);
+    }
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { continue; }
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         let meta_path = entry.path().join("skill.json");
         let skill_md_exists = entry.path().join("SKILL.md").exists();
-        let modified = entry.metadata()
+        let modified = entry
+            .metadata()
             .and_then(|m| m.modified())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| std::io::Error::other("time")))
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| std::io::Error::other("time"))
+            })
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
@@ -2281,7 +2854,11 @@ fn delete_skill(skill_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn update_skill_meta(skill_id: String, description: Option<String>, tags: Option<Vec<String>>) -> Result<(), String> {
+fn update_skill_meta(
+    skill_id: String,
+    description: Option<String>,
+    tags: Option<Vec<String>>,
+) -> Result<(), String> {
     let dir = skills_base_dir()?.join(&skill_id);
     let meta_path = dir.join("skill.json");
     let mut meta: serde_json::Value = if meta_path.exists() {
@@ -2296,12 +2873,10 @@ fn update_skill_meta(skill_id: String, description: Option<String>, tags: Option
     if let Some(t) = tags {
         meta["tags"] = serde_json::json!(t);
     }
-    meta["modified"] = serde_json::json!(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    );
+    meta["modified"] = serde_json::json!(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0));
     std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
         .map_err(|e| format!("write: {}", e))?;
     Ok(())
@@ -2322,7 +2897,11 @@ fn read_skill_content(skill_id: String) -> Result<String, String> {
 /// parses frontmatter, applies $ARGUMENTS substitution, and returns the
 /// rendered body in the same format Claude Code uses for skill injection.
 #[tauri::command]
-fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<String>) -> Result<ResolvedSkill, String> {
+fn resolve_skill_prompt(
+    skill_name: String,
+    arguments: String,
+    cwd: Option<String>,
+) -> Result<ResolvedSkill, String> {
     let home = dirs::home_dir().ok_or("No home dir")?;
 
     // Search order: project .claude/skills/ → ~/.claude/skills/ → ~/.terminal64/skills/ → plugin cache
@@ -2385,7 +2964,9 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("name:") {
             let val = rest.trim().trim_matches('"').trim_matches('\'');
-            if !val.is_empty() { resolved_name = val.to_string(); }
+            if !val.is_empty() {
+                resolved_name = val.to_string();
+            }
         }
         if let Some(rest) = trimmed.strip_prefix("allowed-tools:") {
             let val = rest.trim();
@@ -2397,7 +2978,10 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
 
     // Build the full body with skill dir prefix (matches Claude Code behavior)
     let dir_str = skill_dir.to_string_lossy().to_string();
-    let mut body = format!("Base directory for this skill: {}\n\n{}", dir_str, markdown_body);
+    let mut body = format!(
+        "Base directory for this skill: {}\n\n{}",
+        dir_str, markdown_body
+    );
 
     // Apply $ARGUMENTS substitutions (matches Claude Code's argumentSubstitution.ts)
     let arg_parts: Vec<&str> = if arguments.is_empty() {
@@ -2428,14 +3012,21 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
         while let Some((pos, ch)) = chars.next() {
             if body[pos..].starts_with(&placeholder) {
                 let after_pos = pos + placeholder.len();
-                let next_ch = body.get(after_pos..after_pos + 1).and_then(|s| s.chars().next());
-                if next_ch.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+                let next_ch = body
+                    .get(after_pos..after_pos + 1)
+                    .and_then(|s| s.chars().next());
+                if next_ch
+                    .map(|c| c.is_alphanumeric() || c == '_')
+                    .unwrap_or(false)
+                {
                     // Followed by word char — don't replace
                     result.push(ch);
                 } else {
                     result.push_str(&replacement);
                     // Skip the rest of the placeholder chars
-                    for _ in 1..placeholder.len() { chars.next(); }
+                    for _ in 1..placeholder.len() {
+                        chars.next();
+                    }
                 }
             } else {
                 result.push(ch);
@@ -2508,8 +3099,11 @@ fn ensure_skills_plugin() -> Result<(), String> {
             },
             "keywords": ["terminal-64", "skills"]
         });
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
-            .map_err(|e| format!("write manifest: {}", e))?;
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .map_err(|e| format!("write manifest: {}", e))?;
     }
 
     let symlink_target = plugin_dir.join("skills");
@@ -2525,8 +3119,7 @@ fn ensure_skills_plugin() -> Result<(), String> {
                 std::fs::remove_dir_all(&symlink_target).ok();
             }
         }
-        create_dir_link(&skills_dir, &symlink_target)
-            .map_err(|e| format!("link: {}", e))?;
+        create_dir_link(&skills_dir, &symlink_target).map_err(|e| format!("link: {}", e))?;
     }
 
     // Ensure plugin is registered in installed_plugins.json
@@ -2541,15 +3134,21 @@ fn ensure_skills_plugin() -> Result<(), String> {
     if let Some(plugins) = installed.get_mut("plugins").and_then(|p| p.as_object_mut()) {
         if !plugins.contains_key(plugin_key) {
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            plugins.insert(plugin_key.to_string(), serde_json::json!([{
-                "scope": "user",
-                "installPath": plugin_dir.to_string_lossy(),
-                "version": "1.0.0",
-                "installedAt": now,
-                "lastUpdated": now
-            }]));
-            std::fs::write(&installed_path, serde_json::to_string_pretty(&installed).unwrap())
-                .map_err(|e| format!("write installed_plugins: {}", e))?;
+            plugins.insert(
+                plugin_key.to_string(),
+                serde_json::json!([{
+                    "scope": "user",
+                    "installPath": plugin_dir.to_string_lossy(),
+                    "version": "1.0.0",
+                    "installedAt": now,
+                    "lastUpdated": now
+                }]),
+            );
+            std::fs::write(
+                &installed_path,
+                serde_json::to_string_pretty(&installed).unwrap(),
+            )
+            .map_err(|e| format!("write installed_plugins: {}", e))?;
         }
     }
 
@@ -2562,13 +3161,15 @@ fn ensure_skills_plugin() -> Result<(), String> {
         serde_json::json!({})
     };
     if let Some(obj) = settings.as_object_mut() {
-        let enabled = obj.entry("enabledPlugins")
-            .or_insert(serde_json::json!({}));
+        let enabled = obj.entry("enabledPlugins").or_insert(serde_json::json!({}));
         if let Some(ep) = enabled.as_object_mut() {
             if !ep.contains_key(plugin_key) {
                 ep.insert(plugin_key.to_string(), serde_json::json!(true));
-                std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap())
-                    .map_err(|e| format!("write settings: {}", e))?;
+                std::fs::write(
+                    &settings_path,
+                    serde_json::to_string_pretty(&settings).unwrap(),
+                )
+                .map_err(|e| format!("write settings: {}", e))?;
             }
         }
     }
@@ -2577,12 +3178,18 @@ fn ensure_skills_plugin() -> Result<(), String> {
     // This is the path Claude CLI actually resolves for /skill-name commands
     let claude_skills_dir = home.join(".claude").join("skills");
     if let Err(e) = std::fs::create_dir_all(&claude_skills_dir) {
-        safe_eprintln!("[skills] Failed to create skills dir {:?}: {}", claude_skills_dir, e);
+        safe_eprintln!(
+            "[skills] Failed to create skills dir {:?}: {}",
+            claude_skills_dir,
+            e
+        );
     }
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for entry in entries.flatten() {
             let src = entry.path();
-            if !src.is_dir() { continue; }
+            if !src.is_dir() {
+                continue;
+            }
             let name = match src.file_name() {
                 Some(n) => n.to_owned(),
                 None => continue,
@@ -2591,9 +3198,11 @@ fn ensure_skills_plugin() -> Result<(), String> {
             // Check if symlink already points to the right place
             match std::fs::read_link(&dest) {
                 Ok(target) if target == src => continue, // already correct
-                Ok(_) => { std::fs::remove_file(&dest).ok(); } // wrong target
-                Err(_) if dest.exists() => continue, // real dir exists, don't clobber
-                Err(_) => {} // doesn't exist, create it
+                Ok(_) => {
+                    std::fs::remove_file(&dest).ok();
+                } // wrong target
+                Err(_) if dest.exists() => continue,     // real dir exists, don't clobber
+                Err(_) => {}                             // doesn't exist, create it
             }
             if let Err(e) = create_dir_link(&src, &dest) {
                 safe_eprintln!("[skills] Failed to link {:?} -> {:?}: {}", dest, src, e);
@@ -2613,7 +3222,10 @@ fn ensure_skills_plugin() -> Result<(), String> {
         }
     }
 
-    safe_eprintln!("[skills] Plugin bridge installed at {}", plugin_dir.display());
+    safe_eprintln!(
+        "[skills] Plugin bridge installed at {}",
+        plugin_dir.display()
+    );
     Ok(())
 }
 
@@ -2648,7 +3260,7 @@ async fn proxy_fetch(
                     || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)   // 172.16.0.0/12
                     || (o[0] == 192 && o[1] == 168)                 // 192.168.0.0/16
                     || (o[0] == 169 && o[1] == 254)                 // 169.254.0.0/16
-                    || o[0] == 0                                    // 0.0.0.0/8
+                    || o[0] == 0 // 0.0.0.0/8
                 }
                 std::net::IpAddr::V6(v6) => {
                     v6.is_loopback()                                    // ::1
@@ -2656,7 +3268,7 @@ async fn proxy_fetch(
                     || (v6.segments()[0] & 0xffc0) == 0xfe80           // fe80::/10 link-local
                     || (v6.segments()[0] & 0xfe00) == 0xfc00           // fc00::/7 unique-local
                     || (v6.segments()[0] & 0xff00) == 0xff00           // ff00::/8 multicast
-                    || v6.segments()[0..6] == [0,0,0,0,0,0xffff]       // ::ffff:0:0/96 IPv4-mapped
+                    || v6.segments()[0..6] == [0,0,0,0,0,0xffff] // ::ffff:0:0/96 IPv4-mapped
                 }
             };
             if is_blocked {
@@ -2666,7 +3278,9 @@ async fn proxy_fetch(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000).min(60_000)))
+        .timeout(std::time::Duration::from_millis(
+            timeout_ms.unwrap_or(30_000).min(60_000),
+        ))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -2695,7 +3309,10 @@ async fn proxy_fetch(
         }
     }
 
-    let content_type = resp_headers.get("content-type").cloned().unwrap_or_default();
+    let content_type = resp_headers
+        .get("content-type")
+        .cloned()
+        .unwrap_or_default();
     let is_text = content_type.contains("text/")
         || content_type.contains("json")
         || content_type.contains("xml")
@@ -2712,7 +3329,10 @@ async fn proxy_fetch(
         (String::from_utf8_lossy(&bytes).to_string(), false)
     } else {
         use base64::Engine;
-        (base64::engine::general_purpose::STANDARD.encode(&bytes), true)
+        (
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+            true,
+        )
     };
 
     Ok(ProxyFetchResponse {
@@ -2796,8 +3416,14 @@ fn checkpoints_base_dir() -> Result<std::path::PathBuf, String> {
 }
 
 #[tauri::command]
-fn create_checkpoint(session_id: String, turn: usize, files: Vec<FileSnapshot>) -> Result<(), String> {
-    let dir = checkpoints_base_dir()?.join(&session_id).join(format!("turn-{}", turn));
+fn create_checkpoint(
+    session_id: String,
+    turn: usize,
+    files: Vec<FileSnapshot>,
+) -> Result<(), String> {
+    let dir = checkpoints_base_dir()?
+        .join(&session_id)
+        .join(format!("turn-{}", turn));
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     // Write manifest (original paths) and file contents
     let mut manifest = Vec::new();
@@ -2809,24 +3435,35 @@ fn create_checkpoint(session_id: String, turn: usize, files: Vec<FileSnapshot>) 
     }
     std::fs::write(dir.join("manifest.txt"), manifest.join("\n"))
         .map_err(|e| format!("write manifest: {}", e))?;
-    safe_println!("[checkpoint] Created turn-{} for {} ({} files)", turn, &session_id[..8.min(session_id.len())], files.len());
+    safe_println!(
+        "[checkpoint] Created turn-{} for {} ({} files)",
+        turn,
+        &session_id[..8.min(session_id.len())],
+        files.len()
+    );
     Ok(())
 }
 
 #[tauri::command]
 fn restore_checkpoint(session_id: String, turn: usize) -> Result<Vec<String>, String> {
-    let dir = checkpoints_base_dir()?.join(&session_id).join(format!("turn-{}", turn));
+    let dir = checkpoints_base_dir()?
+        .join(&session_id)
+        .join(format!("turn-{}", turn));
     if !dir.exists() {
         return Ok(vec![]); // no checkpoint for this turn — nothing to restore
     }
     let manifest_path = dir.join("manifest.txt");
-    let manifest = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("read manifest: {}", e))?;
+    let manifest =
+        std::fs::read_to_string(&manifest_path).map_err(|e| format!("read manifest: {}", e))?;
     let mut restored = Vec::new();
     for line in manifest.lines() {
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         let parts: Vec<&str> = line.splitn(2, '|').collect();
-        if parts.len() != 2 { continue; }
+        if parts.len() != 2 {
+            continue;
+        }
         let snap_file = parts[0];
         let original_path = parts[1];
         // Block path traversal in crafted manifests
@@ -2839,18 +3476,24 @@ fn restore_checkpoint(session_id: String, turn: usize) -> Result<Vec<String>, St
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(dest, &content)
-            .map_err(|e| format!("restore {}: {}", original_path, e))?;
+        std::fs::write(dest, &content).map_err(|e| format!("restore {}: {}", original_path, e))?;
         restored.push(original_path.to_string());
     }
-    safe_println!("[checkpoint] Restored turn-{} for {} ({} files)", turn, &session_id[..8.min(session_id.len())], restored.len());
+    safe_println!(
+        "[checkpoint] Restored turn-{} for {} ({} files)",
+        turn,
+        &session_id[..8.min(session_id.len())],
+        restored.len()
+    );
     Ok(restored)
 }
 
 #[tauri::command]
 fn cleanup_checkpoints(session_id: String, keep_up_to_turn: usize) -> Result<(), String> {
     let base = checkpoints_base_dir()?.join(&session_id);
-    if !base.exists() { return Ok(()); }
+    if !base.exists() {
+        return Ok(());
+    }
     let entries = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -2879,7 +3522,10 @@ fn delete_files(paths: Vec<String>) -> Result<Vec<String>, String> {
         }
     }
     if !deleted.is_empty() {
-        safe_println!("[rewind] Deleted {} files created during delegation", deleted.len());
+        safe_println!(
+            "[rewind] Deleted {} files created during delegation",
+            deleted.len()
+        );
     }
     Ok(deleted)
 }
@@ -2942,14 +3588,17 @@ fn revert_files_git(cwd: String, paths: Vec<String>) -> Result<Vec<String>, Stri
             }
             Ok(_) => {
                 // File is untracked (new) — delete it
-                if abs.exists()
-                    && std::fs::remove_file(&abs).is_ok() {
-                        reverted.push(path.clone());
-                    }
+                if abs.exists() && std::fs::remove_file(&abs).is_ok() {
+                    reverted.push(path.clone());
+                }
             }
             Err(e) => {
                 // git didn't even launch — refuse to touch anything (data safety).
-                safe_eprintln!("[rewind] git unavailable ({}): skipping revert for {}", e, path);
+                safe_eprintln!(
+                    "[rewind] git unavailable ({}): skipping revert for {}",
+                    e,
+                    path
+                );
             }
         }
     }
@@ -3039,7 +3688,9 @@ async fn create_browser(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
-    state.browser_manager.create(&app_handle, id, url, x, y, w, h)
+    state
+        .browser_manager
+        .create(&app_handle, id, url, x, y, w, h)
 }
 
 #[tauri::command]
@@ -3062,7 +3713,9 @@ fn set_browser_bounds(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
-    state.browser_manager.set_bounds(&app_handle, &id, x, y, w, h)
+    state
+        .browser_manager
+        .set_bounds(&app_handle, &id, x, y, w, h)
 }
 
 #[tauri::command]
@@ -3150,7 +3803,10 @@ fn vector_search(
     query: String,
     top_k: Option<usize>,
 ) -> Result<Vec<vector_store::VectorSearchResult>, String> {
-    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let mut guard = state
+        .vector_store
+        .lock()
+        .map_err(|e| format!("Lock error: {e}"))?;
     let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
     let k = top_k.unwrap_or(10);
     if table == "all" {
@@ -3166,7 +3822,10 @@ fn vector_index_file(
     path: String,
     content: String,
 ) -> Result<(), String> {
-    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let mut guard = state
+        .vector_store
+        .lock()
+        .map_err(|e| format!("Lock error: {e}"))?;
     let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
     let title = std::path::Path::new(&path)
         .file_name()
@@ -3183,23 +3842,30 @@ fn vector_index_session(
     summary: String,
     cwd: String,
 ) -> Result<(), String> {
-    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+    let mut guard = state
+        .vector_store
+        .lock()
+        .map_err(|e| format!("Lock error: {e}"))?;
     let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
     let preview = summary.chars().take(200).collect::<String>();
     store.upsert_session(&session_id, &summary, &session_id, &cwd, &preview)
 }
 
 #[tauri::command]
-fn vector_reindex_all(
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let mut guard = state.vector_store.lock().map_err(|e| format!("Lock error: {e}"))?;
+fn vector_reindex_all(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let mut guard = state
+        .vector_store
+        .lock()
+        .map_err(|e| format!("Lock error: {e}"))?;
     let store = guard.as_mut().ok_or("Vector store not initialized yet")?;
 
     let mut indexed = 0usize;
 
     // Index skills from ~/.terminal64/skills/
-    let base = dirs::home_dir().ok_or("No home dir")?.join(".terminal64").join("skills");
+    let base = dirs::home_dir()
+        .ok_or("No home dir")?
+        .join(".terminal64")
+        .join("skills");
     if base.exists() {
         if let Ok(entries) = std::fs::read_dir(&base) {
             for entry in entries.flatten() {
@@ -3212,7 +3878,13 @@ fn vector_reindex_all(
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         let preview = content.chars().take(200).collect::<String>();
-                        let _ = store.upsert_skill(&name, &content, &name, &skill_dir.to_string_lossy(), &preview);
+                        let _ = store.upsert_skill(
+                            &name,
+                            &content,
+                            &name,
+                            &skill_dir.to_string_lossy(),
+                            &preview,
+                        );
                         indexed += 1;
                     }
                 }
@@ -3221,7 +3893,10 @@ fn vector_reindex_all(
     }
 
     // Index widgets from ~/.terminal64/widgets/
-    let widgets_base = dirs::home_dir().ok_or("No home dir")?.join(".terminal64").join("widgets");
+    let widgets_base = dirs::home_dir()
+        .ok_or("No home dir")?
+        .join(".terminal64")
+        .join("widgets");
     if widgets_base.exists() {
         if let Ok(entries) = std::fs::read_dir(&widgets_base) {
             for entry in entries.flatten() {
@@ -3234,7 +3909,13 @@ fn vector_reindex_all(
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         let preview = content.chars().take(200).collect::<String>();
-                        let _ = store.upsert_widget(&name, &content, &name, &widget_dir.to_string_lossy(), &preview);
+                        let _ = store.upsert_widget(
+                            &name,
+                            &content,
+                            &name,
+                            &widget_dir.to_string_lossy(),
+                            &preview,
+                        );
                         indexed += 1;
                     }
                 }
@@ -3376,20 +4057,14 @@ fn voice_models_status() -> Result<types::VoiceModelsStatus, String> {
 /// Concrete download behaviour lives in that module (owned by the
 /// model-runtime agent); this command dispatches to it and awaits.
 #[tauri::command]
-async fn download_voice_model(
-    app_handle: tauri::AppHandle,
-    kind: String,
-) -> Result<(), String> {
+async fn download_voice_model(app_handle: tauri::AppHandle, kind: String) -> Result<(), String> {
     use voice::models::{ensure, ModelKind};
 
     let targets: Vec<(ModelKind, &str)> = match kind.as_str() {
         "wake" => vec![(ModelKind::Wake, "jarvis")],
         // "command" = Moonshine STT + Silero VAD (both are required to
         // classify a voice command).
-        "command" => vec![
-            (ModelKind::Moonshine, "base"),
-            (ModelKind::Vad, "silero"),
-        ],
+        "command" => vec![(ModelKind::Moonshine, "base"), (ModelKind::Vad, "silero")],
         "dictation" => vec![(ModelKind::Whisper, "small.en-q5_1")],
         other => return Err(format!("unknown voice model kind: {}", other)),
     };
@@ -3423,7 +4098,10 @@ fn install_bundled_widget(app_handle: tauri::AppHandle, widget_name: String) -> 
     };
 
     if !src_dir.is_dir() {
-        return Err(format!("Bundled widget '{}' not found at {:?}", widget_name, src_dir));
+        return Err(format!(
+            "Bundled widget '{}' not found at {:?}",
+            widget_name, src_dir
+        ));
     }
 
     let dest_dir = dest_base.join(&widget_name);
@@ -3436,7 +4114,9 @@ fn install_bundled_widget(app_handle: tauri::AppHandle, widget_name: String) -> 
         if file.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             let name = file.file_name();
             // Don't overwrite user state
-            if name.to_string_lossy() == "state.json" { continue; }
+            if name.to_string_lossy() == "state.json" {
+                continue;
+            }
             let dest_file = dest_dir.join(&name);
             std::fs::copy(file.path(), &dest_file)
                 .map_err(|e| format!("copy {:?}: {}", name, e))?;
@@ -3451,16 +4131,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let perm_server = PermissionServer::start(app.handle().clone())
-                .map_err(|e| {
-                    safe_eprintln!("[setup] Permission server failed to start: {}", e);
-                    Box::<dyn std::error::Error>::from(e)
-                })?;
-            let widget_srv = WidgetServer::start()
-                .map_err(|e| {
-                    safe_eprintln!("[setup] Widget server failed to start: {}", e);
-                    Box::<dyn std::error::Error>::from(e)
-                })?;
+            let perm_server = PermissionServer::start(app.handle().clone()).map_err(|e| {
+                safe_eprintln!("[setup] Permission server failed to start: {}", e);
+                Box::<dyn std::error::Error>::from(e)
+            })?;
+            let widget_srv = WidgetServer::start().map_err(|e| {
+                safe_eprintln!("[setup] Widget server failed to start: {}", e);
+                Box::<dyn std::error::Error>::from(e)
+            })?;
             let mic_mgr = MicManager::new();
             let voice_mgr = VoiceManager::new(Arc::clone(&mic_mgr));
             app.manage(AppState {
@@ -3482,15 +4160,13 @@ pub fn run() {
                     let state: tauri::State<'_, AppState> = app.state();
                     Arc::clone(&state.vector_store)
                 };
-                std::thread::spawn(move || {
-                    match VectorStore::initialize() {
-                        Ok(store) => {
-                            *vs_arc.lock().unwrap() = Some(store);
-                            safe_eprintln!("[vector_store] Initialized successfully");
-                        }
-                        Err(e) => {
-                            safe_eprintln!("[vector_store] Failed to initialize: {}", e);
-                        }
+                std::thread::spawn(move || match VectorStore::initialize() {
+                    Ok(store) => {
+                        *vs_arc.lock().unwrap() = Some(store);
+                        safe_eprintln!("[vector_store] Initialized successfully");
+                    }
+                    Err(e) => {
+                        safe_eprintln!("[vector_store] Failed to initialize: {}", e);
                     }
                 });
             }
@@ -3513,11 +4189,9 @@ pub fn run() {
             {
                 use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.with_webview(|wv| {
-                        unsafe {
-                            let inner = wv.inner() as *mut objc2::runtime::AnyObject;
-                            let _: () = objc2::msg_send![&*inner, setAllowsMagnification: false];
-                        }
+                    let _ = window.with_webview(|wv| unsafe {
+                        let inner = wv.inner() as *mut objc2::runtime::AnyObject;
+                        let _: () = objc2::msg_send![&*inner, setAllowsMagnification: false];
                     });
                 }
             }

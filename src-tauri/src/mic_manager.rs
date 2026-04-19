@@ -179,8 +179,16 @@ fn kind_for_error(msg: &str) -> &'static str {
 fn is_bluetooth_input(name: &str) -> bool {
     let n = name.to_lowercase();
     [
-        "airpods", "bluetooth", "beats", "bose", "sony wh", "sony wf",
-        "sennheiser momentum", "galaxy buds", "pixel buds", "soundcore",
+        "airpods",
+        "bluetooth",
+        "beats",
+        "bose",
+        "sony wh",
+        "sony wf",
+        "sennheiser momentum",
+        "galaxy buds",
+        "pixel buds",
+        "soundcore",
     ]
     .iter()
     .any(|pat| n.contains(pat))
@@ -322,14 +330,9 @@ impl FrameBuilder {
                 oversampling_factor: 128,
                 window: WindowFunction::BlackmanHarris2,
             };
-            let rs = SincFixedIn::<f32>::new(
-                out_rate as f64 / in_rate as f64,
-                2.0,
-                params,
-                1024,
-                1,
-            )
-            .map_err(|e| format!("rubato init failed: {e}"))?;
+            let rs =
+                SincFixedIn::<f32>::new(out_rate as f64 / in_rate as f64, 2.0, params, 1024, 1)
+                    .map_err(|e| format!("rubato init failed: {e}"))?;
             let chunk = rs.input_frames_next();
             (Some(rs), chunk)
         };
@@ -349,8 +352,10 @@ impl FrameBuilder {
             Some(rs) => {
                 self.in_accum.extend_from_slice(mono);
                 while self.in_accum.len() >= self.resample_chunk {
-                    let input =
-                        vec![self.in_accum.drain(..self.resample_chunk).collect::<Vec<f32>>()];
+                    let input = vec![self
+                        .in_accum
+                        .drain(..self.resample_chunk)
+                        .collect::<Vec<f32>>()];
                     match rs.process(&input, None) {
                         Ok(out) => self.out_accum.extend_from_slice(&out[0]),
                         Err(e) => {
@@ -401,10 +406,7 @@ fn downmix_u16(data: &[u16], channels: usize) -> Vec<f32> {
     }
     data.chunks(channels)
         .map(|c| {
-            let sum: f32 = c
-                .iter()
-                .map(|&s| (s as i32 - 32768) as f32 * SCALE)
-                .sum();
+            let sum: f32 = c.iter().map(|&s| (s as i32 - 32768) as f32 * SCALE).sum();
             sum / c.len() as f32
         })
         .collect()

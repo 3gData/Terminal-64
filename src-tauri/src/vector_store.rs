@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use fastembed::{EmbeddingModel, TextEmbedding, InitOptions};
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
@@ -84,8 +84,9 @@ impl VectorStore {
         db.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size=-8000;"
-        ).map_err(|e| format!("Pragma setup failed: {e}"))?;
+             PRAGMA cache_size=-8000;",
+        )
+        .map_err(|e| format!("Pragma setup failed: {e}"))?;
 
         Self::create_tables(&db)?;
 
@@ -338,11 +339,7 @@ impl VectorStore {
         Self::validate_table(table)?;
         let count: i64 = self
             .db
-            .query_row(
-                &format!("SELECT count(*) FROM {table}"),
-                [],
-                |r| r.get(0),
-            )
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .map_err(|e| format!("Count failed: {e}"))?;
         Ok(count as usize)
     }

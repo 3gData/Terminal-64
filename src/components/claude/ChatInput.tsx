@@ -369,11 +369,16 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     if (!onRegisterVoiceActions) return;
     const actions: ChatInputVoiceActions = {
       send: (text?: string) => {
+        // `text` is the residual from the FINAL dictation chunk (the part
+        // before "jarvis send"). Earlier chunks were already committed to
+        // the textarea via intermediate Dictation intents whenever the
+        // user paused >1.5s mid-sentence. Append the residual to the
+        // accumulated textarea so the full prompt gets sent, not just
+        // the last chunk.
         rollbackPartial();
-        const payload = (text ?? getTextDirect()).trim();
-        // Force-clear the textarea BEFORE and AFTER submitting. No reliance
-        // on handleSend reading el.value — late voice events can't leave a
-        // ghost because we never route through the DOM value.
+        const base = getTextDirect().trim();
+        const residual = (text ?? "").trim();
+        const payload = base && residual ? `${base} ${residual}` : base || residual;
         setTextDirect("");
         if (payload) onSendRef.current(payload);
         setTextDirect("");
@@ -385,9 +390,11 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
       },
       rewrite: (text?: string) => {
         rollbackPartial();
-        const current = (text ?? getTextDirect()).trim();
-        setTextDirect(current);
-        const res = onRewriteRef.current?.(current, (t: string) => setTextDirect(t), { isVoice: true });
+        const base = getTextDirect().trim();
+        const residual = (text ?? "").trim();
+        const full = base && residual ? `${base} ${residual}` : base || residual;
+        setTextDirect(full);
+        const res = onRewriteRef.current?.(full, (t: string) => setTextDirect(t), { isVoice: true });
         Promise.resolve(res as unknown as Promise<void> | void).then(() => {
           const final = getTextDirect().trim();
           setTextDirect("");

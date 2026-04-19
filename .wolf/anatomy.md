@@ -1,13 +1,13 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-04-19T10:00:01.014Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-04-19T16:00:00.844Z
 > Files: 156 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ./
 
 - `.DS_Store` (~2186 tok)
 - `.gitignore` — Git ignore rules (~130 tok)
-- `.mcp.json` (~57 tok)
+- `.mcp.json` (~61 tok)
 - `CLAUDE.md` — OpenWolf (~2718 tok)
 - `index.html` — Terminal 64 (~139 tok)
 - `package-lock.json` — npm lock file (~12902 tok)
@@ -113,7 +113,7 @@
 
 - `audio_manager.rs` — AudioManager: new, start, stop, is_active (~2789 tok)
 - `browser_manager.rs` — BrowserManager: new, create, navigate, set_bounds + 8 more (~1235 tok)
-- `claude_manager.rs` — ClaudeManager: resolve_claude_path, shim_command (~6971 tok)
+- `claude_manager.rs` — ClaudeManager: resolve_claude_path, shim_command (~7235 tok)
 - `discord_bot.rs` — DiscordBot: new, start, stop, is_running + 4 more (~10120 tok)
 - `lib.rs` — Safe stderr logging — never panics if the pipe is broken. (~41500 tok)
 - `main.rs` — Prevents additional console window on Windows in release, DO NOT REMOVE!! (~51 tok)
@@ -136,7 +136,7 @@
 - `testkit.rs` — Voice test harness + telemetry + startup self-test. (~4759 tok)
 - `vad.rs` — Silero VAD runner for command endpointing. (~1531 tok)
 - `wake.rs` — openWakeWord runner (melspec → embedding → classifier). (~3674 tok)
-- `whisper.rs` — whisper.cpp streaming dictation via `whisper-rs` 0.13. (~6668 tok)
+- `whisper.rs` — whisper.cpp streaming dictation via `whisper-rs` 0.13. (~7334 tok)
 
 ## src/
 
@@ -163,8 +163,8 @@
 - `ChatInput.tsx` — Truncate a partial transcript at the last standalone "jarvis" (with (~10110 tok)
 - `ChatMessage.tsx` — DELEGATION_BLOCK_RE — uses useEffect, useState (~7406 tok)
 - `ClaudeChat.css` — Styles: 95 rules (~20548 tok)
-- `ClaudeChat.tsx` — Isolated streaming text component — subscribes only to streamingText, (~28769 tok)
-- `Delegation.css` — Styles: 109 rules, 6 vars, 2 animations (~4775 tok)
+- `ClaudeChat.tsx` — Isolated streaming text component — subscribes only to streamingText, (~28980 tok)
+- `Delegation.css` — Styles: 109 rules, 6 vars, 2 animations (~4831 tok)
 - `DelegationBadge.tsx` — DelegationBadge (~828 tok)
 - `DelegationDialog.tsx` — DelegationDialog — uses useState, useEffect (~1577 tok)
 - `DelegationPanel.tsx` — STATUS_ICONS (~966 tok)
@@ -188,7 +188,7 @@
 ## src/components/settings/
 
 - `SettingsPanel.css` — Styles: 61 rules, 1 vars, 3 animations (~2469 tok)
-- `SettingsPanel.tsx` — Toggle — uses useState, useEffect (~8474 tok)
+- `SettingsPanel.tsx` — Toggle — uses useState, useEffect (~8749 tok)
 
 ## src/components/skill/
 
@@ -206,18 +206,18 @@
 - `BrowserPanel.tsx` — Ensure a URL has a protocol; default to https. (~1973 tok)
 - `Widget.css` — Styles: 57 rules, 5 vars, 3 animations (~2137 tok)
 - `WidgetDialog.tsx` — Remind Claude that theme is reactive — no hardcoded colors. (~5874 tok)
-- `WidgetPanel.tsx` — Build a snapshot of Terminal 64 state that widgets receive on init (~8508 tok)
+- `WidgetPanel.tsx` — Build a snapshot of Terminal 64 state that widgets receive on init (~8682 tok)
 
 ## src/hooks/
 
-- `useClaudeEvents.ts` — Loosely-typed parsed event from the Claude CLI stream-JSON output. (~8340 tok)
-- `useDelegationOrchestrator.ts` — Scan messages for a report_done tool call and extract its summary arg. (~3789 tok)
+- `useClaudeEvents.ts` — Loosely-typed parsed event from the Claude CLI stream-JSON output. (~8460 tok)
+- `useDelegationOrchestrator.ts` — Scan messages for a report_done tool call and extract its summary arg. (~3797 tok)
 - `useKeybindings.ts` — Exports useKeybindings (~321 tok)
 - `usePartyMode.ts` — Parse a hex color to HSL, returns [h, s, l] with h in degrees, s/l in 0-100 (~1481 tok)
 - `useSemanticSearch.ts` — Debounced semantic search hook backed by sqlite-vec. (~408 tok)
 - `useTheme.ts` — Exports useTheme (~106 tok)
 - `useVectorAutoIndex.ts` — Auto-indexing hook for the vector search system. (~655 tok)
-- `useVoiceControl.ts` — Top-level voice-control hook. Mount once in App. Listens to `voice-*` Tauri (~2674 tok)
+- `useVoiceControl.ts` — Top-level voice-control hook. Mount once in App. Listens to `voice-*` Tauri (~2867 tok)
 
 ## src/lib/
 
@@ -243,7 +243,7 @@
 - `canvasStore.ts` — Get the center of the current viewport in canvas-space coordinates. (~4813 tok)
 - `claudeStore.ts` — Exports STORAGE_KEY, ClaudeTask, QuestionOption, PendingQuestionItem + 7 more (~8161 tok)
 - `delegationStore.ts` — Exports useDelegationStore (~2126 tok)
-- `settingsStore.ts` — Exports QuickPaste, useSettingsStore (~1033 tok)
+- `settingsStore.ts` — Exports QuickPaste, useSettingsStore (~1051 tok)
 - `themeStore.ts` — Exports useThemeStore (~1177 tok)
 - `voiceStore.ts` — Send current textarea. If `text` is provided, it overrides; otherwise the in-flight partial is rolled back and the committed base is sent. (~2314 tok)
 

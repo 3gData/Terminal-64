@@ -34,10 +34,8 @@ impl BrowserManager {
 
         let builder = tauri::webview::WebviewBuilder::new(&id, WebviewUrl::External(parsed))
             .on_navigation(move |nav_url| {
-                let _ = app_clone.emit(
-                    &format!("browser-navigated-{}", id_clone),
-                    nav_url.as_str(),
-                );
+                let _ =
+                    app_clone.emit(&format!("browser-navigated-{}", id_clone), nav_url.as_str());
                 true
             });
 
@@ -53,7 +51,10 @@ impl BrowserManager {
             )
             .map_err(|e| format!("Failed to create browser: {e}"))?;
 
-        self.active.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+        self.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id);
         Ok(())
     }
 
@@ -78,12 +79,7 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub fn set_visible(
-        &self,
-        app: &AppHandle,
-        id: &str,
-        visible: bool,
-    ) -> Result<(), String> {
+    pub fn set_visible(&self, app: &AppHandle, id: &str, visible: bool) -> Result<(), String> {
         let wv = app.get_webview(id).ok_or("Browser not found")?;
         if visible {
             wv.show().map_err(|e| format!("{e}"))?;
@@ -97,7 +93,10 @@ impl BrowserManager {
         if let Some(wv) = app.get_webview(id) {
             let _ = wv.close();
         }
-        self.active.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        self.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
         Ok(())
     }
 
@@ -127,10 +126,15 @@ impl BrowserManager {
     }
 
     pub fn set_all_visible(&self, app: &AppHandle, visible: bool) {
-        let ids: Vec<String> = self.active.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+        let ids: Vec<String> = self
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
         for id in ids {
             let _ = self.set_visible(app, &id, visible);
         }
     }
-
 }

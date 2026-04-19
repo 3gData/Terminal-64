@@ -139,7 +139,10 @@ impl MoonshineRunner {
             (shape.iter().copied().collect(), data.to_vec())
         };
         if enc_shape_vec.len() < 3 {
-            return Err(format!("encoder output rank {} unexpected", enc_shape_vec.len()));
+            return Err(format!(
+                "encoder output rank {} unexpected",
+                enc_shape_vec.len()
+            ));
         }
         let enc_seq = enc_shape_vec[1] as usize;
         let enc_hidden_dim = enc_shape_vec[2] as usize;
@@ -167,8 +170,8 @@ impl MoonshineRunner {
                 Tensor::from_array(hidden_arr).map_err(|e| format!("hidden tensor: {e}"))?;
 
             let use_cache_arr = Array1::from_vec(vec![false]);
-            let use_cache_t = Tensor::from_array(use_cache_arr)
-                .map_err(|e| format!("use_cache tensor: {e}"))?;
+            let use_cache_t =
+                Tensor::from_array(use_cache_arr).map_err(|e| format!("use_cache tensor: {e}"))?;
 
             let mut inputs: Vec<(
                 std::borrow::Cow<'_, str>,
@@ -197,8 +200,7 @@ impl MoonshineRunner {
                 let zeros = vec![0.0f32; shape.0 * shape.1 * shape.2 * shape.3];
                 let arr = Array4::from_shape_vec(shape, zeros)
                     .map_err(|e| format!("past reshape {name}: {e}"))?;
-                let t = Tensor::from_array(arr)
-                    .map_err(|e| format!("past tensor {name}: {e}"))?;
+                let t = Tensor::from_array(arr).map_err(|e| format!("past tensor {name}: {e}"))?;
                 inputs.push((
                     std::borrow::Cow::from(name.clone()),
                     ort::session::SessionInputValue::from(t),

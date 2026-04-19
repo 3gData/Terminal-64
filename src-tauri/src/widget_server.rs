@@ -59,7 +59,10 @@ fn respond(mut stream: TcpStream, status: u16, mime: &str, body: &[u8]) {
          Cache-Control: no-cache\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Connection: close\r\n\r\n",
-        status, reason, mime, body.len()
+        status,
+        reason,
+        mime,
+        body.len()
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
@@ -125,7 +128,11 @@ fn handle_request(stream: TcpStream) {
         Some(idx) => (&stripped[..idx], &stripped[idx + 1..]),
         None => (stripped, "index.html"),
     };
-    let rel_path = if rel_path.is_empty() { "index.html" } else { rel_path };
+    let rel_path = if rel_path.is_empty() {
+        "index.html"
+    } else {
+        rel_path
+    };
 
     // Validate widget_id — only allow safe characters
     if widget_id.is_empty()
@@ -208,10 +215,7 @@ impl WidgetServer {
     pub fn start() -> Result<Self, String> {
         let listener =
             TcpListener::bind("127.0.0.1:0").map_err(|e| format!("widget server bind: {}", e))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| e.to_string())?
-            .port();
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         safe_eprintln!("[widget-server] Listening on 127.0.0.1:{}", port);
 

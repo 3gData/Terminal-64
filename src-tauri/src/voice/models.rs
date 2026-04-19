@@ -158,9 +158,7 @@ pub fn registry() -> &'static [ModelInfo] {
 }
 
 pub fn find(kind: ModelKind, name: &str) -> Option<&'static ModelInfo> {
-    registry()
-        .iter()
-        .find(|m| m.kind == kind && m.name == name)
+    registry().iter().find(|m| m.kind == kind && m.name == name)
 }
 
 /// Base dir: `~/.terminal64/stt-models/`.
@@ -218,8 +216,7 @@ pub fn is_downloaded(info: &ModelInfo) -> bool {
             return false;
         };
         let p = dir.join(leaf);
-        p.exists()
-            && fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false)
+        p.exists() && fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false)
     })
 }
 
@@ -239,8 +236,7 @@ fn safe_leaf(name: &str) -> Result<String, String> {
 /// for the bundle and verify SHA-256 where provided. Emits `voice-model-progress`.
 /// Safe to call many times; returns the model's directory on success.
 pub async fn ensure(app: &AppHandle, kind: ModelKind, name: &str) -> Result<PathBuf, String> {
-    let info =
-        find(kind, name).ok_or_else(|| format!("Unknown model {:?}/{}", kind, name))?;
+    let info = find(kind, name).ok_or_else(|| format!("Unknown model {:?}/{}", kind, name))?;
     let dir = model_dir(kind, name)?;
     fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
 
@@ -358,8 +354,7 @@ async fn download_file(
     use futures_util::StreamExt;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream error: {e}"))?;
-        out.write_all(&chunk)
-            .map_err(|e| format!("write: {e}"))?;
+        out.write_all(&chunk).map_err(|e| format!("write: {e}"))?;
         if !file.sha256.is_empty() {
             hasher.update(&chunk);
         }

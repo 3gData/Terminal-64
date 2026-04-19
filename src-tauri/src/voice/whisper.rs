@@ -160,25 +160,39 @@ impl WhisperRunner {
                     .map_err(|_| "audio lock poisoned".to_string())?;
                 std::mem::take(&mut *g)
             };
+            // Snapshot the LocalAgreement-2 committed prefix — this is what
+            // the user saw on screen (it grew across many partial decodes,
+            // each of which agreed on these words). The fresh full-buffer
+            // decode below can occasionally disagree with this stream
+            // (whisper's anti-hallucination thresholds sometimes drop early
+            // segments when the buffer contains silence/noise). When that
+            // happens, the fresh text is SHORTER than what the user said —
+            // manifested as "Jarvis send only sends the last few words of a
+            // long dictation". We reconcile the two below.
+            let committed_words: Vec<String> = self
+                .agreement
+                .lock()
+                .map(|a| a.committed_words.clone())
+                .unwrap_or_default();
+            let committed_text = committed_words.join(" ");
+
             if audio.len() < MIN_AUDIO_SAMPLES {
-                // Even on short audio, flush any committed-but-unspoken tail
-                // so the returned final is consistent with the UI.
-                let committed = self
-                    .agreement
-                    .lock()
-                    .map(|mut a| a.take_committed())
-                    .unwrap_or_default();
-                return Ok(committed);
+                if let Ok(mut ag) = self.agreement.lock() {
+                    ag.reset();
+                }
+                return Ok(committed_text);
             }
             safe_eprintln!("[voice/whisper] flush: {} samples", audio.len());
-            let text = transcribe(&self.ctx, &audio)?;
-            safe_eprintln!("[voice/whisper] final -> {:?}", text);
-            // Caller (voice_manager) owns the user-visible final emission;
-            // we only reset the agreement buffer and return the text.
+            let fresh = transcribe(&self.ctx, &audio)?;
+            safe_eprintln!(
+                "[voice/whisper] final fresh -> {:?} / committed -> {:?}",
+                fresh,
+                committed_text
+            );
             if let Ok(mut ag) = self.agreement.lock() {
                 ag.reset();
             }
-            Ok(text)
+            Ok(reconcile_flush(&committed_text, &fresh))
         }
         #[cfg(not(feature = "voice-dictation"))]
         {
@@ -281,14 +295,8 @@ fn partial_worker(
         };
 
         if let Some(app) = app.as_ref() {
-            let _ = app.emit(
-                "voice-committed",
-                serde_json::json!({ "text": committed }),
-            );
-            let _ = app.emit(
-                "voice-tentative",
-                serde_json::json!({ "text": tentative }),
-            );
+            let _ = app.emit("voice-committed", serde_json::json!({ "text": committed }));
+            let _ = app.emit("voice-tentative", serde_json::json!({ "text": tentative }));
             let combined = if committed.is_empty() {
                 tentative.clone()
             } else if tentative.is_empty() {
@@ -412,6 +420,53 @@ impl AgreementBuffer {
 /// away trailing punctuation).
 fn split_words(text: &str) -> Vec<String> {
     text.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+/// Pick the authoritative finalized transcript from the committed-prefix
+/// stream (what the user saw) and the fresh full-buffer decode.
+///
+/// Rules:
+///   - If either side is empty, return the other.
+///   - If the fresh decode is a word-level prefix or supersequence of the
+///     committed prefix, trust the fresh decode (it's a valid extension,
+///     possibly with more polished punctuation/casing).
+///   - Otherwise the fresh decode disagrees with what the user saw — prefer
+///     the committed prefix and append any trailing words the fresh decode
+///     adds that aren't already present (often just "jarvis send").
+fn reconcile_flush(committed: &str, fresh: &str) -> String {
+    let committed = committed.trim();
+    let fresh = fresh.trim();
+    if committed.is_empty() {
+        return fresh.to_string();
+    }
+    if fresh.is_empty() {
+        return committed.to_string();
+    }
+
+    let cw = split_words(committed);
+    let fw = split_words(fresh);
+
+    let fresh_starts_with_committed =
+        fw.len() >= cw.len() && cw.iter().zip(fw.iter()).all(|(a, b)| words_equal(a, b));
+    if fresh_starts_with_committed {
+        return fresh.to_string();
+    }
+
+    // Fresh dropped/replaced earlier words. Find the longest suffix of `fw`
+    // that doesn't overlap with `cw` (walk backward skipping words already
+    // present in committed) and append it.
+    let mut tail_start = fw.len();
+    for (i, w) in fw.iter().enumerate() {
+        if !cw.iter().any(|c| words_equal(c, w)) {
+            tail_start = i;
+            break;
+        }
+    }
+    let tail: Vec<String> = fw.iter().skip(tail_start).cloned().collect();
+    if tail.is_empty() {
+        return committed.to_string();
+    }
+    format!("{} {}", committed, tail.join(" "))
 }
 
 /// Word equality for agreement: case-insensitive, trailing punctuation

@@ -69,10 +69,17 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
 
     safe_eprintln!("[audio] Using ScreenCaptureKit for system audio capture");
 
-    let content = SCShareableContent::get()
-        .map_err(|e| format!("Failed to get shareable content (Screen Recording permission needed): {:?}", e))?;
+    let content = SCShareableContent::get().map_err(|e| {
+        format!(
+            "Failed to get shareable content (Screen Recording permission needed): {:?}",
+            e
+        )
+    })?;
 
-    let display = content.displays().into_iter().next()
+    let display = content
+        .displays()
+        .into_iter()
+        .next()
         .ok_or_else(|| "No display found for ScreenCaptureKit".to_string())?;
 
     // Configure for audio capture with minimal video (can't fully disable video)
@@ -138,7 +145,8 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
         SCStreamOutputType::Audio,
     );
 
-    stream.start_capture()
+    stream
+        .start_capture()
         .map_err(|e| format!("Failed to start capture: {:?}", e))?;
 
     safe_eprintln!("[audio] ScreenCaptureKit stream started — entering processing loop");
@@ -163,10 +171,15 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
 
         debug_counter += 1;
         if debug_counter % 60 == 0 {
-            let max_sample = samples_buf.iter().cloned().fold(0.0f32, |a, b| a.max(b.abs()));
+            let max_sample = samples_buf
+                .iter()
+                .cloned()
+                .fold(0.0f32, |a, b| a.max(b.abs()));
             safe_eprintln!(
                 "[audio] Debug: accumulated={}/{}, max_sample={:.6}",
-                accumulated, FFT_SIZE, max_sample
+                accumulated,
+                FFT_SIZE,
+                max_sample
             );
         }
 
@@ -182,8 +195,7 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
                 .map(|(i, &s)| {
                     let w = 0.5
                         * (1.0
-                            - (2.0 * std::f32::consts::PI * i as f32
-                                / (FFT_SIZE as f32 - 1.0))
+                            - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE as f32 - 1.0))
                                 .cos());
                     s * w
                 })
@@ -239,7 +251,8 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
         }
     }
 
-    stream.stop_capture()
+    stream
+        .stop_capture()
         .map_err(|e| format!("Failed to stop capture: {:?}", e))?;
     safe_eprintln!("[audio] ScreenCaptureKit stream stopped");
     Ok(())
@@ -254,7 +267,10 @@ fn run_capture(active: Arc<AtomicBool>, _app: AppHandle) -> Result<(), String> {
 
 /// Map raw FFT frequency bins to logarithmically-spaced bands
 fn map_to_log_bands(
-    data: &[(spectrum_analyzer::Frequency, spectrum_analyzer::FrequencyValue)],
+    data: &[(
+        spectrum_analyzer::Frequency,
+        spectrum_analyzer::FrequencyValue,
+    )],
     num_bands: usize,
 ) -> Vec<f32> {
     if data.is_empty() {
@@ -275,8 +291,7 @@ fn map_to_log_bands(
             continue;
         }
         let log_f = f.ln();
-        let band_idx =
-            ((log_f - log_min) / (log_max - log_min) * num_bands as f32) as usize;
+        let band_idx = ((log_f - log_min) / (log_max - log_min) * num_bands as f32) as usize;
         let band_idx = band_idx.min(num_bands - 1);
         bands[band_idx] += val.val();
         counts[band_idx] += 1;

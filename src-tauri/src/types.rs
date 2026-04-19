@@ -102,11 +102,11 @@ pub struct McpServer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectrumData {
-    pub bands: Vec<f32>,  // 64 frequency band magnitudes, normalized 0.0-1.0
-    pub peak: f32,        // overall peak amplitude
-    pub bass: f32,        // average of low bands (sub-bass + bass)
-    pub mid: f32,         // average of mid bands
-    pub treble: f32,      // average of high bands
+    pub bands: Vec<f32>, // 64 frequency band magnitudes, normalized 0.0-1.0
+    pub peak: f32,       // overall peak amplitude
+    pub bass: f32,       // average of low bands (sub-bass + bass)
+    pub mid: f32,        // average of mid bands
+    pub treble: f32,     // average of high bands
 }
 
 // Session history types (used by list_disk_sessions / load_session_history commands)
@@ -133,7 +133,7 @@ pub struct HistoryToolCall {
 #[derive(Serialize)]
 pub struct HistoryMessage {
     pub id: String,
-    pub role: String,  // "user" or "assistant"
+    pub role: String, // "user" or "assistant"
     pub content: String,
     pub timestamp: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,19 +210,34 @@ pub struct VoiceIntent {
 
 impl VoiceIntent {
     pub fn send() -> Self {
-        Self { kind: VoiceIntentKind::Send, payload: None }
+        Self {
+            kind: VoiceIntentKind::Send,
+            payload: None,
+        }
     }
     pub fn exit() -> Self {
-        Self { kind: VoiceIntentKind::Exit, payload: None }
+        Self {
+            kind: VoiceIntentKind::Exit,
+            payload: None,
+        }
     }
     pub fn rewrite() -> Self {
-        Self { kind: VoiceIntentKind::Rewrite, payload: None }
+        Self {
+            kind: VoiceIntentKind::Rewrite,
+            payload: None,
+        }
     }
     pub fn dictation(text: impl Into<String>) -> Self {
-        Self { kind: VoiceIntentKind::Dictation, payload: Some(text.into()) }
+        Self {
+            kind: VoiceIntentKind::Dictation,
+            payload: Some(text.into()),
+        }
     }
     pub fn select_session(query: impl Into<String>) -> Self {
-        Self { kind: VoiceIntentKind::SelectSession, payload: Some(query.into()) }
+        Self {
+            kind: VoiceIntentKind::SelectSession,
+            payload: Some(query.into()),
+        }
     }
 }
 
@@ -242,4 +257,3 @@ pub struct VoiceDownloadProgress {
     /// 0.0..=1.0
     pub progress: f32,
 }
-

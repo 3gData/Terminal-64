@@ -318,7 +318,11 @@ pub fn run_fixtures(
                 Err(e) => (String::new(), ms, Some(e)),
             }
         } else {
-            (String::new(), 0, Some("no dictation/command adapter".into()))
+            (
+                String::new(),
+                0,
+                Some("no dictation/command adapter".into()),
+            )
         };
 
         results.push(FixtureResult {
@@ -397,8 +401,8 @@ pub fn read_wav_16k_mono(path: &Path) -> Result<Vec<f32>, String> {
 
     while i + 8 <= bytes.len() {
         let tag = &bytes[i..i + 4];
-        let size = u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]])
-            as usize;
+        let size =
+            u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]]) as usize;
         let start = i + 8;
         let end = start.saturating_add(size).min(bytes.len());
         if tag == b"fmt " && size >= 16 {
@@ -410,8 +414,7 @@ pub fn read_wav_16k_mono(path: &Path) -> Result<Vec<f32>, String> {
                 bytes[start + 6],
                 bytes[start + 7],
             ]);
-            let bits =
-                u16::from_le_bytes([bytes[start + 14], bytes[start + 15]]);
+            let bits = u16::from_le_bytes([bytes[start + 14], bytes[start + 15]]);
             fmt = Some((fmt_code, channels, sr, bits));
         } else if tag == b"data" {
             data_range = Some((start, end));

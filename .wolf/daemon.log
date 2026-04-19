@@ -1808,3 +1808,32 @@
 [2026-04-19T12:29:02.814Z] [INFO] File watcher started on .wolf/
 [2026-04-19T12:29:02.814Z] [INFO] OpenWolf daemon started
 [2026-04-19T12:29:02.814Z] [INFO] Dashboard server listening on port 18791
+[2026-04-19T13:51:42.559Z] [INFO] Daemon shutting down...
+[2026-04-19T13:51:42.560Z] [INFO] Daemon stopped
+[2026-04-19T13:51:42.986Z] [INFO] Scheduled task: Full anatomy rescan (0 */6 * * *)
+[2026-04-19T13:51:42.987Z] [INFO] Scheduled task: Consolidate old memory (0 2 * * *)
+[2026-04-19T13:51:42.987Z] [INFO] Scheduled task: Token audit report (0 0 * * 1)
+[2026-04-19T13:51:42.987Z] [INFO] Scheduled task: AI suggestions (0 4 * * 1)
+[2026-04-19T13:51:42.987Z] [INFO] File watcher started on .wolf/
+[2026-04-19T13:51:42.988Z] [INFO] OpenWolf daemon started
+[2026-04-19T13:51:42.988Z] [INFO] Dashboard server listening on port 18791
+[2026-04-19T14:22:46.039Z] [INFO] Daemon shutting down...
+[2026-04-19T14:22:46.039Z] [INFO] Daemon stopped
+[2026-04-19T14:22:46.435Z] [INFO] Scheduled task: Full anatomy rescan (0 */6 * * *)
+[2026-04-19T14:22:46.437Z] [INFO] Scheduled task: Consolidate old memory (0 2 * * *)
+[2026-04-19T14:22:46.437Z] [INFO] Scheduled task: Token audit report (0 0 * * 1)
+[2026-04-19T14:22:46.437Z] [INFO] Scheduled task: AI suggestions (0 4 * * 1)
+[2026-04-19T14:22:46.437Z] [INFO] File watcher started on .wolf/
+[2026-04-19T14:22:46.438Z] [INFO] OpenWolf daemon started
+[2026-04-19T14:22:46.438Z] [INFO] Dashboard server listening on port 18791
+[2026-04-19T15:32:28.777Z] [INFO] Daemon shutting down...
+[2026-04-19T15:32:28.799Z] [INFO] Daemon stopped
+[2026-04-19T15:32:29.205Z] [INFO] Scheduled task: Full anatomy rescan (0 */6 * * *)
+[2026-04-19T15:32:29.206Z] [INFO] Scheduled task: Consolidate old memory (0 2 * * *)
+[2026-04-19T15:32:29.207Z] [INFO] Scheduled task: Token audit report (0 0 * * 1)
+[2026-04-19T15:32:29.207Z] [INFO] Scheduled task: AI suggestions (0 4 * * 1)
+[2026-04-19T15:32:29.207Z] [INFO] File watcher started on .wolf/
+[2026-04-19T15:32:29.208Z] [INFO] OpenWolf daemon started
+[2026-04-19T15:32:29.208Z] [INFO] Dashboard server listening on port 18791
+[2026-04-19T16:00:00.741Z] [INFO] Executing task: Full anatomy rescan
+[2026-04-19T16:00:00.845Z] [INFO] Task Full anatomy rescan completed in 104ms

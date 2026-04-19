@@ -20,7 +20,6 @@ use tauri::{AppHandle, Emitter};
 use crate::mic_manager::MicManager;
 use crate::types::{VoiceIntent, VoiceIntentKind, VoiceState};
 
-
 /// Split a dictation transcript around a "jarvis" marker into
 /// `(residual_prompt, control_intent, has_command_tail)`.
 ///
@@ -40,7 +39,14 @@ use crate::types::{VoiceIntent, VoiceIntentKind, VoiceState};
 fn split_jarvis(text: &str) -> Option<(String, VoiceIntent, bool)> {
     const SEND: &[&str] = &["send", "submit", "go", "fire", "ship", "sendit"];
     const EXIT: &[&str] = &[
-        "exit", "cancel", "nevermind", "never", "stop", "abort", "quit", "scratch",
+        "exit",
+        "cancel",
+        "nevermind",
+        "never",
+        "stop",
+        "abort",
+        "quit",
+        "scratch",
     ];
     const REWRITE: &[&str] = &["rewrite", "rephrase", "fix", "cleanup", "clean", "polish"];
 
@@ -48,7 +54,13 @@ fn split_jarvis(text: &str) -> Option<(String, VoiceIntent, bool)> {
     // (for matching). Whitespace-split plus punctuation strip.
     let lower: String = text
         .chars()
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c.to_ascii_lowercase() } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect();
     let lower_tokens: Vec<&str> = lower.split_whitespace().collect();
     let orig_tokens: Vec<&str> = text.split_whitespace().collect();
@@ -85,7 +97,9 @@ fn split_jarvis(text: &str) -> Option<(String, VoiceIntent, bool)> {
     // attached to the original tokens, but word boundaries align).
     let residual: String = orig_tokens[..residual_end.min(orig_tokens.len())]
         .join(" ")
-        .trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == '!' || c == '?')
+        .trim_end_matches(|c: char| {
+            c.is_whitespace() || c == ',' || c == '.' || c == '!' || c == '?'
+        })
         .to_string();
 
     Some((residual, intent, has_command_tail))
@@ -321,8 +335,8 @@ impl VoiceManager {
         let mut command_mode = false;
         const MAX_COMMAND_SAMPLES: usize = 16_000 * 5; // 5s hard cap
         const MAX_DICTATION_SAMPLES: usize = 16_000 * 10; // 10s cap
-        // These counters are on TOP of the VAD's own ~800ms tail
-        // (min_silence_duration_ms=500 + speech_pad_ms=300).
+                                                          // These counters are on TOP of the VAD's own ~800ms tail
+                                                          // (min_silence_duration_ms=500 + speech_pad_ms=300).
         const SILENCE_FRAMES_TO_FINALIZE: usize = 3; // ~240ms cmd
         const DICT_SILENCE_FRAMES_TO_FINALIZE: usize = 9; // ~720ms dict
         const DICT_IDLE_TIMEOUT_FRAMES: usize = 150; // ~12s of no speech → exit Dictating
@@ -365,24 +379,22 @@ impl VoiceManager {
                     // visible signal that the window extends when they
                     // actually start talking.
                     let progress = if command_any_speech {
-                        (silence_run as f32 / SILENCE_FRAMES_TO_FINALIZE as f32)
-                            .clamp(0.0, 1.0)
+                        (silence_run as f32 / SILENCE_FRAMES_TO_FINALIZE as f32).clamp(0.0, 1.0)
                     } else {
-                        (command_buffer.len() as f32 / MAX_COMMAND_SAMPLES as f32)
-                            .clamp(0.0, 1.0)
+                        (command_buffer.len() as f32 / MAX_COMMAND_SAMPLES as f32).clamp(0.0, 1.0)
                     };
                     self.emit_listening_progress(progress);
 
                     // Only hard-time-out if the user never spoke. Once speech
                     // starts, the VAD + silence_run pair owns finalization —
                     // so "Hey Jarvis" + long pause + "send" still works.
-                    let timed_out = !command_any_speech
-                        && command_buffer.len() >= MAX_COMMAND_SAMPLES;
+                    let timed_out =
+                        !command_any_speech && command_buffer.len() >= MAX_COMMAND_SAMPLES;
                     // Only finalize on silence AFTER we've heard speech — prevents
                     // an empty-buffer bail-out when the user pauses briefly after
                     // "Hey Jarvis" before speaking the command.
-                    let silence_finalize = command_any_speech
-                        && silence_run >= SILENCE_FRAMES_TO_FINALIZE;
+                    let silence_finalize =
+                        command_any_speech && silence_run >= SILENCE_FRAMES_TO_FINALIZE;
                     if timed_out || silence_finalize {
                         let buf = std::mem::take(&mut command_buffer);
                         silence_run = 0;
@@ -675,10 +687,14 @@ impl VoiceManager {
         if command_mode {
             safe_eprintln!("[voice] command-mode utterance: {:?}", trimmed);
             let intent = match crate::voice::intent::classify(&trimmed) {
-                Some(i) if matches!(
-                    i.kind,
-                    VoiceIntentKind::Send | VoiceIntentKind::Exit | VoiceIntentKind::Rewrite
-                ) => i,
+                Some(i)
+                    if matches!(
+                        i.kind,
+                        VoiceIntentKind::Send | VoiceIntentKind::Exit | VoiceIntentKind::Rewrite
+                    ) =>
+                {
+                    i
+                }
                 // Unclassifiable follow-up → default to Send. User said
                 // "jarvis" and then spoke; they want an action, not more text.
                 _ => VoiceIntent::send(),
@@ -691,9 +707,7 @@ impl VoiceManager {
         // Pure keyword check: transcript is just "send"/"exit"/etc.
         if let Some(intent) = crate::voice::intent::classify(&trimmed) {
             match intent.kind {
-                VoiceIntentKind::Send
-                | VoiceIntentKind::Exit
-                | VoiceIntentKind::Rewrite => {
+                VoiceIntentKind::Send | VoiceIntentKind::Exit | VoiceIntentKind::Rewrite => {
                     self.emit_intent(&intent);
                     self.set_state(VoiceState::Idle);
                     return false;
@@ -796,7 +810,10 @@ impl VoiceManager {
         if max_peak < SILENCE_GATE {
             return;
         }
-        self.emit("voice-waveform", &serde_json::json!({ "samples": &out[..] }));
+        self.emit(
+            "voice-waveform",
+            &serde_json::json!({ "samples": &out[..] }),
+        );
     }
 
     fn emit_listening_progress(&self, progress: f32) {

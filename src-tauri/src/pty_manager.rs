@@ -24,15 +24,16 @@ impl PtyManager {
         }
     }
 
-    pub fn create(
-        &self,
-        app_handle: &AppHandle,
-        req: CreateTerminalRequest,
-    ) -> Result<(), String> {
+    pub fn create(&self, app_handle: &AppHandle, req: CreateTerminalRequest) -> Result<(), String> {
         let cols = req.cols.unwrap_or(80);
         let rows = req.rows.unwrap_or(24);
 
-        safe_eprintln!("[pty] Creating terminal id={} cols={} rows={}", req.id, cols, rows);
+        safe_eprintln!(
+            "[pty] Creating terminal id={} cols={} rows={}",
+            req.id,
+            cols,
+            rows
+        );
 
         // Prevent double-creation (React StrictMode calls this twice)
         {
@@ -101,11 +102,7 @@ impl PtyManager {
         Ok(())
     }
 
-    fn reader_loop(
-        app_handle: AppHandle,
-        terminal_id: String,
-        mut reader: Box<dyn Read + Send>,
-    ) {
+    fn reader_loop(app_handle: AppHandle, terminal_id: String, mut reader: Box<dyn Read + Send>) {
         safe_eprintln!("[pty] Reader thread started for {}", terminal_id);
         let mut buf = [0u8; 4096];
         let mut total_bytes = 0usize;

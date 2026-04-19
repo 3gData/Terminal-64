@@ -34,7 +34,13 @@ pub fn normalize(text: &str) -> String {
     let lower = text.to_lowercase();
     let cleaned: String = lower
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     let collapsed: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
 
@@ -92,8 +98,7 @@ pub fn classify(raw: &str) -> Option<VoiceIntent> {
     const FILLER: &[&str] = &["it", "that", "this", "now", "please", "pls", "sir"];
     let tokens: Vec<&str> = norm.split_whitespace().collect();
     let first = tokens.first().copied().unwrap_or("");
-    let is_command_shape = tokens.len() == 1
-        || (tokens.len() == 2 && FILLER.contains(&tokens[1]));
+    let is_command_shape = tokens.len() == 1 || (tokens.len() == 2 && FILLER.contains(&tokens[1]));
     if is_command_shape {
         if matches_any(first, SEND_WORDS) {
             return Some(VoiceIntent::send());
@@ -236,13 +241,13 @@ mod tests {
         ];
         for (input, want_q) in cases {
             let got = classify(input).unwrap_or_else(|| panic!("none for {:?}", input));
-            assert_eq!(got.kind, VoiceIntentKind::SelectSession, "input={:?}", input);
             assert_eq!(
-                got.payload.as_deref(),
-                Some(*want_q),
+                got.kind,
+                VoiceIntentKind::SelectSession,
                 "input={:?}",
                 input
             );
+            assert_eq!(got.payload.as_deref(), Some(*want_q), "input={:?}", input);
         }
     }
 

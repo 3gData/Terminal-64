@@ -118,19 +118,28 @@ export function useVoiceControl() {
       // actual action with the authoritative payload. Without this wait,
       // late committed/tentative events from the dying worker can still
       // repaint the textarea between our clear and our send.
+      //
+      // The snapshot captures what's actually in the textarea RIGHT NOW —
+      // including text committed by prior Dictation intents — so when the
+      // current "jarvis send" utterance has an empty residual (it was just
+      // the command, no prefix), we still send the accumulated dictation.
+      // Without this, dictating → pausing → saying "Jarvis send" would wipe
+      // the textarea and send only the trailing partial that leaked through.
       const DRAIN_MS = 350;
-      const endDictationThen = (action: () => void) => {
+      const endDictationThen = (action: (snapshot: string) => void) => {
         muteNow();
+        const snapshot = (actions.getText?.() ?? "").trim();
         const s = useVoiceStore.getState();
         s.clearDictationSplit();
         s.setPartial("");
         actions.setText("");
-        setTimeout(action, DRAIN_MS);
+        setTimeout(() => action(snapshot), DRAIN_MS);
       };
       switch (intent.kind) {
         case "Send":
-          endDictationThen(() => {
-            if (intent.payload) actions.send(intent.payload);
+          endDictationThen((snapshot) => {
+            const payload = intent.payload?.trim() || snapshot;
+            if (payload) actions.send(payload);
             else actions.send();
           });
           break;
@@ -138,8 +147,9 @@ export function useVoiceControl() {
           endDictationThen(() => actions.exit());
           break;
         case "Rewrite":
-          endDictationThen(() => {
-            if (intent.payload) actions.rewrite(intent.payload);
+          endDictationThen((snapshot) => {
+            const payload = intent.payload?.trim() || snapshot;
+            if (payload) actions.rewrite(payload);
             else actions.rewrite();
           });
           break;

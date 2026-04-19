@@ -38,8 +38,16 @@ impl VadDetector {
             .map_err(|e| format!("ort load {}: {e}", path.display()))?;
 
         // Resolve names defensively — Silero v4 had separate h/c; v5 merged them.
-        let inputs: Vec<String> = session.inputs().iter().map(|i| i.name().to_string()).collect();
-        let outputs: Vec<String> = session.outputs().iter().map(|o| o.name().to_string()).collect();
+        let inputs: Vec<String> = session
+            .inputs()
+            .iter()
+            .map(|i| i.name().to_string())
+            .collect();
+        let outputs: Vec<String> = session
+            .outputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect();
         let input_name = inputs
             .iter()
             .find(|n| n.as_str() == "input")
