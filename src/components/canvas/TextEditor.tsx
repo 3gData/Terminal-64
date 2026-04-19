@@ -65,15 +65,19 @@ export default function TextEditor({ onSend, onClose }: TextEditorProps) {
   const handleUndo = useCallback(() => {
     if (!canUndo) return;
     const newIdx = historyIdx - 1;
+    const next = history[newIdx];
+    if (next === undefined) return;
     setHistoryIdx(newIdx);
-    setText(history[newIdx]);
+    setText(next);
   }, [canUndo, historyIdx, history]);
 
   const handleRedo = useCallback(() => {
     if (!canRedo) return;
     const newIdx = historyIdx + 1;
+    const next = history[newIdx];
+    if (next === undefined) return;
     setHistoryIdx(newIdx);
-    setText(history[newIdx]);
+    setText(next);
   }, [canRedo, historyIdx, history]);
 
   const handleSend = useCallback(() => {

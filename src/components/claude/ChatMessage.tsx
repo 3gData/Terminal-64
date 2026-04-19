@@ -52,9 +52,9 @@ function renderUserContent(content: string): React.ReactNode {
       parts.push(content.slice(lastIndex, match.index));
     }
     const filePath = match[1];
-    if (IMAGE_EXTS.test(filePath)) {
+    if (filePath && IMAGE_EXTS.test(filePath)) {
       parts.push(<InlineImage key={match.index} filePath={filePath} />);
-    } else {
+    } else if (filePath) {
       parts.push(<span key={match.index} className="cc-inline-file">{filePath.split(/[/\\]/).pop()}</span>);
     }
     lastIndex = re.lastIndex;
@@ -156,7 +156,7 @@ function MergeResultCard({ content }: { content: string }) {
   let m;
   const re = /## (.+?) \[(Completed|Failed|Cancelled)\]\n([\s\S]*?)(?=\n---|\n\nPlease review|$)/g;
   while ((m = re.exec(content)) !== null) {
-    tasks.push({ name: m[1], status: m[2], result: m[3].trim() });
+    tasks.push({ name: m[1] ?? "", status: m[2] ?? "", result: (m[3] ?? "").trim() });
   }
   const completed = tasks.filter((t) => t.status === "Completed").length;
   return (
@@ -225,7 +225,7 @@ export function renderContent(text: string) {
     const lines = segment.split("\n");
     let i = 0;
     while (i < lines.length) {
-      const line = lines[i];
+      const line = lines[i]!;
       const trimmed = line.trimStart();
 
       // Empty line
@@ -234,9 +234,9 @@ export function renderContent(text: string) {
       // Headings
       const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
       if (headingMatch) {
-        const level = headingMatch[1].length;
+        const level = headingMatch[1]!.length;
         const Tag = `h${level}` as keyof React.JSX.IntrinsicElements;
-        elements.push(<Tag key={key++} className={`cc-h cc-h${level}`}>{renderInline(headingMatch[2])}</Tag>);
+        elements.push(<Tag key={key++} className={`cc-h cc-h${level}`}>{renderInline(headingMatch[2]!)}</Tag>);
         i++; continue;
       }
 
@@ -249,8 +249,8 @@ export function renderContent(text: string) {
       // Blockquote (collect consecutive > lines)
       if (trimmed.startsWith("> ") || trimmed === ">") {
         const quoteLines: string[] = [];
-        while (i < lines.length && (lines[i].trimStart().startsWith("> ") || lines[i].trimStart() === ">")) {
-          quoteLines.push(lines[i].trimStart().replace(/^>\s?/, ""));
+        while (i < lines.length && (lines[i]!.trimStart().startsWith("> ") || lines[i]!.trimStart() === ">")) {
+          quoteLines.push(lines[i]!.trimStart().replace(/^>\s?/, ""));
           i++;
         }
         elements.push(
@@ -264,8 +264,8 @@ export function renderContent(text: string) {
       // Unordered list (- or * or +)
       if (/^[-*+]\s/.test(trimmed)) {
         const items: string[] = [];
-        while (i < lines.length && /^[-*+]\s/.test(lines[i].trimStart())) {
-          items.push(lines[i].trimStart().replace(/^[-*+]\s/, ""));
+        while (i < lines.length && /^[-*+]\s/.test(lines[i]!.trimStart())) {
+          items.push(lines[i]!.trimStart().replace(/^[-*+]\s/, ""));
           i++;
         }
         elements.push(
@@ -280,9 +280,9 @@ export function renderContent(text: string) {
       if (/^\d+[.)]\s/.test(trimmed)) {
         const items: string[] = [];
         const startMatch = trimmed.match(/^(\d+)[.)]\s/);
-        const startNum = startMatch ? parseInt(startMatch[1], 10) : 1;
-        while (i < lines.length && /^\d+[.)]\s/.test(lines[i].trimStart())) {
-          items.push(lines[i].trimStart().replace(/^\d+[.)]\s/, ""));
+        const startNum = startMatch ? parseInt(startMatch[1]!, 10) : 1;
+        while (i < lines.length && /^\d+[.)]\s/.test(lines[i]!.trimStart())) {
+          items.push(lines[i]!.trimStart().replace(/^\d+[.)]\s/, ""));
           i++;
         }
         elements.push(
@@ -296,22 +296,22 @@ export function renderContent(text: string) {
       // Tables — lines starting with |
       if (trimmed.startsWith("|") && trimmed.includes("|", 1)) {
         const tableLines: string[] = [];
-        while (i < lines.length && lines[i].trim().startsWith("|")) {
-          tableLines.push(lines[i].trim());
+        while (i < lines.length && lines[i]!.trim().startsWith("|")) {
+          tableLines.push(lines[i]!.trim());
           i++;
         }
         if (tableLines.length >= 2) {
           const parseRow = (row: string) =>
             row.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
 
-          const headers = parseRow(tableLines[0]);
+          const headers = parseRow(tableLines[0]!);
           // Check if second line is a separator (|---|---|)
-          const hasSep = /^\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$/.test(tableLines[1]);
+          const hasSep = /^\|[\s:]*-+[\s:]*(\|[\s:]*-+[\s:]*)*\|?$/.test(tableLines[1]!);
           const bodyStart = hasSep ? 2 : 1;
 
           const aligns: ("left" | "center" | "right" | undefined)[] = [];
           if (hasSep) {
-            parseRow(tableLines[1]).forEach((cell) => {
+            parseRow(tableLines[1]!).forEach((cell) => {
               const l = cell.startsWith(":");
               const r = cell.endsWith(":");
               if (l && r) aligns.push("center");
@@ -353,8 +353,8 @@ export function renderContent(text: string) {
 
       // Regular paragraph — collect consecutive non-empty, non-special lines
       const paraLines: string[] = [];
-      while (i < lines.length && lines[i].trim() && !/^(#{1,4}\s|[-*+]\s|\d+[.)]\s|>\s?|\|.|(-{3,}|\*{3,}|_{3,})$)/.test(lines[i].trimStart())) {
-        paraLines.push(lines[i]);
+      while (i < lines.length && lines[i]!.trim() && !/^(#{1,4}\s|[-*+]\s|\d+[.)]\s|>\s?|\|.|(-{3,}|\*{3,}|_{3,})$)/.test(lines[i]!.trimStart())) {
+        paraLines.push(lines[i]!);
         i++;
       }
       if (paraLines.length) {
@@ -493,7 +493,7 @@ function ToolCallCard({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: 
         <span className="cc-tc-detail">{hdr.detail}</span>
         <span className="cc-tc-expand">{expanded ? "▾" : "▸"}</span>
       </button>
-      {expanded && <ToolBody tc={tc} onEditClick={onEditClick} />}
+      {expanded && <ToolBody tc={tc} {...(onEditClick && { onEditClick })} />}
     </div>
   );
 }
@@ -621,7 +621,7 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
         {isMerge ? (
           <MergeResultCard content={content} />
         ) : isSlashCmd ? (
-          <SkillCommandBadge name={slashMatch[1]} args={slashMatch[2].trim()} />
+          <SkillCommandBadge name={slashMatch[1]!} args={(slashMatch[2] ?? "").trim()} />
         ) : content ? (
           <div className="cc-bubble cc-bubble--user">
             {renderUserContent(content)}
@@ -655,7 +655,7 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
       {message.toolCalls && message.toolCalls.length > 0 && (
         <div className="cc-tc-list">
           {message.toolCalls.map((tc) => (
-            <ToolCallCard key={tc.id} tc={tc} onEditClick={onEditClick} />
+            <ToolCallCard key={tc.id} tc={tc} {...(onEditClick && { onEditClick })} />
           ))}
         </div>
       )}

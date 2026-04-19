@@ -34,7 +34,7 @@ function trimAtJarvis(text: string): { trimmed: string; eaten: string | null } {
   // matching what the animation will fade out.
   const tailStart = last.index + last[0].length;
   let tailEnd = tailStart;
-  while (tailEnd < text.length && /[\s,.\-!?:;]/.test(text[tailEnd])) tailEnd++;
+  while (tailEnd < text.length && /[\s,.\-!?:;]/.test(text[tailEnd]!)) tailEnd++;
   const eaten = text.slice(last.index, tailEnd);
   return { trimmed: head, eaten };
 }
@@ -287,7 +287,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         // Oscillate around the midline: alternate sign by index so a single
         // loud sample produces a v-shaped spike, like a real oscilloscope.
         const sign = i % 2 === 0 ? 1 : -1;
-        const y = midY + sign * buf[i] * 18;
+        const y = midY + sign * buf[i]! * 18;
         d += (i === 0 ? "M " : " L ") + (i * dx).toFixed(1) + " " + y.toFixed(2);
       }
       waveformPathRef.current.setAttribute("d", d);
@@ -300,7 +300,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
       const n = samples.length;
       buf.copyWithin(0, n);
       for (let i = 0; i < n; i++) {
-        buf[WAVE_POINTS - n + i] = Math.max(0, Math.min(1, samples[i]));
+        buf[WAVE_POINTS - n + i] = Math.max(0, Math.min(1, samples[i]!));
       }
     }).then((un) => {
       if (cancelled) { un(); return; }
@@ -369,16 +369,13 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     if (!onRegisterVoiceActions) return;
     const actions: ChatInputVoiceActions = {
       send: (text?: string) => {
-        // `text` is the residual from the FINAL dictation chunk (the part
-        // before "jarvis send"). Earlier chunks were already committed to
-        // the textarea via intermediate Dictation intents whenever the
-        // user paused >1.5s mid-sentence. Append the residual to the
-        // accumulated textarea so the full prompt gets sent, not just
-        // the last chunk.
+        // When called from voice, `text` is the authoritative payload
+        // composed upstream (snapshot of what user saw, including prior
+        // commits). When called from keyboard Enter, `text` is undefined
+        // and we fall back to the textarea. Never concat — caller owns
+        // the full payload.
         rollbackPartial();
-        const base = getTextDirect().trim();
-        const residual = (text ?? "").trim();
-        const payload = base && residual ? `${base} ${residual}` : base || residual;
+        const payload = (text ?? getTextDirect()).trim();
         setTextDirect("");
         if (payload) onSendRef.current(payload);
         setTextDirect("");
@@ -390,11 +387,9 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
       },
       rewrite: (text?: string) => {
         rollbackPartial();
-        const base = getTextDirect().trim();
-        const residual = (text ?? "").trim();
-        const full = base && residual ? `${base} ${residual}` : base || residual;
-        setTextDirect(full);
-        const res = onRewriteRef.current?.(full, (t: string) => setTextDirect(t), { isVoice: true });
+        const current = (text ?? getTextDirect()).trim();
+        setTextDirect(current);
+        const res = onRewriteRef.current?.(current, (t: string) => setTextDirect(t), { isVoice: true });
         Promise.resolve(res as unknown as Promise<void> | void).then(() => {
           const final = getTextDirect().trim();
           setTextDirect("");
@@ -584,7 +579,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         }
         if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
           e.preventDefault();
-          if (fileIdx < fileResults.length) selectFile(fileResults[fileIdx]);
+          if (fileIdx < fileResults.length) selectFile(fileResults[fileIdx]!);
           return;
         }
         if (e.key === "Escape") {
@@ -607,7 +602,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         }
         if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
           e.preventDefault();
-          if (selectedIdx < filteredCommands.length) selectCommand(filteredCommands[selectedIdx]);
+          if (selectedIdx < filteredCommands.length) selectCommand(filteredCommands[selectedIdx]!);
           return;
         }
         if (e.key === "Escape") {

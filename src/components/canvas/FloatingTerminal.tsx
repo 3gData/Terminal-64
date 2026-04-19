@@ -496,7 +496,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
           <XTerminal
             terminalId={term.terminalId}
             isActive={isActive}
-            cwd={term.cwd || undefined}
+            {...(term.cwd ? { cwd: term.cwd } : {})}
             onFocus={handleFocus}
             onActivity={handleActivity}
             onTitleChange={handleTitleChange}
