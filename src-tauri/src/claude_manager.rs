@@ -384,7 +384,7 @@ impl ClaudeManager {
 /// Cached after first lookup to avoid shelling out `which` on every prompt.
 pub fn resolve_openwolf_path() -> String {
     static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    return CACHED.get_or_init(resolve_openwolf_path_inner).clone();
+    CACHED.get_or_init(resolve_openwolf_path_inner).clone()
 }
 
 /// PATH that includes common locations for node, npm, pm2.
@@ -531,51 +531,46 @@ pub fn ensure_openwolf(cwd: &str, auto_init: bool) -> bool {
     }
 }
 
-/// OpenWolf's 6 hook event types and their command-line hook configurations.
-/// Each returns a (event_name, hook_entry) pair for the settings JSON.
-fn openwolf_hook_entries(cwd: &str, design_qc: bool) -> Vec<(&'static str, serde_json::Value)> {
-    let wolf_bin = resolve_openwolf_path();
-    let q = |s: &str| {
-        if s.contains(' ') || s.contains('\t') {
-            format!("\"{}\"", s.replace('"', "\\\""))
-        } else {
-            s.to_string()
-        }
+/// OpenWolf hook entries matching the upstream spec in
+/// `openwolf/src/cli/init.ts` (HOOK_SETTINGS). Uses `$CLAUDE_PROJECT_DIR`
+/// so hooks resolve correctly even if CWD changes mid-session.
+/// `_design_qc` is kept for signature compatibility but no longer gates
+/// PreToolUse/PostToolUse — those always register when OpenWolf is enabled.
+fn openwolf_hook_entries(_cwd: &str, _design_qc: bool) -> Vec<(&'static str, serde_json::Value)> {
+    let mk = |script: &str, timeout: u64| {
+        serde_json::json!({
+            "type": "command",
+            "command": format!("node \"$CLAUDE_PROJECT_DIR/.wolf/hooks/{}\"", script),
+            "timeout": timeout,
+        })
     };
-    let bin_q = q(&wolf_bin);
-    let cwd_q = q(cwd);
-    let mk = |event: &str| format!("{} hook {} --cwd {}", bin_q, event, cwd_q);
-    let mut hooks = vec![
-        ("Notification", serde_json::json!({
+
+    vec![
+        ("SessionStart", serde_json::json!({
             "matcher": "",
-            "hooks": [{ "type": "command", "command": mk("notification") }]
+            "hooks": [mk("session-start.js", 5)]
+        })),
+        ("PreToolUse", serde_json::json!({
+            "matcher": "Read",
+            "hooks": [mk("pre-read.js", 5)]
+        })),
+        ("PreToolUse", serde_json::json!({
+            "matcher": "Write|Edit|MultiEdit",
+            "hooks": [mk("pre-write.js", 5)]
+        })),
+        ("PostToolUse", serde_json::json!({
+            "matcher": "Read",
+            "hooks": [mk("post-read.js", 5)]
+        })),
+        ("PostToolUse", serde_json::json!({
+            "matcher": "Write|Edit|MultiEdit",
+            "hooks": [mk("post-write.js", 10)]
         })),
         ("Stop", serde_json::json!({
             "matcher": "",
-            "hooks": [{ "type": "command", "command": mk("stop") }]
+            "hooks": [mk("stop.js", 10)]
         })),
-        ("SubagentStart", serde_json::json!({
-            "matcher": "",
-            "hooks": [{ "type": "command", "command": mk("subagent-start") }]
-        })),
-        ("SubagentStop", serde_json::json!({
-            "matcher": "",
-            "hooks": [{ "type": "command", "command": mk("subagent-stop") }]
-        })),
-    ];
-
-    if design_qc {
-        hooks.push(("PreToolUse", serde_json::json!({
-            "matcher": "",
-            "hooks": [{ "type": "command", "command": mk("pre-tool-use") }]
-        })));
-        hooks.push(("PostToolUse", serde_json::json!({
-            "matcher": "",
-            "hooks": [{ "type": "command", "command": mk("post-tool-use") }]
-        })));
-    }
-
-    hooks
+    ]
 }
 
 /// Merge OpenWolf hook entries into an existing settings JSON file.
@@ -595,31 +590,58 @@ pub fn merge_openwolf_hooks(settings_path: &str, cwd: &str, design_qc: bool) -> 
 
     let hooks_map = hooks_obj.as_object_mut().ok_or("hooks not an object")?;
 
-    let mut modified = false;
-    for (event_name, entry) in openwolf_hook_entries(cwd, design_qc) {
+    let is_openwolf_entry = |entry: &serde_json::Value| -> bool {
+        entry.get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hooks| hooks.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.contains(".wolf/hooks/") || s.contains("openwolf hook"))
+                    .unwrap_or(false)
+            }))
+            .unwrap_or(false)
+    };
+
+    // Snapshot desired entries to detect whether a rewrite is needed.
+    let desired = openwolf_hook_entries(cwd, design_qc);
+    let current_ow: std::collections::HashMap<String, Vec<serde_json::Value>> = hooks_map
+        .iter()
+        .map(|(k, v)| {
+            let filtered = v.as_array()
+                .map(|arr| arr.iter().filter(|e| is_openwolf_entry(e)).cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            (k.clone(), filtered)
+        })
+        .collect();
+
+    let mut desired_grouped: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+    for (event, entry) in &desired {
+        desired_grouped.entry((*event).to_string()).or_default().push(entry.clone());
+    }
+
+    let already_correct = desired_grouped.iter().all(|(k, v)| {
+        current_ow.get(k).map(|cur| cur == v).unwrap_or(false)
+    }) && current_ow.iter().all(|(k, v)| {
+        v.is_empty() || desired_grouped.contains_key(k)
+    });
+
+    if already_correct { return Ok(()); }
+
+    // Remove all existing OpenWolf hook entries, then insert the fresh set.
+    for (_event, arr_val) in hooks_map.iter_mut() {
+        if let Some(arr) = arr_val.as_array_mut() {
+            arr.retain(|e| !is_openwolf_entry(e));
+        }
+    }
+
+    for (event_name, entry) in desired {
         let arr = hooks_map
             .entry(event_name)
             .or_insert_with(|| serde_json::json!([]));
         if let Some(existing) = arr.as_array_mut() {
-            let already_has = existing.iter().any(|e| {
-                e.get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|hooks| hooks.iter().any(|h| {
-                        h.get("command")
-                            .and_then(|c| c.as_str())
-                            .map(|s| s.contains("openwolf"))
-                            .unwrap_or(false)
-                    }))
-                    .unwrap_or(false)
-            });
-            if !already_has {
-                existing.push(entry);
-                modified = true;
-            }
+            existing.push(entry);
         }
     }
-
-    if !modified { return Ok(()); }
 
     std::fs::write(settings_path, serde_json::to_string(&settings).unwrap())
         .map_err(|e| format!("write settings: {}", e))?;

@@ -114,4 +114,8 @@ export const DEFAULT_KEYBINDINGS: Keybinding[] = [
     combo: { key: "n" },
     command: "claude.newSession",
   },
+  {
+    combo: { key: "v", ctrl: true, shift: true },
+    command: "voice.toggle",
+  },
 ];

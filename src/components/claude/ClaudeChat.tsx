@@ -15,6 +15,7 @@ import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
 import { CLAUDE_BUILTIN_COMMANDS } from "../../lib/claudeSlashCommands";
 import ChatInput from "./ChatInput";
+import { registerChatInputVoiceActions, unregisterChatInputVoiceActions, useVoiceStore, type ChatInputVoiceActions } from "../../stores/voiceStore";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { endDelegation } from "../../hooks/useDelegationOrchestrator";
 import { useCanvasStore } from "../../stores/canvasStore";
@@ -267,7 +268,13 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   );
   const [permModeIdx, setPermModeIdx] = useState(() => {
     if (skipPermissions) return 4; // YOLO when skipPermissions is set
-    const stored = useSettingsStore.getState().claudePermMode;
+    const s = useSettingsStore.getState();
+    const fixedDefault = s.claudeDefaultPermMode;
+    if (fixedDefault) {
+      const idx = PERMISSION_MODES.findIndex((m) => m.id === fixedDefault);
+      if (idx >= 0) return idx;
+    }
+    const stored = s.claudePermMode;
     if (stored) {
       const idx = PERMISSION_MODES.findIndex((m) => m.id === stored);
       if (idx >= 0) return idx;
@@ -431,7 +438,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Tab" && e.shiftKey) {
         e.preventDefault();
-        setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; useSettingsStore.getState().set({ claudePermMode: PERMISSION_MODES[next].id }); return next; });
+        setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; const s = useSettingsStore.getState(); if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next].id }); return next; });
       }
     };
     window.addEventListener("keydown", handler);
@@ -654,17 +661,18 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         if (forkParent) {
           useClaudeStore.getState().setForkParentSessionId(sessionId, null);
         }
-        console.log("[send] Sending prompt:", { started, sessionId, cwd: effectiveCwd, resumeAtUuid, forkParent, promptPreview: prompt.slice(0, 80) });
+        const skipOw = sess?.skipOpenwolf || false;
+        console.log("[send] Sending prompt:", { started, sessionId, cwd: effectiveCwd, resumeAtUuid, forkParent, skipOw, promptPreview: prompt.slice(0, 80) });
         if (forkParent) {
           // Forked session's first prompt — use --fork-session so the CLI
           // creates this session's JSONL from the parent's chain. loadFromDisk
           // sets hasBeenStarted=true for the hydrated messages, so we can't
           // rely on !started here; the presence of forkParent is the signal.
-          await sendClaudePrompt({ ...req, cwd: effectiveCwd, fork_session: forkParent });
+          await sendClaudePrompt({ ...req, cwd: effectiveCwd, fork_session: forkParent }, skipOw);
           console.log("[send] sendClaudePrompt (--fork-session) succeeded");
         } else if (started) {
           try {
-            await sendClaudePrompt({ ...req, cwd: effectiveCwd, resume_session_at: resumeAtUuid });
+            await sendClaudePrompt({ ...req, cwd: effectiveCwd, resume_session_at: resumeAtUuid }, skipOw);
             console.log("[send] sendClaudePrompt (--resume) succeeded");
           } catch (resumeErr) {
             console.log("[send] sendClaudePrompt failed, falling back to createClaudeSession:", resumeErr);
@@ -674,14 +682,14 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
               console.log("[send] Restored resumeAtUuid for retry:", resumeAtUuid);
             }
             // Session file might not exist yet (edge case) — try create
-            await createClaudeSession(req);
+            await createClaudeSession(req, skipOw);
           }
         } else {
           try {
-            await createClaudeSession(req);
+            await createClaudeSession(req, skipOw);
           } catch {
             // Session might already exist from disk — try resume
-            await sendClaudePrompt({ ...req, cwd: effectiveCwd });
+            await sendClaudePrompt({ ...req, cwd: effectiveCwd }, skipOw);
           }
         }
         incrementPromptCount(sessionId);
@@ -848,20 +856,37 @@ Rules:
 
   const handleCancel = useCallback(() => { cancelClaude(sessionId).catch(() => {}); }, [sessionId]);
 
-  const handleRewrite = useCallback(async (text: string, setText: (t: string) => void) => {
+  const handleRewrite = useCallback(async (text: string, setText: (t: string) => void, opts?: { isVoice?: boolean }) => {
     setIsRewriting(true);
     try {
       let rewritten = "";
       await rewritePromptStream(text, (chunk) => {
         rewritten += chunk;
         setText(rewritten);
-      });
+      }, { isVoice: opts?.isVoice ?? false });
     } catch (err) {
       useClaudeStore.getState().setError(sessionId, `Rewrite failed: ${err}`);
     } finally {
       setIsRewriting(false);
     }
   }, [sessionId]);
+
+  // Voice control — register/unregister ChatInput actions for this session
+  const handleRegisterVoiceActions = useCallback((actions: ChatInputVoiceActions | null) => {
+    if (actions) {
+      registerChatInputVoiceActions(sessionId, actions);
+    } else {
+      unregisterChatInputVoiceActions(sessionId);
+    }
+  }, [sessionId]);
+  useEffect(() => {
+    return () => { unregisterChatInputVoiceActions(sessionId); };
+  }, [sessionId]);
+
+  // Keep voiceStore's activeSessionId in sync so voice intents target this chat
+  useEffect(() => {
+    if (isActive) useVoiceStore.getState().setActiveSessionId(sessionId);
+  }, [isActive, sessionId]);
   const extractAffectedFiles = useCallback((messageId: string): AffectedFile[] => {
     const sess = useClaudeStore.getState().sessions[sessionId];
     if (!sess) return [];
@@ -1275,12 +1300,16 @@ Rules:
       }
 
       // Resolve a real CWD — never use "." which resolves to process CWD (/ in production)
-      const sessCwd = useClaudeStore.getState().sessions[sessionId]?.cwd;
+      const parentSess = useClaudeStore.getState().sessions[sessionId];
+      const sessCwd = parentSess?.cwd;
       const appDir = (effectiveCwd && effectiveCwd !== "." && effectiveCwd !== "/")
         ? effectiveCwd
         : (sessCwd && sessCwd !== "." && sessCwd !== "/")
           ? sessCwd
           : "";
+      // Inherit parent's skipOpenwolf so delegating from widget/skill sessions doesn't
+      // create .wolf/ in the widget folder via auto-init.
+      const inheritSkipOpenwolf = !!parentSess?.skipOpenwolf;
 
       let mcpConfigPath = "";
       if (delegationPort > 0 && delegationSecret) {
@@ -1317,7 +1346,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are agent "Agent ${i + 1}" — one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, call report_done (if available) or state your task is complete.`;
 
         // Create ephemeral session in store (not saved to localStorage)
-        useClaudeStore.getState().createSession(childSessionId, childName, true);
+        useClaudeStore.getState().createSession(childSessionId, childName, true, inheritSkipOpenwolf);
         addUserMessage(childSessionId, initialPrompt);
 
         setTimeout(() => {
@@ -1328,7 +1357,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             permission_mode: "bypass_all",
             mcp_config: mcpConfigPath || undefined,
             no_session_persistence: true,
-          }).catch((err) => {
+          }, inheritSkipOpenwolf).catch((err) => {
             console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
             delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
           });
@@ -1774,7 +1803,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                     prompt: `Here are my answers to your questions:\n${formatted}\n\nProceed based on these choices. Do not ask the same questions again.`,
                     permission_mode: permMode.id, model: selectedModel, effort: selectedEffort,
                     disallowed_tools: "AskUserQuestion",
-                  }).then(() => incrementPromptCount(sessionId))
+                  }, useClaudeStore.getState().sessions[sessionId]?.skipOpenwolf).then(() => incrementPromptCount(sessionId))
                     .catch((err) => store.setError(sessionId, String(err)));
                 }
               };
@@ -1971,7 +2000,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                   onInitialTextConsumed={() => setRewindText(null)}
                   permLabel={`${permMode.id === "default" ? "ask permissions" : permMode.id === "bypass_all" ? "bypass permissions" : permMode.id === "accept_edits" ? "auto-accept edits" : permMode.id === "auto" ? "auto-approve" : "plan mode"} on`}
                   permColor={permMode.color}
-                  onCyclePerm={() => setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; useSettingsStore.getState().set({ claudePermMode: PERMISSION_MODES[next].id }); return next; })}
+                  onCyclePerm={() => setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; const s = useSettingsStore.getState(); if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next].id }); return next; })}
                   sessionName={session.name || undefined}
                   cwd={effectiveCwd}
                   queueCount={session.promptQueue.length}
@@ -1980,6 +2009,8 @@ Coordinate actively. If another agent is working on a file you need, mention it 
                   onPasteImage={handlePasteImage}
                   contextPct={session.contextMax > 0 ? Math.round((session.contextUsed / session.contextMax) * 100) : 0}
                   autoCompactAt={autoCompactEnabled ? autoCompactThreshold : 0}
+                  onRegisterVoiceActions={isActive ? handleRegisterVoiceActions : undefined}
+                  sessionId={sessionId}
                 />
               </>
             )}

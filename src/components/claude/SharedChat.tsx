@@ -5,6 +5,7 @@ import type { DelegationMsg } from "../../lib/types";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { endDelegation, performMerge } from "../../hooks/useDelegationOrchestrator";
+import { renderContent } from "./ChatMessage";
 import "./Delegation.css";
 
 interface SharedChatProps {
@@ -64,7 +65,6 @@ export default function SharedChat({ groupId }: SharedChatProps) {
   return (
     <div className="shared-chat">
       <div className="shared-chat-header">
-        <span className="shared-chat-title">Team Chat</span>
         <span className="sc-progress">{completedCount}/{totalCount}</span>
         <span className={`sc-status sc-status--${group.status}`}>{group.status}</span>
         <div className="sc-header-actions">
@@ -103,7 +103,7 @@ export default function SharedChat({ groupId }: SharedChatProps) {
         {messages.map((msg, i) => (
           <div key={i} className={`shared-chat-msg shared-chat-msg--${msg.msg_type}`}>
             <span className="shared-chat-agent">{msg.agent}</span>
-            <span className="shared-chat-text">{msg.message}</span>
+            <div className="shared-chat-text">{renderContent(msg.message)}</div>
             <span className="shared-chat-time">
               {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
             </span>

@@ -682,7 +682,7 @@
   padding: 4px 6px;
   border-radius: 3px;
   margin-bottom: 2px;
-  align-items: baseline;
+  align-items: flex-start;
 }
 
 .shared-chat-msg:hover {
@@ -707,10 +707,15 @@
 
 .shared-chat-text {
   flex: 1;
+  min-width: 0;
   color: var(--fg, #cdd6f4);
   word-break: break-word;
-  white-space: pre-wrap;
 }
+
+.shared-chat-text > *:first-child { margin-top: 0; }
+.shared-chat-text > *:last-child  { margin-bottom: 0; }
+.shared-chat-text p { margin: 0 0 4px; }
+.shared-chat-text p:last-child { margin-bottom: 0; }
 
 .shared-chat-time {
   font-size: 9px;

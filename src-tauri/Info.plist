@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Terminal 64 Party Mode captures audio to create visual effects synchronized with your music.</string>
+	<string>Terminal 64 uses the microphone for Party Mode audio visualization and for JARVIS-style voice control (wake-word, voice commands, dictation). Audio is processed locally and never leaves your machine.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Terminal 64 widgets may request camera access for features like webcam display.</string>
 </dict>

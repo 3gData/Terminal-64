@@ -3,14 +3,47 @@ import { SlashCommand } from "../../lib/types";
 import { searchFiles, readFileBase64 } from "../../lib/tauriApi";
 import { formatDuration } from "../../lib/constants";
 import { isAbsolutePath, joinPath } from "../../lib/platform";
+import { onVoiceWaveform } from "../../lib/voiceApi";
+import {
+  useVoiceStore,
+  type ChatInputVoiceActions,
+} from "../../stores/voiceStore";
 
 const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
+
+/**
+ * Truncate a partial transcript at the last standalone "jarvis" (with
+ * optional "hey"/"ok"/"yo" filler before it). Whisper renders this
+ * address with variable punctuation ("Jarvis,", "Jarvis.", " jarvis ")
+ * so we strip word-boundary-delimited matches and drop trailing punct.
+ *
+ * Returns both the trimmed head and the matched wake-word span so the UI
+ * can animate the eaten word (Agent 3 §5 — "word gets eaten" affordance).
+ */
+function trimAtJarvis(text: string): { trimmed: string; eaten: string | null } {
+  const re = /(?:\b(?:hey|ok|okay|yo)[\s,]+)?\bjarvis\b/gi;
+  let last: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    last = m;
+  }
+  if (!last) return { trimmed: text, eaten: null };
+  const head = text.slice(0, last.index).replace(/[\s,.\-!?:;]+$/, "");
+  // Grow the eaten span to the next whitespace so we include any trailing
+  // punctuation/filler the user's utterance attached ("jarvis,", "jarvis."),
+  // matching what the animation will fade out.
+  const tailStart = last.index + last[0].length;
+  let tailEnd = tailStart;
+  while (tailEnd < text.length && /[\s,.\-!?:;]/.test(text[tailEnd])) tailEnd++;
+  const eaten = text.slice(last.index, tailEnd);
+  return { trimmed: head, eaten };
+}
 
 interface ChatInputProps {
   onSend: (text: string) => void;
   onCancel: () => void;
   onAttach?: () => void;
-  onRewrite?: (text: string, setText: (t: string) => void) => void;
+  onRewrite?: (text: string, setText: (t: string) => void, opts?: { isVoice?: boolean }) => void | Promise<void>;
   isRewriting?: boolean;
   isStreaming: boolean;
   accentColor?: string;
@@ -30,23 +63,106 @@ interface ChatInputProps {
   onPasteImage?: (file: File) => void;
   contextPct?: number;
   autoCompactAt?: number;
+  onRegisterVoiceActions?: (actions: ChatInputVoiceActions | null) => void;
+  sessionId?: string;
 }
 
-export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, accentColor, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, onPasteImage, contextPct, autoCompactAt }: ChatInputProps) {
+export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, accentColor, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, onPasteImage, contextPct, autoCompactAt, onRegisterVoiceActions, sessionId }: ChatInputProps) {
   const [text, setText] = useState(draftPrompt || "");
   const [elapsed, setElapsed] = useState("");
   const [inlineFiles, setInlineFiles] = useState<Set<string>>(new Set());
   const [imagePreviews, setImagePreviews] = useState<Record<string, string>>({});
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const waveformPathRef = useRef<SVGPathElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const textRef = useRef(draftPrompt || "");
+
+  const autoResize = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 400) + "px";
+  }, []);
+
+  // Voice dictation state: live partials render on top of a "committed" base
+  // without persisting; final (Dictation intent) flattens into the base.
+  const committedBaseRef = useRef<string | null>(null);
+  // LocalAgreement-2 tentative tail — rendered as a dimmed sibling span in the
+  // overlay so the user can see the unstable suffix without it flipping into
+  // the committed textarea text. Cleared on commit / user edit / rollback.
+  const [tentativeText, setTentativeText] = useState<string>("");
+  const tentativeRef = useRef<string>("");
+  tentativeRef.current = tentativeText;
 
   const setTextDirect = useCallback((val: string) => {
     if (textareaRef.current) textareaRef.current.value = val;
     textRef.current = val;
     setText(val);
-  }, []);
+    // Re-run auto-resize so voice/rewrite-driven text expands the input
+    // the same way as human typing does.
+    requestAnimationFrame(() => autoResize());
+  }, [autoResize]);
+
+  const applyPartial = useCallback((partialText: string) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (committedBaseRef.current === null) {
+      committedBaseRef.current = el.value;
+    }
+    const base = committedBaseRef.current;
+    const { trimmed } = trimAtJarvis(partialText);
+    const pt = trimmed.trim();
+    const combined = pt.length === 0 ? base : base ? `${base} ${pt}` : pt;
+    el.value = combined;
+    textRef.current = combined;
+    setText(combined);
+    requestAnimationFrame(() => autoResize());
+  }, [autoResize]);
+
+  /**
+   * LocalAgreement-2 two-span render.
+   *
+   * The backend emits `voice-committed` (stable, cumulative for the utterance)
+   * and `voice-tentative` (unstable tail — may disappear or change on the next
+   * partial tick). We write the stable committed text into the textarea
+   * (source of truth, caret-editable) and render the tentative tail as a
+   * dimmed sibling span via the overlay. Per Agent 3 §2: tentative text
+   * disappearing on disagreement is correct behavior, not a glitch.
+   */
+  const applyCommittedTentative = useCallback((committed: string, tentative: string) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (committedBaseRef.current === null) {
+      committedBaseRef.current = el.value;
+    }
+    const base = committedBaseRef.current;
+    const { trimmed } = trimAtJarvis(committed);
+    const committedClean = trimmed.trim();
+    const combined = committedClean.length === 0
+      ? base
+      : base
+        ? `${base} ${committedClean}`
+        : committedClean;
+    el.value = combined;
+    textRef.current = combined;
+    setText(combined);
+    setTentativeText(tentative.trim());
+    requestAnimationFrame(() => autoResize());
+  }, [autoResize]);
+
+  const commitDictation = useCallback((finalText: string) => {
+    const base = committedBaseRef.current ?? textareaRef.current?.value ?? "";
+    const ft = finalText.trim();
+    // Trust the backend's final transcript — it already handles trailing
+    // keywords (e.g. "jarvis send" is stripped so `ft` is the clean
+    // residual). Replacing the live partial with the authoritative final
+    // prevents stray "jarvis"/"send" tokens from leaking into the prompt.
+    const next = ft.length === 0 ? base : base ? `${base} ${ft}` : ft;
+    committedBaseRef.current = null;
+    setTentativeText("");
+    setTextDirect(next);
+  }, [setTextDirect]);
 
   const getTextDirect = useCallback(() => {
     return textareaRef.current?.value ?? textRef.current;
@@ -137,6 +253,66 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     }
   }, [initialText, setTextDirect]);
 
+  const voiceState = useVoiceStore((s) => s.state);
+  const activeVoiceSessionId = useVoiceStore((s) => s.activeSessionId);
+  const isActiveVoiceSession = !!sessionId && sessionId === activeVoiceSessionId;
+  const isDictating = voiceState === "dictating" && isActiveVoiceSession;
+
+  // Live voice waveform driven by the backend's `voice-waveform` event
+  // (32 peak-amplitude buckets per 80ms mic frame); rolling buffer
+  // renders as a scrolling squiggle behind the textarea text.
+  const WAVE_POINTS = 96;
+  const waveBufRef = useRef<Float32Array>(new Float32Array(WAVE_POINTS));
+  useEffect(() => {
+    if (!isDictating) {
+      // Reset to flat baseline when this session stops dictating.
+      waveBufRef.current.fill(0);
+      if (waveformPathRef.current) {
+        waveformPathRef.current.setAttribute("d", "M 0 20 L 400 20");
+      }
+      return;
+    }
+    let unlisten: (() => void) | null = null;
+    let raf = 0;
+    let cancelled = false;
+    // Decouple paint from event cadence so the squiggle interpolates smoothly
+    // even if frames land irregularly.
+    const paint = () => {
+      if (cancelled || !waveformPathRef.current) return;
+      const buf = waveBufRef.current;
+      const midY = 20;
+      const dx = 400 / (WAVE_POINTS - 1);
+      let d = "";
+      for (let i = 0; i < WAVE_POINTS; i++) {
+        // Oscillate around the midline: alternate sign by index so a single
+        // loud sample produces a v-shaped spike, like a real oscilloscope.
+        const sign = i % 2 === 0 ? 1 : -1;
+        const y = midY + sign * buf[i] * 18;
+        d += (i === 0 ? "M " : " L ") + (i * dx).toFixed(1) + " " + y.toFixed(2);
+      }
+      waveformPathRef.current.setAttribute("d", d);
+      raf = requestAnimationFrame(paint);
+    };
+    raf = requestAnimationFrame(paint);
+    onVoiceWaveform(({ samples }) => {
+      if (!samples || !samples.length) return;
+      const buf = waveBufRef.current;
+      const n = samples.length;
+      buf.copyWithin(0, n);
+      for (let i = 0; i < n; i++) {
+        buf[WAVE_POINTS - n + i] = Math.max(0, Math.min(1, samples[i]));
+      }
+    }).then((un) => {
+      if (cancelled) { un(); return; }
+      unlisten = un;
+    });
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (unlisten) unlisten();
+    };
+  }, [isDictating]);
+
   const [showSlash, setShowSlash] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -164,6 +340,70 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     setShowFiles(false);
     el.style.height = "auto";
   }, [disabled, onSend]);
+
+  // Register voice actions — reuses existing submit/setText/rewrite paths
+  const onRewriteRef = useRef(onRewrite);
+  onRewriteRef.current = onRewrite;
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
+  // Roll back an in-flight voice partial so the control-word utterance
+  // ("send" / "exit" / "rewrite") doesn't end up in the submitted prompt.
+  const rollbackPartial = useCallback(() => {
+    if (committedBaseRef.current !== null) {
+      const base = committedBaseRef.current;
+      committedBaseRef.current = null;
+      if (textareaRef.current) textareaRef.current.value = base;
+      textRef.current = base;
+      setText(base);
+      requestAnimationFrame(() => autoResize());
+    }
+    // Always clear the tentative tail — even if no base was snapshotted
+    // (e.g. control-word-only utterance), we still want the dimmed tail
+    // to vanish from the UI on intent fire.
+    if (tentativeRef.current) setTentativeText("");
+  }, [autoResize]);
+
+  useEffect(() => {
+    if (!onRegisterVoiceActions) return;
+    const actions: ChatInputVoiceActions = {
+      send: (text?: string) => {
+        rollbackPartial();
+        const payload = (text ?? getTextDirect()).trim();
+        // Force-clear the textarea BEFORE and AFTER submitting. No reliance
+        // on handleSend reading el.value — late voice events can't leave a
+        // ghost because we never route through the DOM value.
+        setTextDirect("");
+        if (payload) onSendRef.current(payload);
+        setTextDirect("");
+      },
+      exit: () => {
+        rollbackPartial();
+        setTextDirect("");
+        onCancelRef.current();
+      },
+      rewrite: (text?: string) => {
+        rollbackPartial();
+        const current = (text ?? getTextDirect()).trim();
+        setTextDirect(current);
+        const res = onRewriteRef.current?.(current, (t: string) => setTextDirect(t), { isVoice: true });
+        Promise.resolve(res as unknown as Promise<void> | void).then(() => {
+          const final = getTextDirect().trim();
+          setTextDirect("");
+          if (final) onSendRef.current(final);
+          setTextDirect("");
+        });
+      },
+      setText: setTextDirect,
+      getText: getTextDirect,
+      applyPartial,
+      applyCommittedTentative,
+      commitDictation,
+    };
+    onRegisterVoiceActions(actions);
+    return () => { onRegisterVoiceActions(null); };
+  }, [onRegisterVoiceActions, setTextDirect, getTextDirect, applyPartial, applyCommittedTentative, commitDictation, rollbackPartial]);
 
   const filteredCommands = useMemo(() => {
     if (!slashCommands || !showSlash) return [];
@@ -261,6 +501,11 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     const val = el.value;
     textRef.current = val;
     setText(val);
+    // User typed — drop any in-flight partial base so the next voice partial
+    // re-snapshots from the current (post-edit) textarea contents. Also clear
+    // the tentative tail; once the user edits, it's semantically invalid.
+    committedBaseRef.current = null;
+    if (tentativeRef.current) setTentativeText("");
 
     // Prune inline files — check @file mentions
     setInlineFiles((prev) => {
@@ -288,10 +533,8 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     const cursorPos = el.selectionStart ?? val.length;
     checkForAtMention(val, cursorPos);
 
-    // Auto-resize
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 150) + "px";
-  }, [checkForAtMention]);
+    autoResize();
+  }, [checkForAtMention, autoResize]);
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
@@ -427,45 +670,49 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     items[fileIdx]?.scrollIntoView({ block: "nearest" });
   }, [fileIdx, showFiles]);
 
-  // Build the styled overlay content — highlights @file mentions
+  // Overlay only highlights @file mentions; tentative dictation text is
+  // not rendered here (it stays in the store for the status badge).
   const overlayContent = useMemo(() => {
-    if (inlineFiles.size === 0) return null;
     const val = text;
-    if (!val) return null;
+    const hasAtMentions = inlineFiles.size > 0 && val.length > 0;
+    if (!hasAtMentions) return null;
 
-    // Build a list of {start, end, file} for all @mentions
+    // Build @mention ranges (only relevant if there are inlineFiles AND text).
     const ranges: { start: number; end: number; file: string }[] = [];
-    for (const file of inlineFiles) {
-      const mention = "@" + file;
-      let searchFrom = 0;
-      while (true) {
-        const idx = val.indexOf(mention, searchFrom);
-        if (idx < 0) break;
-        ranges.push({ start: idx, end: idx + mention.length, file });
-        searchFrom = idx + mention.length;
+    if (hasAtMentions) {
+      for (const file of inlineFiles) {
+        const mention = "@" + file;
+        let searchFrom = 0;
+        while (true) {
+          const idx = val.indexOf(mention, searchFrom);
+          if (idx < 0) break;
+          ranges.push({ start: idx, end: idx + mention.length, file });
+          searchFrom = idx + mention.length;
+        }
       }
+      ranges.sort((a, b) => a.start - b.start);
     }
-    if (ranges.length === 0) return null;
-    ranges.sort((a, b) => a.start - b.start);
 
     const parts: React.ReactNode[] = [];
-    let cursor = 0;
-    for (const r of ranges) {
-      if (r.start > cursor) {
-        parts.push(<span key={`t${cursor}`}>{val.slice(cursor, r.start)}</span>);
+    if (val.length > 0) {
+      let cursor = 0;
+      for (const r of ranges) {
+        if (r.start > cursor) {
+          parts.push(<span key={`t${cursor}`} className="cc-dictation-committed">{val.slice(cursor, r.start)}</span>);
+        }
+        const mentionText = val.slice(r.start, r.end);
+        parts.push(
+          <span key={`f${r.start}`} className="cc-at-highlight">{mentionText}</span>
+        );
+        cursor = r.end;
       }
-      const mentionText = val.slice(r.start, r.end);
-      parts.push(
-        <span key={`f${r.start}`} className="cc-at-highlight">{mentionText}</span>
-      );
-      cursor = r.end;
-    }
-    if (cursor < val.length) {
-      parts.push(<span key={`t${cursor}`}>{val.slice(cursor)}</span>);
+      if (cursor < val.length) {
+        parts.push(<span key={`t${cursor}`} className="cc-dictation-committed">{val.slice(cursor)}</span>);
+      }
     }
     // Trailing space to match textarea (so overlay doesn't shift)
     parts.push(<span key="tail">{" "}</span>);
-    return parts;
+    return parts.length > 0 ? parts : null;
   }, [text, inlineFiles]);
 
   // Image thumbnails for @-mentioned images
@@ -475,6 +722,7 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
 
   return (
     <div className="cc-input-container">
+
       {showSlash && filteredCommands.length > 0 && (
         <div className="cc-slash-menu" ref={slashRef}>
           {filteredCommands.map((cmd, i) => (
@@ -533,23 +781,26 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         </div>
       )}
 
-      {text.trim() && onRewrite && (
-        <div className="cc-toolbar">
-          <button
-            className={`cc-toolbar-btn ${isRewriting ? "cc-toolbar-btn--active" : ""}`}
-            onClick={() => onRewrite(getTextDirect(), (t: string) => setTextDirect(t))}
-            disabled={isRewriting || !text.trim()}
-            title="AI Rewrite (enhance prompt)"
-          >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M6 1L7 4L10 4.5L7.5 7L8.5 11L6 9L3.5 11L4.5 7L2 4.5L5 4L6 1Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" fill={isRewriting ? "currentColor" : "none"}/>
-            </svg>
-            <span>{isRewriting ? "Rewriting..." : "Rewrite"}</span>
-          </button>
+      <div className="cc-toolbar">
+          {text.trim() && onRewrite && (
+            <button
+              className={`cc-toolbar-btn ${isRewriting ? "cc-toolbar-btn--active" : ""}`}
+              onClick={() => onRewrite(getTextDirect(), (t: string) => setTextDirect(t))}
+              disabled={isRewriting || !text.trim()}
+              title="AI Rewrite (enhance prompt)"
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M6 1L7 4L10 4.5L7.5 7L8.5 11L6 9L3.5 11L4.5 7L2 4.5L5 4L6 1Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" fill={isRewriting ? "currentColor" : "none"}/>
+              </svg>
+              <span>{isRewriting ? "Rewriting..." : "Rewrite"}</span>
+            </button>
+          )}
         </div>
-      )}
 
-      <div className={`cc-input-wrap ${isStreaming ? "cc-input-wrap--streaming" : ""}`} style={accentColor ? { ['--beam-color' as string]: accentColor } as React.CSSProperties : undefined}>
+      <div
+        className={`cc-input-wrap ${isStreaming ? "cc-input-wrap--streaming" : ""} ${isDictating ? "cc-input-wrap--dictating" : ""} ${isRewriting ? "cc-input-wrap--rewriting" : ""}`}
+        style={accentColor ? { ['--beam-color' as string]: accentColor } as React.CSSProperties : undefined}
+      >
         <svg className="cc-beam-svg" aria-hidden="true" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <filter id="cc-beam-blur" x="-20%" y="-20%" width="140%" height="140%">
@@ -563,6 +814,29 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         <div className="cc-input-row">
           <span className="cc-prompt">&gt;</span>
           <div className="cc-textarea-wrap">
+            {isDictating && (
+              <svg
+                className="cc-waveform"
+                viewBox="0 0 400 40"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+              >
+                <path ref={waveformPathRef} d="M 0 20 L 400 20" />
+              </svg>
+            )}
+            {isRewriting && (
+              <div className="cc-rewriting" aria-hidden="true">
+                <svg
+                  className="cc-rewriting-ring"
+                  viewBox="0 0 32 32"
+                  width="24"
+                  height="24"
+                >
+                  <circle cx="16" cy="16" r="12" className="cc-rewriting-track" />
+                  <circle cx="16" cy="16" r="12" className="cc-rewriting-fill" />
+                </svg>
+              </div>
+            )}
             {/* Styled overlay — renders behind the textarea */}
             {overlayContent && (
               <div ref={overlayRef} className="cc-textarea-overlay" aria-hidden="true">

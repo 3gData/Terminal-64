@@ -14,6 +14,8 @@ import { useClaudeEvents } from "./hooks/useClaudeEvents";
 import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
 import { usePartyMode } from "./hooks/usePartyMode";
 import { useVectorAutoIndex } from "./hooks/useVectorAutoIndex";
+import { useVoiceControl } from "./hooks/useVoiceControl";
+import { useVoiceStore } from "./stores/voiceStore";
 import { PartyEqualizer, PartyEdgeGlow } from "./components/party/PartyOverlay";
 import { useCanvasStore } from "./stores/canvasStore";
 import { useThemeStore } from "./stores/themeStore";
@@ -46,6 +48,7 @@ function App() {
   useDelegationOrchestrator();
   usePartyMode();
   useVectorAutoIndex();
+  useVoiceControl();
 
   const [widgetDropOver, setWidgetDropOver] = useState(false);
   const widgetDialogRef = useRef(widgetDialogOpen);
@@ -191,6 +194,13 @@ function App() {
     });
 
     registerCommand({
+      id: "voice.toggle",
+      label: "Toggle Voice Control",
+      category: "Voice",
+      execute: () => useVoiceStore.getState().toggleEnabled(),
+    });
+
+    registerCommand({
       id: "claude.newSession",
       label: "New Claude Session (same folder)",
       category: "Claude",
@@ -241,6 +251,18 @@ function App() {
             closeTerminal(t.terminalId).catch(() => {});
           }
         }
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Voice: when SelectSession intent flips activeSessionId, focus that panel on the canvas
+  useEffect(() => {
+    const unsub = useVoiceStore.subscribe((state, prev) => {
+      if (state.activeSessionId && state.activeSessionId !== prev.activeSessionId) {
+        const canvas = useCanvasStore.getState();
+        const target = canvas.terminals.find((t) => t.terminalId === state.activeSessionId);
+        if (target) canvas.setActive(target.terminalId);
       }
     });
     return unsub;

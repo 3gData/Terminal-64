@@ -150,10 +150,12 @@ const HIDDEN_TOOLS = new Set([
 ]);
 
 // Default context window — the CLI's `result` event provides the real value
-// via modelUsage.contextWindow. This is just a fallback until the first
-// result arrives.  200k is the standard window; extended-context sessions
-// will self-correct once the CLI reports the actual size.
-function getContextWindowForModel(_model: string): number {
+// via modelUsage.contextWindow, but for 1M variants the CLI sometimes still
+// reports 200k which makes the percentage overshoot (e.g. 200% at 40% real
+// usage). Detect the `[1m]` suffix the CLI appends to extended-context model
+// IDs and return 1M so the ratio is correct regardless of what the CLI says.
+function getContextWindowForModel(model: string): number {
+  if (/\[1m\]|-1m\b|:1m\b/i.test(model)) return 1_000_000;
   return 200_000;
 }
 
@@ -562,7 +564,8 @@ export function useClaudeEvents() {
           if (totalIn || output_tokens) store.addTokens(session_id, totalIn + output_tokens);
 
           const sess = store.sessions[session_id];
-          let ctxMax = sess?.contextMax || getContextWindowForModel(sess?.model || "");
+          const modelCtx = getContextWindowForModel(sess?.model || "");
+          let ctxMax = sess?.contextMax || modelCtx;
           if (parsed.modelUsage) {
             for (const modelData of Object.values(parsed.modelUsage)) {
               if (modelData?.contextWindow && modelData.contextWindow > 0) {
@@ -571,6 +574,9 @@ export function useClaudeEvents() {
               }
             }
           }
+          // Guard against the CLI reporting 200k for 1M variants — trust the
+          // name-derived size when it's larger so the percentage stays sane.
+          if (modelCtx > ctxMax) ctxMax = modelCtx;
           // Only update ctxMax here — the `assistant` event already set the
           // correct per-turn contextUsed.  The `result` event's usage is
           // cumulative across the session which would overcount.
@@ -601,7 +607,7 @@ export function useClaudeEvents() {
                   cwd: s.cwd || ".",
                   prompt: "/compact",
                   permission_mode: "auto",
-                }).catch((err) => {
+                }, s.skipOpenwolf).catch((err) => {
                   useClaudeStore.getState().setError(session_id, `Auto-compact failed: ${err}`);
                   useClaudeStore.getState().setAutoCompactStatus(session_id, "idle");
                 });

@@ -7,7 +7,8 @@ type PendingEvent =
 
 export async function rewritePromptStream(
   prompt: string,
-  onChunk: (text: string) => void
+  onChunk: (text: string) => void,
+  opts?: { isVoice?: boolean },
 ): Promise<void> {
   let resolveDone!: () => void;
   const donePromise = new Promise<void>((r) => { resolveDone = r; });
@@ -33,7 +34,7 @@ export async function rewritePromptStream(
 
   // Now start the rewrite
   try {
-    rewriteId = await invoke("rewrite_prompt", { prompt });
+    rewriteId = await invoke("rewrite_prompt", { prompt, isVoice: opts?.isVoice ?? false });
   } catch (e) {
     unChunk();
     unDone();

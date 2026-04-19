@@ -71,7 +71,7 @@
         "base_delay_seconds": 0
       },
       "failsafe": { "on_failure": "log_and_continue", "dead_letter": false },
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "project-suggestions",

@@ -494,7 +494,7 @@ async fn run_gateway(
                                         // path segments would let a malicious attachment write outside
                                         // the attachment dir (more severe on Windows where "\" is a separator).
                                         let filename: String = raw_filename
-                                            .rsplit(|c| c == '/' || c == '\\')
+                                            .rsplit(['/', '\\'])
                                             .next()
                                             .unwrap_or("file")
                                             .chars()
@@ -503,7 +503,7 @@ async fn run_gateway(
                                         // Windows silently strips trailing dots/spaces from filenames —
                                         // "CON.txt." becomes "CON.txt", which can cause file open failures
                                         // and create collisions with sibling files.
-                                        let filename = filename.trim_end_matches(|c: char| c == '.' || c == ' ').to_string();
+                                        let filename = filename.trim_end_matches(['.', ' ']).to_string();
                                         // Windows reserves device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) —
                                         // a file named "CON.png" or just "CON" will fail to open.
                                         // Match on the stem (part before the first dot) case-insensitively.

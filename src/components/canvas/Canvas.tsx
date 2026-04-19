@@ -6,6 +6,9 @@ import { useShallow } from "zustand/react/shallow";
 import { readFileBase64 } from "../../lib/tauriApi";
 import FloatingTerminal from "./FloatingTerminal";
 import { PartyEqualizer } from "../party/PartyOverlay";
+import VoiceStatusBadge from "../claude/VoiceStatusBadge";
+import VoiceLivePanel from "../claude/VoiceLivePanel";
+import VoiceMascot from "../claude/VoiceMascot";
 import "./Canvas.css";
 
 /** Safari/WebKit gesture events (non-standard, not in lib.dom.d.ts) */
@@ -295,12 +298,21 @@ export default function Canvas() {
         </div>
       )}
 
-      {/* Zoom indicator */}
-      {zoom !== 1 && (
-        <div className="canvas-zoom-badge">
-          {Math.round(zoom * 100)}%
+      {/* Bottom-right status cluster: mascot + state on left, mic + zoom stacked on right */}
+      <div className="canvas-status-cluster">
+        <div className="cc-voice-stack">
+          <VoiceMascot />
+          <VoiceLivePanel />
         </div>
-      )}
+        <div className="canvas-right-col">
+          <VoiceStatusBadge />
+          {zoom !== 1 && (
+            <div className="canvas-zoom-badge">
+              {Math.round(zoom * 100)}%
+            </div>
+          )}
+        </div>
+      </div>
 
     </div>
   );

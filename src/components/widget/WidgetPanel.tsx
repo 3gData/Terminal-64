@@ -5,6 +5,8 @@ import { pushToast } from "../../lib/notifications";
 import { useClaudeStore, ClaudeSession } from "../../stores/claudeStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useCanvasStore } from "../../stores/canvasStore";
+import { useVoiceStore } from "../../stores/voiceStore";
+import { startVoice, stopVoice, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
 import { widgetBus } from "../../lib/widgetBus";
 import "./Widget.css";
 
@@ -83,6 +85,9 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   const [browserActive, setBrowserActive] = useState(false);
   const browserRafRef = useRef<number>(0);
   const lastBoundsRef = useRef("");
+
+  // Voice event forwarding unlisteners, keyed by subscription kind
+  const voiceUnlistenersRef = useRef<{ intent?: () => void; partial?: () => void; final?: () => void }>({});
 
   useEffect(() => {
     getWidgetServerPort()
@@ -277,6 +282,18 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
             post({ type: "t64:directory-picked", payload: { id: reqId, path: dir || null } });
           }).catch(() => {
             post({ type: "t64:directory-picked", payload: { id: reqId, path: null } });
+          });
+          return;
+        }
+
+        case "t64:pick-file": {
+          const reqId = msg.payload?.id;
+          const title = typeof msg.payload?.title === "string" ? msg.payload.title : "Select file";
+          const filters = Array.isArray(msg.payload?.filters) ? msg.payload.filters : undefined;
+          openDialog({ directory: false, multiple: false, title, filters }).then((path) => {
+            post({ type: "t64:file-picked", payload: { id: reqId, path: path || null } });
+          }).catch(() => {
+            post({ type: "t64:file-picked", payload: { id: reqId, path: null } });
           });
           return;
         }
@@ -623,6 +640,69 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           return;
         }
 
+        // ---- Voice control ----
+
+        case "t64:voice:start": {
+          const { id: vsId } = msg.payload || {};
+          useVoiceStore.getState().setEnabled(true);
+          startVoice()
+            .then(() => post({ type: "t64:voice:started", payload: { id: vsId, error: null } }))
+            .catch((err) => post({ type: "t64:voice:started", payload: { id: vsId, error: String(err) } }));
+          return;
+        }
+
+        case "t64:voice:stop": {
+          const { id: vstopId } = msg.payload || {};
+          useVoiceStore.getState().setEnabled(false);
+          stopVoice()
+            .then(() => post({ type: "t64:voice:stopped", payload: { id: vstopId, error: null } }))
+            .catch((err) => post({ type: "t64:voice:stopped", payload: { id: vstopId, error: String(err) } }));
+          return;
+        }
+
+        case "t64:voice:status": {
+          const { id: vstId } = msg.payload || {};
+          const vs = useVoiceStore.getState();
+          post({
+            type: "t64:voice:status-result",
+            payload: {
+              id: vstId,
+              enabled: vs.enabled,
+              state: vs.state,
+              lastIntent: vs.lastIntent,
+              partial: vs.partial,
+              error: vs.error,
+              modelsDownloaded: vs.modelsDownloaded,
+              activeSessionId: vs.activeSessionId,
+            },
+          });
+          return;
+        }
+
+        case "t64:voice:on-intent": {
+          if (voiceUnlistenersRef.current.intent) return;
+          onVoiceIntent((payload) => {
+            post({ type: "t64:voice:intent", payload });
+          }).then((un) => { voiceUnlistenersRef.current.intent = un; }).catch(() => {});
+          return;
+        }
+
+        case "t64:voice:on-partial": {
+          if (voiceUnlistenersRef.current.partial) return;
+          onVoicePartial((payload) => {
+            post({ type: "t64:voice:partial", payload });
+          }).then((un) => { voiceUnlistenersRef.current.partial = un; }).catch(() => {});
+          return;
+        }
+
+        case "t64:voice:on-final": {
+          if (voiceUnlistenersRef.current.final) return;
+          onVoiceFinal((payload) => {
+            post({ type: "t64:voice:final", payload });
+          }).then((un) => { voiceUnlistenersRef.current.final = un; }).catch(() => {});
+          return;
+        }
+
         default: break;
       }
 
@@ -659,6 +739,11 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
       iframe?.removeEventListener("load", onLoad);
       window.removeEventListener("message", handleMessage);
       widgetBus.unsubscribeAll(widgetId);
+      const vu = voiceUnlistenersRef.current;
+      try { vu.intent?.(); } catch { /* ignore */ }
+      try { vu.partial?.(); } catch { /* ignore */ }
+      try { vu.final?.(); } catch { /* ignore */ }
+      voiceUnlistenersRef.current = {};
     };
   }, [widgetUrl, widgetId]);
 

@@ -2,7 +2,7 @@
 
 > OpenWolf's learning memory. Updated automatically as the AI learns from interactions.
 > Do not edit manually unless correcting an error.
-> Last updated: 2026-04-15
+> Last updated: 2026-04-19
 
 ## User Preferences
 
@@ -10,38 +10,77 @@
 
 ## Key Learnings
 
-- **Project:** terminal-64
-- **Description:** A canvas-based terminal emulator and AI workstation built with **Tauri v2** + **React 19** + **xterm.js**. Manage multiple terminal sessions and Claude Code agents simultaneously on a free-form pan/zo
+- **Project:** terminal-64 — canvas-based terminal emulator + AI workstation built with Tauri v2 + React 19 + xterm.js. Manages multiple terminal sessions and Claude Code agents on a free-form pan/zoom canvas.
+
+### Windows platform
+- No first-class `longPathAware` manifest field in Tauri 2; keep `~/.terminal64/` paths short.
+- Localhost servers (127.0.0.1) don't trigger Windows Defender Firewall prompts. SmartScreen needs EV cert (out of scope).
+
+### Voice / ONNX runtime (added 2026-04-18)
+- Moonshine-base: encoder hidden dim **416** (not 288); decoder 8 layers (64 past_kv inputs) + `use_cache_branch: bool[1]`. For ≤3s audio, pass `use_cache_branch=false` + zero past tensors each step.
+- Silero-VAD v5 ONNX: unified `state: [2,1,128]` (not separate h/c). Inputs: `input`, `state`, `sr` (i64[1] not i64[]). Outputs: `output`, `stateN`.
+- openWakeWord: wake-classifier input is `x.1`. Always resolve names at load via `session.inputs()[0].name()` — naming has changed across versions.
+- openWakeWord melspectrogram.onnx output is `[time,1,1,32]` (4D, batch on axis 0). Flatten by total-len/32; apply `x/10 + 2` scaling.
+- LocalAgreement-2 word-index LCP only valid for SAME audio region. When partial decoder slides its window, fully reset committed_words + last_hypothesis_words. Without per-word timestamps you can't preserve committed prefix across slides; final beam-search decode backfills.
+- Tauri Emitter split-stream events (`voice-committed` + `voice-tentative`) arrive in non-deterministic order. Each handler updates its half of the store and calls a shared `applySplit()` reader — don't await pairs.
+
+### Delegation
+- `delegationStore.parentToGroup` is single-slot. To get ALL groups for a parent, iterate `Object.values(delState.groups).filter(g => g.parentSessionId === parentId)`.
+
+### Claude CLI events (`useClaudeEvents.ts`)
+- `stream_request_start` fires at start of EACH API call in a multi-turn session. Treat like `message_start`: clear pendingBlocks + assistantFinalized.
 
 ## Do-Not-Repeat
 
-<!-- Mistakes made and corrected. Each entry prevents the same mistake recurring. -->
-<!-- Format: [YYYY-MM-DD] Description of what went wrong and what to do instead. -->
-- [2026-04-16] Rewind's restoreCheckpoint(keepTurns+1) restores the PREVIOUS turn's snapshot. When rewinding to the last user message (undo-send), this causes data loss. Always detect undo-send (target is last msg, no assistant response) and skip file operations.
-- [2026-04-16] For a "traveling comet" border beam, NEVER use multiple discrete DOM elements (divs/dots) with staggered animation-delay riding the same offset-path — they always render as visibly separated dots. Correct approach: SVG `<rect pathLength="100">` + `stroke-dasharray` + animated `stroke-dashoffset` for geometrically-perfect corner wrapping with real `feGaussianBlur` for glow. Alternative: single element with gradient-to-transparent (gradient IS the tail). Conic-gradient+mask distorts speed at corners on wide rectangles.
-- [2026-04-16] Rust `Command::new("pm2")` or `Command::new("openwolf")` on Windows DOES NOT resolve `.cmd`/`.bat` shims via PATHEXT (unlike the shell). npm-installed tools register as `.cmd` files in `%APPDATA%\npm` — must invoke via `cmd /C <shim> <args>` with CREATE_NO_WINDOW (0x08000000) to avoid a console flash. Applies to: pm2, claude, openwolf, any npx-installed CLI.
-- [2026-04-16] `std::os::windows::fs::symlink_dir` REQUIRES Administrator or Developer Mode on Windows — normal users get permission denied. Fall back to directory junctions via `cmd /C mklink /J link target` which do NOT require elevated permissions. See `create_dir_link()` helper in lib.rs.
-- [2026-04-16] `env!("CARGO_MANIFEST_DIR")` bakes in the developer's compile-time path — production builds crash looking for `/Users/janislacars/...` on end-user Windows machines. For bundled resources, always use `app_handle.path().resource_dir()` first and only fall back to CARGO_MANIFEST_DIR for dev/unpackaged runs.
-- [2026-04-16] For rewind/undo flows: if `git` command itself fails to SPAWN (not found on PATH), treating that as "untracked" triggers `remove_file` on user-edited TRACKED files — DATA LOSS. Always distinguish `Err(spawn failed)` from `Ok(exit != 0)` — the former means skip-and-log, only the latter means safe-to-delete.
-- [2026-04-16] `PathBuf::starts_with` is a LEXICAL prefix check — it does NOT collapse `..` segments. Zip archives with `..\..\foo` paths can escape the destination directory on Windows even with a `starts_with` guard. Always iterate `components()` and reject `Component::ParentDir`, `RootDir`, `Prefix` before joining.
-- [2026-04-16] Frontend: `path.split("/").pop()` fails on Windows backslash paths (returns entire string). `relPath.startsWith("/")` does NOT detect Windows absolute paths (`C:\…`, `\\server\share`). Always split on `/[/\\]/` and check drive letter + UNC prefix. Use the shared helpers in `src/lib/platform.ts` (`baseName`, `dirName`, `isAbsolutePath`, `joinPath`) rather than open-coding at each call site.
-- [2026-04-16] Frontend: `navigator.platform` is deprecated — prefer `navigator.userAgentData.platform` (Chromium/WebView2 only) with `navigator.platform` / `navigator.userAgent` fallback. All existing detection lives in `src/lib/platform.ts` as `IS_WIN` / `IS_MAC` constants — do NOT re-implement inline.
-- [2026-04-16] Frontend: Template-literal path joins like `` `${cwd}/${name}` `` produce mixed separators on Windows and can break downstream consumers (node module resolution in MCP configs, etc.). Use `joinPath(...)` from `src/lib/platform.ts` — it detects the separator style from the inputs.
-- [2026-04-16] Tauri 2 bundle config: `targets: "all"` on Windows builds BOTH NSIS and MSI; MSI requires WiX Toolset (separate ~50MB install), and a fresh CI/dev box without WiX aborts the build. Use an explicit array like `["app", "dmg", "deb", "appimage", "rpm", "nsis"]` — Tauri silently skips formats not applicable to the host, and Windows builds NSIS only. Keep MSI out unless you also commit to maintaining a WiX install on every build environment.
-- [2026-04-16] Tauri 2 bundle.windows.nsis: always set `minimumWebview2Version` (e.g. "110.0.1587.40") so the NSIS installer triggers a WebView2 update on enterprise / locked-down Windows where Edge auto-update is disabled and the runtime is years old. Without the gate, modern web APIs (Monaco, xterm WebGL, conic-gradient) silently misbehave at runtime with no install-time warning.
-- [2026-04-16] Localhost servers (widget_server, permission_server) bind to 127.0.0.1 — Windows Defender Firewall does NOT prompt for loopback-only listeners, so no UX work is required there. The unsigned-binary SmartScreen warning on first launch is a separate problem that needs an EV/code-signing cert (out of scope until purchased).
-- [2026-04-16] Tauri 2 has no first-class `longPathAware` field for the embedded Windows app manifest, and overriding the manifest via `embed-resource` in build.rs conflicts with tauri-build's auto-generated manifest (WebView2 detection, DPI awareness). For now: keep `~/.terminal64/` paths short and accept that fastembed cache deeply nested under `models--BAAI--bge-small-en-v1.5/snapshots/<sha>/...` can flirt with MAX_PATH=260 on Windows accounts with long usernames. Revisit when Tauri exposes a manifest hook.
-- [2026-04-16] Windows `where <bin>.exe` with explicit extension DOES NOT use PATHEXT — it only matches the exact extension given. To find `.cmd`/`.bat` shims (npm installs), pass the bare name (`where claude`). Same principle applies to `Command::new`: bare names bypass PATHEXT, so any fallback string must already include `.cmd`/`.exe` on Windows. See `resolve_claude_path` / `resolve_openwolf_path_inner`.
-- [2026-04-16] Windows NTFS reserves DOS device names regardless of extension: `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`. A filename like `CON.png` cannot be created — `fs::write` fails silently. NTFS also strips trailing dots and spaces (`file.txt.` → `file.txt`), which can collide with siblings. Any filename from external input (Discord attachments, user uploads) must reject reserved stems (case-insensitive on the part before the first dot) and trim trailing `.`/` ` before writing.
-- [2026-04-16] Centralise the "invoke a Windows shim" pattern in one helper. `claude_manager::shim_command(bin)` wraps in `cmd /C` with CREATE_NO_WINDOW on Windows; `lib.rs::shim_command` does the same thing but scoped to pm2/openwolf daemon calls. Do not open-code `Command::new("cmd").arg("/C")` at each call site — easy to miss `creation_flags` or mishandle arg escaping.
-- [2026-04-17] Rewind MUST NOT call `git checkout HEAD -- path` on delegation-modified files. `git checkout HEAD` restores to the LAST COMMIT, which can wipe out pre-session uncommitted edits, edits from other sessions in the same working tree, or parent-session edits not captured in the checkpoint. For files touched by delegation children without a parent checkpoint entry, only delete UNTRACKED files (new creations) — leave tracked-but-modified files alone and let the user review via `git diff`.
-- [2026-04-17] `delegationStore.parentToGroup` is a single-slot map — each `createGroup` overwrites any previous entry for the same parent. Code that needs ALL groups spawned by a parent (e.g. rewind collecting child modifiedFiles across multiple delegations) MUST iterate `Object.values(delState.groups).filter(g => g.parentSessionId === parentId)` instead of reading parentToGroup, otherwise previous completed delegations' state is silently orphaned.
-- [2026-04-17] `useClaudeEvents.ts` has a "safety net" that sets `isStreaming=true` on ANY non-result/non-ping event. This means top-level `{type:"error"}` events (API rate limit, overloaded, auth failure) must be handled EXPLICITLY — otherwise the spinner never stops, every follow-up event re-flips streaming to true, and the error is invisible. Always: `setError` + `setStreaming(false)` + clear pending state, then `return`.
-- [2026-04-17] `content_block_delta` with `input_json_delta` accumulates onto "the last pending block". If you don't track the block *type*, a `thinking` content block interleaved between tool_uses can cause subsequent `input_json_delta` (which only targets tool_use blocks anyway) to silently misattribute if assumptions about ordering are violated. Always check `blocks[last].type === "tool_use"` before accumulating inputJson — defensive, and documents intent.
-- [2026-04-17] Claude CLI emits `stream_request_start` at the beginning of each API call within a multi-turn session (not just the first). Treat it like `message_start`: clear pendingBlocks + assistantFinalized. Without this, tool_use blocks from a prior turn can leak into the next turn's finalization path on newer CLI versions.
-- [2026-04-17] `find_rewind_uuid` leaf detection in lib.rs must filter candidates to `type == "user" | "assistant"`. Claude JSONL files also contain `summary`, `task-summary`, `mode-entry`, context-collapse, and other metadata records with their own UUIDs that aren't referenced as anyone's parent. Picking one of those as the "leaf" walks a parentUuid chain that misses the actual conversation tail. Always filter by transcript type first.
-- [2026-04-17] `truncate_session_jsonl_by_messages` trailing-records loop: on JSON parse failure, use `kept.push(line); continue;` — NOT `break`. The trailing sweep's purpose is to keep tool-result-only user records paired with the last retained tool_use; a single malformed line (common with in-flight writes from the CLI) must not abort the entire sweep and lose those pairings, which would make resume fail with "tool_use without tool_result".
+<!-- Past mistakes that must not recur. Each entry dated. -->
+
+### Windows shim / PATH (2026-04-19)
+- `Command::new("pm2"|"claude"|"openwolf")` does NOT resolve `.cmd`/`.bat` shims via PATHEXT. Invoke via `cmd /C <shim>` with CREATE_NO_WINDOW (0x08000000). Use centralized `shim_command` helpers (`claude_manager::shim_command`, `lib.rs::shim_command`) — do not open-code at call sites.
+- `where <bin>.exe` only matches exact extension; pass bare name to use PATHEXT. Same for `Command::new` — fallback strings must include `.cmd`/`.exe`.
+
+### Windows filesystem (2026-04-19)
+- `std::os::windows::fs::symlink_dir` requires Admin/Developer Mode. Fall back to junctions via `cmd /C mklink /J` (see `create_dir_link()` in lib.rs).
+- NTFS reserves `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9` regardless of extension; strips trailing dots/spaces. Sanitize external filenames (Discord attachments, uploads).
+- Frontend: use `src/lib/platform.ts` helpers (`baseName`, `dirName`, `isAbsolutePath`, `joinPath`, `IS_WIN`, `IS_MAC`). Do NOT use `path.split("/")`, `relPath.startsWith("/")`, template-literal joins, or `navigator.platform` directly — they all fail on Windows backslash/drive-letter paths.
+
+### Tauri build config (2026-04-19)
+- Tauri 2 bundle: use explicit `targets: ["app","dmg","deb","appimage","rpm","nsis"]` — `"all"` triggers MSI which needs WiX. Set `bundle.windows.nsis.minimumWebview2Version` (e.g. "110.0.1587.40") for enterprise updates.
+- `env!("CARGO_MANIFEST_DIR")` bakes developer's compile-time path — production crashes on user machines. Use `app_handle.path().resource_dir()` first, fall back to CARGO_MANIFEST_DIR only for dev runs.
+
+### ONNX / ort crate (2026-04-18)
+- `ort` 2.0.0-rc.11 needs `ndarray = "0.17"` (matches fastembed v5 transitive). Pinning 0.16 splits the graph and breaks `Tensor::from_array`.
+- `ort::Session::run(...)` returns `SessionOutputs<'s>` borrowing the session — scope each stage in `let x = { ... }` so outputs drop before `&mut self` calls (E0499). Applies to all voice runners.
+
+### Rewind / git / delegation data loss (2026-04-19)
+- Rewind `restoreCheckpoint(keepTurns+1)` restores PREVIOUS turn's snapshot. Detect undo-send (target = last user msg, no assistant response) and skip file ops to prevent data loss.
+- Rewind MUST NOT `git checkout HEAD -- path` on delegation-modified files — wipes uncommitted/parent edits. For files touched by delegation children without parent checkpoint entry, only delete UNTRACKED files.
+- Distinguish `Err(spawn failed)` from `Ok(exit != 0)` for git. Spawn fail = skip-and-log; non-zero exit = safe to delete untracked. Treating spawn fail as "untracked" causes data loss on tracked files.
+
+### Session state flow (2026-04-16)
+- Fork first-send MUST branch on `forkParentSessionId` presence alone — NOT `if (forkParent && !started)`. `loadFromDisk(newSessionId, forkedMessages)` sets `hasBeenStarted=true` whenever `promptCount>0`, so the `!started` guard falls through to `--resume <newId>` against a JSONL the CLI hasn't created yet, and the send hangs silently. Store clears `forkParentSessionId` after the `--fork-session` send succeeds.
+
+### UI rendering / WebKit (2026-04-18)
+- `overflow: hidden` + `border-radius` on a child of a `transform: scale(z)` parent flickers on WebKit at fractional pixel positions — rounded-corner clip repaints non-atomically, invalidating the background paint. Fix by promoting to own compositor layer: `will-change: transform; transform: translateZ(0); backface-visibility: hidden; contain: layout paint; isolation: isolate`.
+
+### Voice pipeline (2026-04-18)
+- VAD with a single hard threshold + 1-frame hangover finalizes whisper early on breaths/soft consonants mid-utterance. Use Silero VADIterator-style hysteresis: activate 0.5, deactivate 0.35, `min_speech_duration_ms=250`, `min_silence_duration_ms=500`, `speech_pad_ms=300`. Tune orchestrator silence-frame counters to match (e.g. dictation `SILENCE_FRAMES_TO_FINALIZE` 25→9).
+- Streaming `partial_worker` that clones the full rolling buffer every tick is O(n²) over an utterance — 12s audio re-decoded every 250ms stalls partials under Metal. Decode only a trailing window slice (`g[buf_len - PARTIAL_WINDOW_SECS*SR ..]`), add min-new-samples gate (~120ms), reset `AgreementBuffer` when the window slides, and watchdog-skip next tick if decode > 2× tick interval.
+
+### Security / zip extraction (2026-04-19)
+- Zip extraction: `PathBuf::starts_with` is lexical — does NOT collapse `..`. Iterate `components()` and reject `ParentDir`, `RootDir`, `Prefix` before joining (Windows zip-slip).
+
+### Session JSONL handling (2026-04-19)
+- `find_rewind_uuid` leaf detection must filter to `type == "user" | "assistant"`. JSONL also contains `summary`, `task-summary`, `mode-entry`, etc. with UUIDs that aren't conversation tail.
+- `truncate_session_jsonl_by_messages` trailing sweep: on JSON parse failure, `continue` (don't `break`). A single malformed line from in-flight CLI writes must not abort the sweep and break tool_use/tool_result pairing.
+
+### Claude CLI event handling (2026-04-19)
+- "Safety net" sets `isStreaming=true` on any non-result/non-ping event. Top-level `{type:"error"}` (rate limit, overloaded, auth) MUST be handled explicitly: `setError` + `setStreaming(false)` + clear pending + `return`. Otherwise spinner never stops.
+- `content_block_delta` + `input_json_delta`: always check `blocks[last].type === "tool_use"` before accumulating inputJson — `thinking` blocks can interleave.
 
 ## Decision Log
 
 <!-- Significant technical decisions with rationale. Why X was chosen over Y. -->
+
+### Traveling comet border beam — SVG path animation (2026-04-19)
+Chosen: SVG `<rect pathLength="100">` + `stroke-dasharray` + animated `stroke-dashoffset` + `feGaussianBlur`.
+Rejected: (1) multiple discrete divs with staggered `animation-delay` on `offset-path` — always render as separated dots rather than a continuous beam. (2) conic-gradient + mask — distorts speed at corners on wide rectangles.

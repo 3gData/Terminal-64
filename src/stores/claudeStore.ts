@@ -729,6 +729,17 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
   },
 }));
 
+// Lightweight selector for voice/fuzzy session matching — returns only { id, name }
+// for sessions that have a human-readable name set. Used by useVoiceControl.
+export function getSessionsForVoiceMatch(): { id: string; name: string }[] {
+  const sessions = useClaudeStore.getState().sessions;
+  const out: { id: string; name: string }[] = [];
+  for (const s of Object.values(sessions)) {
+    if (s.name && s.name.trim()) out.push({ id: s.sessionId, name: s.name });
+  }
+  return out;
+}
+
 // Emergency save on tab hide / close — prevents data loss from random stops or network issues
 export function flushSave() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }

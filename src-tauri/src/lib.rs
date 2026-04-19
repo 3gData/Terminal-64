@@ -24,10 +24,13 @@ mod audio_manager;
 mod browser_manager;
 mod claude_manager;
 mod discord_bot;
+mod mic_manager;
 mod permission_server;
 mod pty_manager;
 mod types;
 mod vector_store;
+mod voice;
+mod voice_manager;
 mod widget_server;
 
 // ---- Security ----
@@ -80,9 +83,11 @@ use audio_manager::AudioManager;
 use browser_manager::BrowserManager;
 use claude_manager::ClaudeManager;
 use discord_bot::DiscordBot;
+use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use pty_manager::PtyManager;
 use vector_store::VectorStore;
+use voice_manager::VoiceManager;
 use widget_server::WidgetServer;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -92,7 +97,7 @@ const SKIP_DIRS: &[&str] = &["node_modules", ".git", "target", "dist", ".next", 
 
 fn session_project_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
     let home = dirs::home_dir().ok_or("No home dir")?;
-    let dir_hash = cwd.replace(':', "-").replace('\\', "-").replace('/', "-");
+    let dir_hash = cwd.replace([':', '\\', '/'], "-");
     Ok(home.join(".claude").join("projects").join(dir_hash))
 }
 
@@ -109,6 +114,8 @@ struct AppState {
     browser_manager: BrowserManager,
     widget_server: WidgetServer,
     vector_store: Arc<Mutex<Option<VectorStore>>>,
+    mic_manager: Arc<MicManager>,
+    voice_manager: Arc<VoiceManager>,
 }
 
 #[tauri::command]
@@ -225,13 +232,33 @@ fn close_claude_session(
 }
 
 #[tauri::command]
-fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String, String> {
+fn rewrite_prompt(
+    app_handle: tauri::AppHandle,
+    prompt: String,
+    is_voice: Option<bool>,
+) -> Result<String, String> {
     const SYSTEM_PROMPT: &str = "You are a prompt engineering expert. Your job is to rewrite user prompts to get dramatically better results from AI coding assistants like Claude Code.\n\nRules:\n- Keep the user's INTENT exactly the same\n- Make the prompt more specific, structured, and actionable\n- Add context that was implied but not stated\n- Break vague requests into clear, concrete steps\n- Specify expected output format when helpful\n- Add constraints that prevent common failure modes\n- If the prompt references code, remind the AI to read relevant files first\n- Keep it concise — longer isn't better, clearer is better\n- Don't add fluff or meta-commentary, just output the improved prompt\n- Output ONLY the rewritten prompt, nothing else";
+
+    // When the prompt came from voice dictation, give the rewriter extra
+    // context so it can forgive transcription artifacts instead of treating
+    // them as the user's literal intent.
+    const VOICE_ADDENDUM: &str = "\n\nVoice-message handling:\n- The user dictated this prompt via speech-to-text (whisper.cpp).\n- Expect missing/extra punctuation, homophones (\"their/there\", \"to/too\"), misheard technical terms, run-on sentences, and filler words (\"um\", \"uh\", \"like\", \"you know\").\n- Infer the intended technical terms from context (e.g. \"react\" not \"wrecked\", \"async\" not \"a sync\").\n- Fix punctuation/capitalisation silently; don't flag these as issues.\n- Preserve the user's actual request — don't invent requirements they didn't state.\n- Treat the trailing \"This message was a voice message.\" marker as metadata, NOT part of the prompt content. Do not echo it.";
 
     static REWRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let rewrite_id = format!("rw-{}", REWRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
 
-    let full_prompt = format!("{}\n\nRewrite this prompt:\n{}", SYSTEM_PROMPT, prompt);
+    let voice = is_voice.unwrap_or(false);
+    let system = if voice {
+        format!("{}{}", SYSTEM_PROMPT, VOICE_ADDENDUM)
+    } else {
+        SYSTEM_PROMPT.to_string()
+    };
+    let user_prompt = if voice {
+        format!("{}\n\nThis message was a voice message.", prompt)
+    } else {
+        prompt
+    };
+    let full_prompt = format!("{}\n\nRewrite this prompt:\n{}", system, user_prompt);
     let claude_bin = claude_manager::resolve_claude_path();
     let mut cmd = claude_manager::shim_command(&claude_bin);
     cmd.arg("-p").arg(&full_prompt)
@@ -244,6 +271,13 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
 
+    // Run from the OS temp dir so Claude doesn't pick up this project's
+    // CLAUDE.md / .wolf/*.md / .claude/ config. The rewriter should only
+    // see its own system prompt — anything else (OpenWolf rules, cerebrum
+    // entries, skill docs) pollutes the output and makes rewrites hallucinate
+    // project-specific conventions.
+    cmd.current_dir(std::env::temp_dir());
+
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
 
@@ -252,7 +286,7 @@ fn rewrite_prompt(app_handle: tauri::AppHandle, prompt: String) -> Result<String
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 safe_eprintln!("[rewrite:stderr] {}", line);
             }
         });
@@ -341,6 +375,9 @@ Rules:
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
+    // Same project-context isolation as rewrite_prompt — run from tmp so
+    // we don't inherit this repo's CLAUDE.md into the theme prompt.
+    cmd.current_dir(std::env::temp_dir());
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn claude: {}", e))?;
     let stdout = child.stdout.take().ok_or("No stdout")?;
@@ -499,7 +536,7 @@ async fn search_files(cwd: String, query: String) -> Result<Vec<String>, String>
             }
         }
         walk(root, root, &query_lower, &mut results, SKIP_DIRS, 0);
-        results.sort_by(|a, b| a.len().cmp(&b.len()));
+        results.sort_by_key(|a| a.len());
         results.truncate(12);
         results
     }).await.map_err(|e| e.to_string())
@@ -699,7 +736,7 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
 
 /// Collect JSONL lines up to `keep_turns` user messages (actual user prompts, not tool_result-only messages).
 /// A "real" user turn has non-empty, non-whitespace text content — matching load_session_history's filtering.
-fn collect_jsonl_lines_up_to_turns<'a>(content: &'a str, keep_turns: usize) -> Vec<&'a str> {
+fn collect_jsonl_lines_up_to_turns(content: &str, keep_turns: usize) -> Vec<&str> {
     let mut kept: Vec<&str> = Vec::new();
     let mut user_turn_count = 0;
     for line in content.lines() {
@@ -2331,8 +2368,7 @@ fn resolve_skill_prompt(skill_name: String, arguments: String, cwd: Option<Strin
         .map_err(|e| format!("read {}: {}", skill_md.display(), e))?;
 
     let content_trimmed = content.trim_start();
-    let (yaml_block, markdown_body) = if content_trimmed.starts_with("---") {
-        let rest = &content_trimmed[3..];
+    let (yaml_block, markdown_body) = if let Some(rest) = content_trimmed.strip_prefix("---") {
         if let Some(end) = rest.find("---") {
             (rest[..end].trim(), rest[end + 3..].trim())
         } else {
@@ -2795,7 +2831,7 @@ fn restore_checkpoint(session_id: String, turn: usize) -> Result<Vec<String>, St
         let original_path = parts[1];
         // Block path traversal in crafted manifests
         if original_path.contains("..") || snap_file.contains("..") {
-            return Err(format!("restore_checkpoint blocked: path traversal detected"));
+            return Err("restore_checkpoint blocked: path traversal detected".to_string());
         }
         let content = std::fs::read_to_string(dir.join(snap_file))
             .map_err(|e| format!("read snap {}: {}", snap_file, e))?;
@@ -2906,11 +2942,10 @@ fn revert_files_git(cwd: String, paths: Vec<String>) -> Result<Vec<String>, Stri
             }
             Ok(_) => {
                 // File is untracked (new) — delete it
-                if abs.exists() {
-                    if std::fs::remove_file(&abs).is_ok() {
+                if abs.exists()
+                    && std::fs::remove_file(&abs).is_ok() {
                         reverted.push(path.clone());
                     }
-                }
             }
             Err(e) => {
                 // git didn't even launch — refuse to touch anything (data safety).
@@ -3210,6 +3245,161 @@ fn vector_reindex_all(
     Ok(format!("Reindexed {indexed} items"))
 }
 
+// ---- Voice control commands ----
+// Names and payload shapes match src/lib/voiceApi.ts exactly.
+
+#[tauri::command]
+fn start_voice(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    use voice::adapters::{CommandAdapter, DictationAdapter, VadAdapter, WakeAdapter};
+
+    match WakeAdapter::try_load() {
+        Ok(a) => state.voice_manager.set_wake_runner(Box::new(a)),
+        Err(e) => {
+            safe_eprintln!("[voice] wake runner unavailable: {}", e);
+            return Err(format!("wake runner: {e}"));
+        }
+    }
+    match CommandAdapter::try_load() {
+        Ok(a) => state.voice_manager.set_command_runner(Box::new(a)),
+        Err(e) => {
+            safe_eprintln!("[voice] command runner unavailable: {}", e);
+            return Err(format!("command runner: {e}"));
+        }
+    }
+    match VadAdapter::try_load() {
+        Ok(a) => state.voice_manager.set_vad(Box::new(a)),
+        Err(e) => safe_eprintln!("[voice] vad unavailable (amplitude fallback): {}", e),
+    }
+    match DictationAdapter::try_load(app_handle.clone()) {
+        Ok(a) => {
+            safe_eprintln!("[voice] whisper streaming dictation runner loaded");
+            state.voice_manager.set_dictation_runner(Box::new(a));
+        }
+        Err(e) => safe_eprintln!("[voice] dictation unavailable (moonshine fallback): {}", e),
+    }
+
+    state.voice_manager.start(app_handle)
+}
+
+#[tauri::command]
+fn stop_voice(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.voice_manager.stop();
+    Ok(())
+}
+
+/// Wire the settings-panel sensitivity slider (0..1, higher = more sensitive)
+/// to the wake-word detector threshold. Previously the slider wrote to
+/// localStorage only and never reached the Rust side — users at 100% were
+/// still running the 0.55 default threshold.
+#[tauri::command]
+fn voice_set_sensitivity(
+    state: tauri::State<'_, AppState>,
+    sensitivity: f32,
+) -> Result<(), String> {
+    state.voice_manager.set_sensitivity(sensitivity);
+    Ok(())
+}
+
+/// Called when a `SelectSession` intent fails to fuzzy-match on the frontend.
+/// Forces the state machine back to Idle so the user's next utterance doesn't
+/// leak into whatever session happened to be active before.
+#[tauri::command]
+fn voice_abort_dictation(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.voice_manager.abort_dictation();
+    Ok(())
+}
+
+/// Run the Agent 4 §7 self-test on demand. Emits `voice-selftest` when
+/// finished; also returns the report so the caller can decide what to show.
+/// Runs on the tokio blocking pool because Metal shader compile inside
+/// whisper.cpp can block for 1–2 s on cold machines.
+#[tauri::command]
+async fn voice_run_selftest(
+    app_handle: tauri::AppHandle,
+) -> Result<voice::testkit::SelfTestReport, String> {
+    tauri::async_runtime::spawn_blocking(move || voice::testkit::run_self_test(&app_handle))
+        .await
+        .map_err(|e| format!("selftest join: {e}"))
+}
+
+/// Walk a directory of WAV files and run each through wake → vad → dictation,
+/// writing a JSON report. Used for regression testing (Agent 4 §10). Returns
+/// the report after writing it to `out_path` (or `<dir>/voice_fixtures_report.json`
+/// when `out_path` is omitted).
+#[tauri::command]
+async fn voice_run_fixtures(
+    app_handle: tauri::AppHandle,
+    dir: String,
+    out_path: Option<String>,
+) -> Result<voice::testkit::FixturesReport, String> {
+    let dir_buf = std::path::PathBuf::from(dir);
+    let out_buf = out_path.map(std::path::PathBuf::from);
+    tauri::async_runtime::spawn_blocking(move || {
+        voice::testkit::run_fixtures(&app_handle, &dir_buf, out_buf.as_deref())
+    })
+    .await
+    .map_err(|e| format!("fixtures join: {e}"))?
+}
+
+/// Maps the granular per-kind model registry (voice::models) to the flat
+/// {wake, command, dictation} view the frontend persists. `command` aggregates
+/// Moonshine + Silero VAD (both must be present for commands to work).
+#[tauri::command]
+fn voice_models_status() -> Result<types::VoiceModelsStatus, String> {
+    use voice::models::{find, is_downloaded, ModelKind};
+    let wake = find(ModelKind::Wake, "jarvis")
+        .map(is_downloaded)
+        .unwrap_or(false);
+    let moonshine = find(ModelKind::Moonshine, "base")
+        .map(is_downloaded)
+        .unwrap_or(false);
+    let vad = find(ModelKind::Vad, "silero")
+        .map(is_downloaded)
+        .unwrap_or(false);
+    let dictation = find(ModelKind::Whisper, "small.en-q5_1")
+        .map(is_downloaded)
+        .unwrap_or(false);
+
+    Ok(types::VoiceModelsStatus {
+        wake,
+        command: moonshine && vad,
+        dictation,
+    })
+}
+
+/// Trigger download of the model bundle for a given frontend `kind`
+/// (`"wake" | "command" | "dictation"`). Progress is streamed via
+/// `voice-download-progress` events emitted by `voice::models::ensure`.
+/// Concrete download behaviour lives in that module (owned by the
+/// model-runtime agent); this command dispatches to it and awaits.
+#[tauri::command]
+async fn download_voice_model(
+    app_handle: tauri::AppHandle,
+    kind: String,
+) -> Result<(), String> {
+    use voice::models::{ensure, ModelKind};
+
+    let targets: Vec<(ModelKind, &str)> = match kind.as_str() {
+        "wake" => vec![(ModelKind::Wake, "jarvis")],
+        // "command" = Moonshine STT + Silero VAD (both are required to
+        // classify a voice command).
+        "command" => vec![
+            (ModelKind::Moonshine, "base"),
+            (ModelKind::Vad, "silero"),
+        ],
+        "dictation" => vec![(ModelKind::Whisper, "small.en-q5_1")],
+        other => return Err(format!("unknown voice model kind: {}", other)),
+    };
+
+    for (mk, name) in targets {
+        ensure(&app_handle, mk, name).await?;
+    }
+    Ok(())
+}
+
 /// Install a specific bundled widget by name to ~/.terminal64/widgets/.
 /// In production: reads from the Tauri resource dir (packaged via tauri.conf.json).
 /// In dev: falls back to CARGO_MANIFEST_DIR so unpackaged runs still work.
@@ -3271,6 +3461,8 @@ pub fn run() {
                     safe_eprintln!("[setup] Widget server failed to start: {}", e);
                     Box::<dyn std::error::Error>::from(e)
                 })?;
+            let mic_mgr = MicManager::new();
+            let voice_mgr = VoiceManager::new(Arc::clone(&mic_mgr));
             app.manage(AppState {
                 pty_manager: PtyManager::new(),
                 claude_manager: Arc::new(ClaudeManager::new()),
@@ -3280,6 +3472,8 @@ pub fn run() {
                 browser_manager: BrowserManager::new(),
                 widget_server: widget_srv,
                 vector_store: Arc::new(Mutex::new(None)),
+                mic_manager: mic_mgr,
+                voice_manager: voice_mgr,
             });
 
             // Initialize the vector store in a background thread (model download may take time)
@@ -3298,6 +3492,18 @@ pub fn run() {
                             safe_eprintln!("[vector_store] Failed to initialize: {}", e);
                         }
                     }
+                });
+            }
+
+            // Voice self-test (Agent 4 §7): load each model once, run one
+            // inference, emit `voice-selftest` with per-stage ms + ok/err.
+            // Background thread so whisper's Metal shader compile doesn't
+            // block the window from appearing. Silent when all models are
+            // missing — models.rs::is_downloaded gates each adapter load.
+            {
+                let app_for_selftest = app.handle().clone();
+                std::thread::spawn(move || {
+                    let _ = voice::testkit::run_self_test(&app_for_selftest);
                 });
             }
 
@@ -3413,6 +3619,14 @@ pub fn run() {
             vector_index_session,
             vector_reindex_all,
             install_bundled_widget,
+            start_voice,
+            stop_voice,
+            voice_set_sensitivity,
+            voice_abort_dictation,
+            voice_models_status,
+            download_voice_model,
+            voice_run_selftest,
+            voice_run_fixtures,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

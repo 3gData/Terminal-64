@@ -280,7 +280,7 @@ export async function performMerge(groupId: string) {
         cwd: parentSession.cwd || ".",
         prompt: mergePrompt,
         permission_mode: group.parentPermissionMode || "auto",
-      });
+      }, parentSession.skipOpenwolf);
       mergeSucceeded = true;
     } catch (err) {
       console.warn("[delegation] Failed to merge to parent:", err);
