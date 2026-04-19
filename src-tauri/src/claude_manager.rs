@@ -115,6 +115,9 @@ pub fn shim_command(bin: &str) -> Command {
     }
 }
 
+// Claude CLI invocation needs every flag threaded through as a distinct argument; bundling
+// these would just introduce an internal struct that maps 1:1 to parameters, with no real gain.
+#[allow(clippy::too_many_arguments)]
 fn build_command(
     session_flag: &str,
     session_value: &str,
@@ -277,7 +280,7 @@ fn spawn_and_stream(
         let buf = stderr_buf.clone();
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 safe_eprintln!(
                     "[claude:stderr:{}] {}",
                     &sid_for_stderr[..8.min(sid_for_stderr.len())],
@@ -797,7 +800,7 @@ pub fn merge_openwolf_hooks(settings_path: &str, cwd: &str, design_qc: bool) -> 
     }) && hooks_map.iter().all(|(k, v)| {
         let has_ow = v
             .as_array()
-            .map(|arr| arr.iter().any(|e| is_openwolf_entry(e)))
+            .map(|arr| arr.iter().any(is_openwolf_entry))
             .unwrap_or(false);
         !has_ow || desired_grouped.contains_key(k.as_str())
     });
@@ -821,8 +824,9 @@ pub fn merge_openwolf_hooks(settings_path: &str, cwd: &str, design_qc: bool) -> 
         }
     }
 
-    std::fs::write(settings_path, serde_json::to_string(&settings).unwrap())
-        .map_err(|e| format!("write settings: {}", e))?;
+    let settings_json =
+        serde_json::to_string(&settings).map_err(|e| format!("serialize settings: {}", e))?;
+    std::fs::write(settings_path, settings_json).map_err(|e| format!("write settings: {}", e))?;
 
     safe_eprintln!("[openwolf] Merged hooks into {}", settings_path);
     Ok(())

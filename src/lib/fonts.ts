@@ -14,5 +14,5 @@ export const FONT_OPTIONS: { id: string; label: string; stack: string }[] = [
 ];
 
 export function fontStack(id: string): string {
-  return FONT_OPTIONS.find((f) => f.id === id)?.stack || FONT_OPTIONS[0].stack;
+  return FONT_OPTIONS.find((f) => f.id === id)?.stack || FONT_OPTIONS[0]!.stack;
 }

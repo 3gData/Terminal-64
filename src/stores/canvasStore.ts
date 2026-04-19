@@ -70,8 +70,9 @@ function findNonOverlappingPosition(
       { dist: Math.abs((r.y - SPAWN_GAP - h) - ny), dx: 0, dy: (r.y - SPAWN_GAP - h) - ny },
     ];
     options.sort((a, b) => a.dist - b.dist);
-    nx += options[0].dx;
-    ny += options[0].dy;
+    const best = options[0]!;
+    nx += best.dx;
+    ny += best.dy;
   }
 
   return { x: nx, y: ny };
@@ -146,8 +147,8 @@ function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
       cwd: t.cwd ?? "",
       panelType,
       claudeSkipPermissions: t.claudeSkipPermissions ?? false,
-      widgetId: t.widgetId,
-      browserUrl: t.browserUrl,
+      ...(t.widgetId !== undefined && { widgetId: t.widgetId }),
+      ...(t.browserUrl !== undefined && { browserUrl: t.browserUrl }),
     };
   });
 }
@@ -167,8 +168,6 @@ function makeTerminal(zIndex: number, overrides: Partial<CanvasTerminal> = {}): 
     cwd: "",
     panelType: "terminal",
     claudeSkipPermissions: false,
-    widgetId: undefined,
-    browserUrl: undefined,
     ...overrides,
   };
 }
@@ -235,7 +234,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
   /** Shared helper: position a new panel, add it to state, mark dirty. */
   function addPanel(
     overrides: Partial<CanvasTerminal>,
-    opts?: { x?: number; y?: number; width?: number; height?: number; setActive?: boolean },
+    opts?: { x?: number | undefined; y?: number | undefined; width?: number | undefined; height?: number | undefined; setActive?: boolean },
   ): CanvasTerminal {
     const state = get();
     const w = opts?.width || overrides.width || DEFAULT_TERMINAL_WIDTH;
@@ -343,8 +342,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           t.id === id
             ? {
                 ...t,
-                width: Math.max(MIN_TERMINAL_WIDTH, width),
-                height: Math.max(MIN_TERMINAL_HEIGHT, height),
+                width: Math.round(Math.max(MIN_TERMINAL_WIDTH, width)),
+                height: Math.round(Math.max(MIN_TERMINAL_HEIGHT, height)),
               }
             : t
         ),

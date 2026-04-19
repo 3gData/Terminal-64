@@ -20,6 +20,8 @@ import type {
   ProxyFetchResponse,
   SpectrumData,
   VectorSearchResult,
+  ChatMessage,
+  ToolCall,
 } from "./types";
 import { joinPath } from "./platform";
 
@@ -130,20 +132,23 @@ export async function loadSessionHistory(sessionId: string, cwd: string): Promis
 }
 
 /** Map Rust HistoryMessage[] (snake_case) to frontend ChatMessage format (camelCase) */
-export function mapHistoryMessages(history: HistoryMessage[]) {
-  return history.map((m) => ({
-    id: m.id,
-    role: m.role as "user" | "assistant",
-    content: m.content,
-    timestamp: m.timestamp,
-    toolCalls: m.tool_calls?.map((tc) => ({
+export function mapHistoryMessages(history: HistoryMessage[]): ChatMessage[] {
+  return history.map((m) => {
+    const toolCalls: ToolCall[] | undefined = m.tool_calls?.map((tc) => ({
       id: tc.id,
       name: tc.name,
       input: tc.input,
-      result: tc.result,
-      isError: tc.is_error,
-    })),
-  }));
+      ...(tc.result !== undefined && { result: tc.result }),
+      ...(tc.is_error !== undefined && { isError: tc.is_error }),
+    }));
+    return {
+      id: m.id,
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      timestamp: m.timestamp,
+      ...(toolCalls !== undefined && { toolCalls }),
+    };
+  });
 }
 
 export async function findRewindUuid(sessionId: string, cwd: string, keepMessages: number): Promise<string> {

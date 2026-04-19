@@ -13,6 +13,9 @@ impl BrowserManager {
         }
     }
 
+    // Native webview creation needs all bounds/URL fields as flat params; grouping would
+    // just relocate the Tauri IPC fan-out without making the call site clearer.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         app: &AppHandle,

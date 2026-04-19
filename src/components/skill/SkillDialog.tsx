@@ -78,11 +78,12 @@ const TAG_PALETTE = [
 function tagColor(tag: string): string {
   let hash = 0;
   for (let i = 0; i < tag.length; i++) hash = ((hash << 5) - hash + tag.charCodeAt(i)) | 0;
-  return TAG_PALETTE[Math.abs(hash) % TAG_PALETTE.length];
+  return TAG_PALETTE[Math.abs(hash) % TAG_PALETTE.length]!;
 }
 
 function primaryAccent(skill: SkillInfo): string {
-  if (skill.tags && skill.tags.length > 0) return tagColor(skill.tags[0]);
+  const firstTag = skill.tags?.[0];
+  if (firstTag) return tagColor(firstTag);
   return "#89dceb";
 }
 
@@ -163,6 +164,19 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
   const [detailSkill, setDetailSkill] = useState<SkillInfo | null>(null);
   const [detailContent, setDetailContent] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (detailSkill) { e.stopPropagation(); setDetailSkill(null); setDetailContent(null); return; }
+      if (showCreate) { e.stopPropagation(); setShowCreate(false); return; }
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isOpen, onClose, detailSkill, showCreate]);
 
   if (!isOpen) return null;
 

@@ -91,7 +91,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       mergeStrategy,
       status: "active",
       createdAt: Date.now(),
-      sharedContext,
+      ...(sharedContext !== undefined && { sharedContext }),
       collaborationEnabled: true,
       parentPermissionMode: (parentPermissionMode as DelegationGroup["parentPermissionMode"]) || "auto",
     };

@@ -250,6 +250,7 @@ pub struct VoiceModelsStatus {
     pub dictation: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceDownloadProgress {
     /// "wake" | "command" | "dictation"

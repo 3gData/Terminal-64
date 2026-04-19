@@ -20,7 +20,7 @@ const MAX_TOASTS = 5;
 
 export function pushToast(title: string, body?: string) {
   const id = Math.random().toString(36).slice(2);
-  const toast: Toast = { id, title, body, ts: Date.now() };
+  const toast: Toast = { id, title, ts: Date.now(), ...(body !== undefined && { body }) };
   toasts = [...toasts, toast];
   // Cap at MAX_TOASTS — remove oldest
   while (toasts.length > MAX_TOASTS) {

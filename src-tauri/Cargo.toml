@@ -56,6 +56,9 @@ whisper-rs = { version = "0.13", default-features = false, optional = true }
 default = ["voice-dictation"]
 # Enable whisper.cpp dictation (requires cmake at build time).
 voice-dictation = ["dep:whisper-rs"]
+# Experimental: grammar-constrained decoding for the command STT path. Off by default
+# because the grammar is still being tuned; referenced from voice/command_stt.rs.
+voice-command-grammar = []
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -37,6 +37,7 @@ impl ModelKind {
         }
     }
 
+    #[allow(dead_code)]
     pub fn all() -> &'static [ModelKind] {
         &[
             ModelKind::Wake,
@@ -63,10 +64,12 @@ pub struct ModelInfo {
     pub kind: ModelKind,
     pub name: &'static str,
     pub files: &'static [ModelFile],
+    #[allow(dead_code)]
     pub total_bytes: u64,
 }
 
 /// Public snapshot handed to the frontend (via orchestrator command).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelStatus {
     pub kind: ModelKind,
@@ -390,6 +393,7 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<bool, String> {
 }
 
 /// Convenience used by orchestrator's `voice_status` / `voice_list_models`.
+#[allow(dead_code)]
 pub fn status_all() -> Vec<ModelStatus> {
     registry()
         .iter()

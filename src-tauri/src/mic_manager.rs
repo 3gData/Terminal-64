@@ -39,17 +39,24 @@ pub struct MicManager {
     stream: Arc<Mutex<Option<Stream>>>,
 }
 
-// The cpal Stream is held inside the Mutex and never moved across threads
-// beyond the one-shot spawn in start(); AppHandle is Send.
+// SAFETY: cpal::Stream is !Send on some platforms, but MicManager keeps it behind a Mutex
+// and never lets the Stream leave the spawn thread in start(). AppHandle is Send.
+#[allow(unsafe_code)]
 unsafe impl Send for MicManager {}
+#[allow(unsafe_code)]
 unsafe impl Sync for MicManager {}
 
 impl MicManager {
     pub fn new() -> Arc<Self> {
+        // cpal::Stream is !Send/!Sync, which would normally fail Arc<Mutex<..>>'s trait bound.
+        // The unsafe Send/Sync impl above enforces the same invariant at the MicManager level
+        // (Stream never leaves the spawn thread), so we explicitly allow the lint here.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let stream = Arc::new(Mutex::new(None));
         Arc::new(Self {
             running: Arc::new(AtomicBool::new(false)),
             subscribers: Arc::new(Mutex::new(Vec::new())),
-            stream: Arc::new(Mutex::new(None)),
+            stream,
         })
     }
 
@@ -123,6 +130,7 @@ impl MicManager {
         safe_eprintln!("[mic] stopped");
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
@@ -164,9 +172,14 @@ impl Drop for MicManager {
 
 fn kind_for_error(msg: &str) -> &'static str {
     let m = msg.to_lowercase();
-    if m.contains("permission") || m.contains("denied") || m.contains("not authorized") {
-        "permission"
-    } else if m.contains("no default input") || m.contains("no device") {
+    // "no default input"/"no device" maps to "permission" because on macOS the OS surfaces
+    // a revoked mic entitlement as a missing-device error rather than an explicit denial.
+    if m.contains("permission")
+        || m.contains("denied")
+        || m.contains("not authorized")
+        || m.contains("no default input")
+        || m.contains("no device")
+    {
         "permission"
     } else {
         "runtime"

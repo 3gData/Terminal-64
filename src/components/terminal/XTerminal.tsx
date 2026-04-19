@@ -271,9 +271,9 @@ export default function XTerminal({
           term.write(payload.data);
           onActivity?.(terminalId);
           const psMatch = payload.data.match(/PS ([A-Z]:\\[^>]*?)>/);
-          if (psMatch) onCwdChange?.(terminalId, psMatch[1]);
+          if (psMatch && psMatch[1]) onCwdChange?.(terminalId, psMatch[1]);
           const oscMatch = payload.data.match(/\x1b\]7;file:\/\/[^/]*\/(.*?)(?:\x07|\x1b\\)/);
-          if (oscMatch) onCwdChange?.(terminalId, decodeURIComponent(oscMatch[1]));
+          if (oscMatch && oscMatch[1]) onCwdChange?.(terminalId, decodeURIComponent(oscMatch[1]));
         }
       });
 
@@ -290,7 +290,7 @@ export default function XTerminal({
         const cols = term.cols;
         const rows = term.rows;
         lastSizeRef.current = { cols, rows };
-        await createTerminal({ id: terminalId, cols, rows, cwd: cwd || undefined });
+        await createTerminal({ id: terminalId, cols, rows, ...(cwd ? { cwd } : {}) });
         await resizeTerminal(terminalId, cols, rows);
         // Auto-run command after shell starts (e.g. launching claude)
         if (autoCommand) {

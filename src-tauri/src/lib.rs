@@ -132,6 +132,9 @@ struct AppState {
     browser_manager: BrowserManager,
     widget_server: WidgetServer,
     vector_store: Arc<Mutex<Option<VectorStore>>>,
+    // Retained on AppState so its subscribers stay alive for the duration of the app,
+    // even though all mic access currently flows through VoiceManager.
+    #[allow(dead_code)]
     mic_manager: Arc<MicManager>,
     voice_manager: Arc<VoiceManager>,
 }
@@ -174,7 +177,9 @@ fn close_terminal(state: tauri::State<'_, AppState>, id: String) -> Result<(), S
 /// (widgets, skills). Guards against stale session state or frontend bugs where
 /// skipOpenwolf wasn't propagated.
 fn is_t64_managed_dir(cwd: &str) -> bool {
-    let Some(home) = dirs::home_dir() else { return false; };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
     let t64 = home.join(".terminal64");
     std::path::Path::new(cwd).starts_with(&t64)
 }
@@ -353,7 +358,7 @@ fn rewrite_prompt(
     std::thread::spawn(move || {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -460,7 +465,7 @@ Rules:
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 safe_eprintln!("[theme-gen:stderr] {}", line);
             }
         });
@@ -471,7 +476,7 @@ Rules:
         use std::io::BufRead;
         let reader = std::io::BufReader::new(stdout);
         let mut full_text = String::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -551,7 +556,7 @@ fn generate_rewind_summary(
         std::thread::spawn(move || {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 safe_eprintln!("[rewind-desc:stderr] {}", line);
             }
         });
@@ -561,7 +566,7 @@ fn generate_rewind_summary(
     std::thread::spawn(move || {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -2100,7 +2105,7 @@ fn openwolf_daemon_info() -> Result<OpenWolfDaemonInfo, String> {
                 == Some("online")
         })
         .or_else(|| procs.first())
-        .unwrap();
+        .ok_or_else(|| "no pm2 process entries".to_string())?;
 
     let env = target.get("pm2_env");
     let monit = target.get("monit");
@@ -2570,8 +2575,12 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
             }
         }
     }
-    let (widget_id, strip_prefix) = if top_dirs.len() == 1 {
-        let name = top_dirs.into_iter().next().unwrap();
+    let (widget_id, strip_prefix) = if let Some(name) = top_dirs
+        .iter()
+        .next()
+        .cloned()
+        .filter(|_| top_dirs.len() == 1)
+    {
         let id = name
             .to_lowercase()
             .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
@@ -2792,8 +2801,9 @@ fn create_skill_folder(skill_id: String) -> Result<String, String> {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
         });
-        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
-            .map_err(|e| format!("write: {}", e))?;
+        let meta_json = serde_json::to_string_pretty(&meta)
+            .map_err(|e| format!("serialize skill meta: {}", e))?;
+        std::fs::write(&meta_path, meta_json).map_err(|e| format!("write: {}", e))?;
     }
     Ok(dir.to_string_lossy().to_string())
 }
@@ -2877,8 +2887,9 @@ fn update_skill_meta(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0));
-    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
-        .map_err(|e| format!("write: {}", e))?;
+    let meta_json =
+        serde_json::to_string_pretty(&meta).map_err(|e| format!("serialize skill meta: {}", e))?;
+    std::fs::write(&meta_path, meta_json).map_err(|e| format!("write: {}", e))?;
     Ok(())
 }
 
@@ -2942,7 +2953,8 @@ fn resolve_skill_prompt(
     }
 
     let skill_md = skill_md_path.ok_or_else(|| format!("Skill '{}' not found", skill_name))?;
-    let skill_dir = skill_dir_path.unwrap();
+    let skill_dir =
+        skill_dir_path.ok_or_else(|| format!("Skill '{}' directory missing", skill_name))?;
     let content = std::fs::read_to_string(&skill_md)
         .map_err(|e| format!("read {}: {}", skill_md.display(), e))?;
 
@@ -3099,11 +3111,10 @@ fn ensure_skills_plugin() -> Result<(), String> {
             },
             "keywords": ["terminal-64", "skills"]
         });
-        std::fs::write(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .map_err(|e| format!("write manifest: {}", e))?;
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("serialize plugin manifest: {}", e))?;
+        std::fs::write(&manifest_path, manifest_json)
+            .map_err(|e| format!("write manifest: {}", e))?;
     }
 
     let symlink_target = plugin_dir.join("skills");
@@ -3144,11 +3155,10 @@ fn ensure_skills_plugin() -> Result<(), String> {
                     "lastUpdated": now
                 }]),
             );
-            std::fs::write(
-                &installed_path,
-                serde_json::to_string_pretty(&installed).unwrap(),
-            )
-            .map_err(|e| format!("write installed_plugins: {}", e))?;
+            let installed_json = serde_json::to_string_pretty(&installed)
+                .map_err(|e| format!("serialize installed_plugins: {}", e))?;
+            std::fs::write(&installed_path, installed_json)
+                .map_err(|e| format!("write installed_plugins: {}", e))?;
         }
     }
 
@@ -3165,11 +3175,10 @@ fn ensure_skills_plugin() -> Result<(), String> {
         if let Some(ep) = enabled.as_object_mut() {
             if !ep.contains_key(plugin_key) {
                 ep.insert(plugin_key.to_string(), serde_json::json!(true));
-                std::fs::write(
-                    &settings_path,
-                    serde_json::to_string_pretty(&settings).unwrap(),
-                )
-                .map_err(|e| format!("write settings: {}", e))?;
+                let settings_json = serde_json::to_string_pretty(&settings)
+                    .map_err(|e| format!("serialize settings: {}", e))?;
+                std::fs::write(&settings_path, settings_json)
+                    .map_err(|e| format!("write settings: {}", e))?;
             }
         }
     }
@@ -3677,6 +3686,8 @@ fn party_mode_status(state: tauri::State<'_, AppState>) -> Result<bool, String> 
 
 // ── Browser (native webview) commands ──
 
+// Tauri IPC requires flat argument lists, so this command takes x/y/w/h individually.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn create_browser(
     app_handle: tauri::AppHandle,
@@ -4161,10 +4172,15 @@ pub fn run() {
                     Arc::clone(&state.vector_store)
                 };
                 std::thread::spawn(move || match VectorStore::initialize() {
-                    Ok(store) => {
-                        *vs_arc.lock().unwrap() = Some(store);
-                        safe_eprintln!("[vector_store] Initialized successfully");
-                    }
+                    Ok(store) => match vs_arc.lock() {
+                        Ok(mut slot) => {
+                            *slot = Some(store);
+                            safe_eprintln!("[vector_store] Initialized successfully");
+                        }
+                        Err(e) => {
+                            safe_eprintln!("[vector_store] Failed to acquire lock: {}", e);
+                        }
+                    },
                     Err(e) => {
                         safe_eprintln!("[vector_store] Failed to initialize: {}", e);
                     }
@@ -4189,6 +4205,10 @@ pub fn run() {
             {
                 use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {
+                    // SAFETY: wv.inner() returns the WKWebView NSObject pointer owned by Tauri;
+                    // setAllowsMagnification: accepts BOOL and has no thread requirements beyond
+                    // being on the main thread (which the setup hook already runs on).
+                    #[allow(unsafe_code)]
                     let _ = window.with_webview(|wv| unsafe {
                         let inner = wv.inner() as *mut objc2::runtime::AnyObject;
                         let _: () = objc2::msg_send![&*inner, setAllowsMagnification: false];
@@ -4303,5 +4323,8 @@ pub fn run() {
             voice_run_fixtures,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|e| {
+            safe_eprintln!("[fatal] tauri runtime error: {}", e);
+            std::process::exit(1);
+        });
 }

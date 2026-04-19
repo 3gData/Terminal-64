@@ -70,8 +70,10 @@ impl WhisperRunner {
     pub fn load(model_path: &Path) -> Result<Self, String> {
         #[cfg(feature = "voice-dictation")]
         {
-            let mut params = WhisperContextParameters::default();
-            params.use_gpu = true;
+            let params = WhisperContextParameters {
+                use_gpu: true,
+                ..WhisperContextParameters::default()
+            };
             let ctx = WhisperContext::new_with_params(&model_path.to_string_lossy(), params)
                 .map_err(|e| format!("whisper load: {e}"))?;
             safe_eprintln!("[voice/whisper] loaded {} (metal)", model_path.display());
@@ -408,6 +410,7 @@ impl AgreementBuffer {
 
     /// Drain the committed prefix (used by `flush()` on short audio where
     /// no final decode runs). Resets internal state.
+    #[allow(dead_code)]
     pub fn take_committed(&mut self) -> String {
         let out = self.committed_words.join(" ");
         self.reset();

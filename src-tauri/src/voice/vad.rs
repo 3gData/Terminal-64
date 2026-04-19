@@ -101,6 +101,7 @@ impl VadDetector {
         self.last_confidence = 0.0;
     }
 
+    #[allow(dead_code)]
     pub fn last_confidence(&self) -> f32 {
         self.last_confidence
     }

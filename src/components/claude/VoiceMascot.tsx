@@ -86,8 +86,8 @@ function pickFrameSet(state: string, enabled: boolean, err: string | null | unde
   { frames: string[]; interval: number } {
   if (err && !isSoftError(err)) return { frames: HARD_ERROR_FRAMES, interval: 400 };
   if (err && isSoftError(err)) return { frames: SOFT_ERROR_FRAMES, interval: 320 };
-  if (!enabled) return FRAMES.off;
-  return FRAMES[state] ?? FRAMES.idle;
+  if (!enabled) return FRAMES.off!;
+  return FRAMES[state] ?? FRAMES.idle!;
 }
 
 export default function VoiceMascot() {

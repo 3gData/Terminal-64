@@ -61,8 +61,10 @@ impl CommandSttRunner {
     pub fn load(model_path: &Path) -> Result<Self, String> {
         #[cfg(feature = "voice-dictation")]
         {
-            let mut params = WhisperContextParameters::default();
-            params.use_gpu = true;
+            let params = WhisperContextParameters {
+                use_gpu: true,
+                ..WhisperContextParameters::default()
+            };
             let ctx = WhisperContext::new_with_params(&model_path.to_string_lossy(), params)
                 .map_err(|e| format!("command STT load: {e}"))?;
             safe_eprintln!(

@@ -21,9 +21,6 @@ pub struct AudioManager {
     active: Arc<AtomicBool>,
 }
 
-unsafe impl Send for AudioManager {}
-unsafe impl Sync for AudioManager {}
-
 impl AudioManager {
     pub fn new() -> Self {
         Self {
@@ -114,7 +111,9 @@ fn run_capture(active: Arc<AtomicBool>, app: AppHandle) -> Result<(), String> {
             if let Some(audio_buffers) = sample.audio_buffer_list() {
                 for buffer in &audio_buffers {
                     let raw_bytes = buffer.data();
-                    // SCKit delivers audio as 32-bit float PCM
+                    // SAFETY: SCKit delivers audio as 32-bit float PCM; the buffer lives for the
+                    // duration of this closure, and we only read from it.
+                    #[allow(unsafe_code)]
                     let samples: &[f32] = unsafe {
                         std::slice::from_raw_parts(
                             raw_bytes.as_ptr() as *const f32,

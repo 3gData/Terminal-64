@@ -57,9 +57,11 @@ export function useDelegationOrchestrator() {
             for (const msg of newMsgs) {
               if (msg.role === "assistant" && msg.toolCalls?.length) {
                 const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
-                const detail = lastTc.input?.file_path || lastTc.input?.command || lastTc.input?.pattern || "";
-                const action = `${lastTc.name}${detail ? ` ${String(detail).split(/[/\\]/).pop()?.slice(0, 40)}` : ""}`;
-                delStore.setTaskAction(group.id, task.id, action);
+                if (lastTc) {
+                  const detail = lastTc.input?.file_path || lastTc.input?.command || lastTc.input?.pattern || "";
+                  const action = `${lastTc.name}${detail ? ` ${String(detail).split(/[/\\]/).pop()?.slice(0, 40)}` : ""}`;
+                  delStore.setTaskAction(group.id, task.id, action);
+                }
               }
             }
           }
@@ -212,7 +214,7 @@ function scheduleIdleCompletion(sessionId: string, groupId: string, taskId: stri
 function extractReportDone(msgs: ChatMessage[]): string | null {
   for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 5); i--) {
     const msg = msgs[i];
-    if (msg.role === "assistant" && msg.toolCalls) {
+    if (msg && msg.role === "assistant" && msg.toolCalls) {
       for (const tc of msg.toolCalls) {
         if ((tc.name === "report_done" || tc.name.endsWith("__report_done")) && tc.input?.summary) {
           return String(tc.input.summary);

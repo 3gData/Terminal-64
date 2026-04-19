@@ -122,6 +122,7 @@ impl WakeDetector {
         self.threshold = t.clamp(0.0, 1.0);
     }
 
+    #[allow(dead_code)]
     pub fn threshold(&self) -> f32 {
         self.threshold
     }

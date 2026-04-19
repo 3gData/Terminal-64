@@ -372,7 +372,13 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
-      const msg: ChatMessage = { id: uuidv4(), role: "assistant", content: text, timestamp: Date.now(), toolCalls };
+      const msg: ChatMessage = {
+        id: uuidv4(),
+        role: "assistant",
+        content: text,
+        timestamp: Date.now(),
+        ...(toolCalls !== undefined && { toolCalls }),
+      };
       const updated = updateSession(s.sessions, sessionId, { messages: [...session.messages, msg], streamingText: "" });
       saveToStorage(updated); // immediate save — finalized messages must never be lost
       return { sessions: updated };
@@ -389,12 +395,13 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       const msgs = session.messages;
       for (let i = msgs.length - 1; i >= 0; i--) {
         const msg = msgs[i];
-        if (msg.role === "assistant" && msg.toolCalls) {
+        if (msg && msg.role === "assistant" && msg.toolCalls) {
           const tcIdx = msg.toolCalls.findIndex((t) => t.id === toolUseId);
           if (tcIdx >= 0) {
             // Only copy the one message that changed instead of the full array
             const updatedToolCalls = msg.toolCalls.slice();
-            updatedToolCalls[tcIdx] = { ...updatedToolCalls[tcIdx], result, isError };
+            const existing = updatedToolCalls[tcIdx]!;
+            updatedToolCalls[tcIdx] = { ...existing, result, isError };
             const messages = msgs.slice();
             messages[i] = { ...msg, toolCalls: updatedToolCalls };
             const updated = updateSession(s.sessions, sessionId, { messages });

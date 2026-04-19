@@ -92,7 +92,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
   const wolfCwd = useClaudeStore((s) => {
     for (const sid in s.sessions) {
-      if (s.sessions[sid].cwd) return s.sessions[sid].cwd;
+      const sess = s.sessions[sid];
+      if (sess?.cwd) return sess.cwd;
     }
     return "";
   });
@@ -166,6 +167,15 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     { kind: "dictation", label: "Dictation (whisper.cpp)", sizeMB: 80 },
   ];
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.stopPropagation(); onClose(); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const opacityPercent = Math.round(bgAlpha * 100);
@@ -187,7 +197,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           // Extract JSON from response (may have markdown fences)
           let json = payload.text.trim();
           const fenceMatch = json.match(/```(?:json)?\s*([\s\S]*?)```/);
-          if (fenceMatch) json = fenceMatch[1].trim();
+          if (fenceMatch && fenceMatch[1]) json = fenceMatch[1].trim();
           const theme = JSON.parse(json) as ThemeDefinition;
           const requiredUi = ["bg","bgSecondary","bgTertiary","fg","fgSecondary","fgMuted","border","accent","accentHover","tabActiveBg","tabInactiveBg","tabActiveFg","tabInactiveFg","tabHoverBg","scrollbar","scrollbarHover"] as const;
           if (theme.name && theme.ui && theme.terminal && requiredUi.every((k) => theme.ui[k])) {

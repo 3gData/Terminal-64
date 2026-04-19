@@ -27,7 +27,7 @@ const NUM_BARS = 48;
 function smoothBands(raw: number[]): number[] {
   const arr = raw.slice();
   for (let i = 1; i < arr.length - 1; i++) {
-    arr[i] = raw[i] * 0.6 + raw[i - 1] * 0.2 + raw[i + 1] * 0.2;
+    arr[i] = raw[i]! * 0.6 + raw[i - 1]! * 0.2 + raw[i + 1]! * 0.2;
   }
   return arr;
 }
@@ -95,30 +95,31 @@ function Equalizer() {
 
       for (let i = 0; i < len; i++) {
         const el = bars[i] as HTMLElement;
-        let target = smoothed[i] * 100;
+        let target = smoothed[i]! * 100;
 
         // Gentle idle breathing so bars are never fully flat
         const idle = Math.sin(frame * 0.025 + i * 0.2) * 1.2 + 1.5;
         target = Math.max(target, idle);
 
         // Height spring — snappy attack, smooth fall
-        const hs = heightSprings[i];
+        const hs = heightSprings[i]!;
         hs.vel += (target - hs.pos) * 0.35;
         hs.vel *= 0.7;
         hs.pos += hs.vel;
         const h = Math.max(1, hs.pos);
 
         // Gentle tilt: lean toward taller neighbor
-        const leftVal = smoothed[Math.max(0, i - 1)];
-        const rightVal = smoothed[Math.min(len - 1, i + 1)];
+        const leftVal = smoothed[Math.max(0, i - 1)]!;
+        const rightVal = smoothed[Math.min(len - 1, i + 1)]!;
         const lean = (rightVal - leftVal) * 1.5;
-        tiltSprings[i].vel += lean;
-        tickSpring(tiltSprings[i], 0.2, 0.88);
+        const tilt = tiltSprings[i]!;
+        tilt.vel += lean;
+        tickSpring(tilt, 0.2, 0.88);
 
         // Color
-        const flashMix = beatFlash * Math.max(0.3, smoothed[i]);
+        const flashMix = beatFlash * Math.max(0.3, smoothed[i]!);
         const glowIntensity = Math.max(0, (h - 35) / 65) + flashMix * 0.4;
-        const transform = rotation ? `transform:rotate(${tiltSprings[i].pos.toFixed(1)}deg);` : "";
+        const transform = rotation ? `transform:rotate(${tilt.pos.toFixed(1)}deg);` : "";
 
         let barBg: string;
         let glowColor: string;
@@ -153,16 +154,16 @@ function Equalizer() {
         el.style.cssText = `height:${h.toFixed(1)}%;${transform}background:${barBg};${glow}`;
 
         // Peak cap
-        if (h > peakPos[i]) {
+        if (h > peakPos[i]!) {
           peakPos[i] = h;
           peakVel[i] = 0;
           peakHold[i] = 15;
-        } else if (peakHold[i] > 0) {
-          peakHold[i]--;
+        } else if (peakHold[i]! > 0) {
+          peakHold[i]!--;
         } else {
-          peakVel[i] += 0.15;
-          peakPos[i] -= peakVel[i];
-          if (peakPos[i] < h) {
+          peakVel[i]! += 0.15;
+          peakPos[i]! -= peakVel[i]!;
+          if (peakPos[i]! < h) {
             peakPos[i] = h;
             peakVel[i] = 0;
           }
@@ -170,9 +171,9 @@ function Equalizer() {
 
         const cap = el.firstElementChild as HTMLElement | null;
         if (cap) {
-          const capOffset = peakPos[i] - h;
-          const capVis = peakPos[i] > 3;
-          cap.style.cssText = `bottom:${capOffset.toFixed(1)}%;background:${capColor};opacity:${capVis ? "0.9" : "0"};${capVis && peakPos[i] > 20 ? `box-shadow:0 0 4px ${capColor};` : ""}`;
+          const capOffset = peakPos[i]! - h;
+          const capVis = peakPos[i]! > 3;
+          cap.style.cssText = `bottom:${capOffset.toFixed(1)}%;background:${capColor};opacity:${capVis ? "0.9" : "0"};${capVis && peakPos[i]! > 20 ? `box-shadow:0 0 4px ${capColor};` : ""}`;
         }
       }
 

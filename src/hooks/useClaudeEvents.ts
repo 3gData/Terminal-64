@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onClaudeEvent, onClaudeDone, cancelClaude, sendClaudePrompt } from "../lib/tauriApi";
-import { useClaudeStore, type ClaudeTask } from "../stores/claudeStore";
+import { useClaudeStore, type ClaudeTask, type PendingQuestionItem } from "../stores/claudeStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import type { ToolCall, HookEventPayload, HookEvent, HookEventType } from "../lib/types";
 
@@ -222,11 +222,16 @@ function processContentArray(
           else questions = [{ question: (input.description as string) || (input.text as string) || "Claude has a question", options: [] }];
         }
 
-        const items = questions.map((q) => ({
+        const items: PendingQuestionItem[] = questions.map((q) => ({
           question: q.question || q.text || q.description || "Question",
-          header: q.header,
+          ...(q.header !== undefined && { header: q.header }),
           options: (q.options || []).map((o) =>
-            typeof o === "string" ? { label: o } : { label: o.label || String(o), description: o.description }
+            typeof o === "string"
+              ? { label: o }
+              : {
+                  label: o.label || String(o),
+                  ...(o.description !== undefined && { description: o.description }),
+                }
           ),
           multiSelect: q.multiSelect || false,
         }));
@@ -242,12 +247,13 @@ function processContentArray(
           store.setStreaming(session_id, false);
         }
       } else if (name === "TaskCreate") {
-        store.addTask(session_id, {
+        const task: ClaudeTask = {
           id: blockId,
           subject: String(input.subject || input.title || "Task"),
-          description: input.description ? String(input.description) : undefined,
           status: "pending",
-        });
+          ...(input.description ? { description: String(input.description) } : {}),
+        };
+        store.addTask(session_id, task);
       } else if (name === "TaskUpdate") {
         if (input.taskId) {
           store.updateTask(session_id, String(input.taskId), {
@@ -258,7 +264,12 @@ function processContentArray(
       }
 
       if (!HIDDEN_TOOLS.has(name)) {
-        toolCalls.push({ id: blockId, name, input, parentToolUseId: block.parentToolUseId });
+        toolCalls.push({
+          id: blockId,
+          name,
+          input,
+          ...(block.parentToolUseId !== undefined && { parentToolUseId: block.parentToolUseId }),
+        });
       }
     }
   }
@@ -386,7 +397,13 @@ export function useClaudeEvents() {
           const cb = parsed.content_block;
           if (cb?.type === "tool_use" && cb.id && cb.name) {
             const blocks = pendingBlocks.get(session_id) || [];
-            blocks.push({ id: cb.id, type: "tool_use", name: cb.name, inputJson: "", parentToolUseId: streamParentToolUseId });
+            blocks.push({
+              id: cb.id,
+              type: "tool_use",
+              name: cb.name,
+              inputJson: "",
+              ...(streamParentToolUseId !== undefined && { parentToolUseId: streamParentToolUseId }),
+            });
             pendingBlocks.set(session_id, blocks);
           }
           // Other block types (text, thinking) don't need tracking here — text deltas
@@ -407,8 +424,9 @@ export function useClaudeEvents() {
             // Only accumulate onto a tool_use block. If the most recent content block
             // was thinking/text (not tracked here), this delta is unrelated to any
             // pending tool_use and must be ignored.
-            if (blocks && blocks.length > 0 && blocks[blocks.length - 1].type === "tool_use") {
-              blocks[blocks.length - 1].inputJson += d.partial_json;
+            const last = blocks && blocks.length > 0 ? blocks[blocks.length - 1] : undefined;
+            if (last && last.type === "tool_use") {
+              last.inputJson += d.partial_json;
             }
           }
           // thinking_delta / signature_delta are intentionally dropped — no UI yet
@@ -474,7 +492,13 @@ export function useClaudeEvents() {
                   if (b.type === "tool_use") {
                     let input = {};
                     try { input = JSON.parse(b.inputJson || "{}"); } catch { /* partial JSON */ }
-                    content.push({ type: "tool_use", id: b.id, name: b.name, input, parentToolUseId: b.parentToolUseId });
+                    content.push({
+                      type: "tool_use",
+                      id: b.id,
+                      input,
+                      ...(b.name !== undefined && { name: b.name }),
+                      ...(b.parentToolUseId !== undefined && { parentToolUseId: b.parentToolUseId }),
+                    });
                   }
                 }
               }
@@ -517,12 +541,13 @@ export function useClaudeEvents() {
                 if (toolName === "TaskCreate" && block.content) {
                   const resultStr = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
                   const match = resultStr.match(/#(\d+)/);
-                  if (match) {
+                  const newId = match?.[1];
+                  if (newId) {
                     const s = useClaudeStore.getState();
                     const session = s.sessions[session_id];
                     if (session) {
                       const newTasks = session.tasks.map((t) =>
-                        t.id === toolId ? { ...t, id: match![1] } : t
+                        t.id === toolId ? { ...t, id: newId } : t
                       );
                       useClaudeStore.setState({
                         sessions: { ...s.sessions, [session_id]: { ...session, tasks: newTasks } },
@@ -694,12 +719,12 @@ export function useClaudeEvents() {
               type: hookType,
               sessionId: p.session_id,
               timestamp: Date.now(),
-              toolName: p.tool_name,
-              toolInput: p.tool_input,
-              toolResult: p.tool_result,
-              subagentId: p.subagent_id,
-              message: p.message,
-              reason: p.reason,
+              ...(p.tool_name !== undefined && { toolName: p.tool_name }),
+              ...(p.tool_input !== undefined && { toolInput: p.tool_input }),
+              ...(p.tool_result !== undefined && { toolResult: p.tool_result }),
+              ...(p.subagent_id !== undefined && { subagentId: p.subagent_id }),
+              ...(p.message !== undefined && { message: p.message }),
+              ...(p.reason !== undefined && { reason: p.reason }),
             };
             store.addHookEvent(p.session_id, hookEvent);
 

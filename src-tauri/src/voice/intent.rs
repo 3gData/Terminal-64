@@ -156,6 +156,7 @@ fn stem_match(token: &str, candidate: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

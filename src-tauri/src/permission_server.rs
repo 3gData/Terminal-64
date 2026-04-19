@@ -72,12 +72,14 @@ pub struct DelegationMessage {
     pub msg_type: String, // "chat" | "complete"
 }
 
+type PendingMap = Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>;
+
 pub struct PermissionServer {
     port: AtomicU16,
     secret: String,
     alive: Arc<AtomicBool>,
     app_handle: AppHandle,
-    pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>,
+    pending: PendingMap,
     pub(crate) session_map: Arc<Mutex<HashMap<String, String>>>,
     settings_files: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub(crate) delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>,
@@ -87,8 +89,7 @@ impl PermissionServer {
     pub fn start(app_handle: AppHandle) -> Result<Self, String> {
         let secret = random_token();
         let alive = Arc::new(AtomicBool::new(false));
-        let pending: Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let session_map: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -319,7 +320,7 @@ impl PermissionServer {
 fn handle_connection(
     mut stream: TcpStream,
     secret: &str,
-    pending: &Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>,
+    pending: &PendingMap,
     sessions: &Arc<Mutex<HashMap<String, String>>>,
     app_handle: &AppHandle,
     delegation_messages: &Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>,
