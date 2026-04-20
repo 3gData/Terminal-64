@@ -1,12 +1,20 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnClaudeWithPrompt } from "../../lib/tauriApi";
+import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnClaudeWithPrompt, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { pushToast } from "../../lib/notifications";
 import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
 import type { WidgetInfo } from "../../lib/types";
+import {
+  validateManifest,
+  requiresReconsent,
+  permissionNames,
+  labelForPermission,
+  type PluginManifest,
+  type ApprovalRecord,
+} from "../../lib/pluginManifest";
 import "./Widget.css";
 
 const WIDGET_SYSTEM_PROMPT = `You are building a widget for Terminal 64, a canvas-based terminal emulator.
@@ -243,12 +251,20 @@ interface WidgetDialogProps {
   onClose: () => void;
 }
 
+interface ConsentTarget {
+  widgetId: string;
+  manifest: PluginManifest;
+  manifestHash: string;
+}
+
 export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
   const [widgets, setWidgets] = useState<WidgetInfo[]>([]);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [consent, setConsent] = useState<ConsentTarget | null>(null);
+  const [approving, setApproving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const openwolfEnabled = useSettingsStore((s) => s.openwolfEnabled);
@@ -347,17 +363,81 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
     }
   };
 
-  const handleOpen = (widget: WidgetInfo) => {
+  const openWidgetOnCanvas = (widgetId: string) => {
     const existing = useCanvasStore.getState().terminals.find(
-      (t) => t.panelType === "widget" && t.widgetId === widget.widget_id,
+      (t) => t.panelType === "widget" && t.widgetId === widgetId,
     );
     if (existing) {
       useCanvasStore.getState().bringToFront(existing.id);
       onClose();
       return;
     }
-    useCanvasStore.getState().addWidgetTerminal(widget.widget_id);
+    useCanvasStore.getState().addWidgetTerminal(widgetId);
     onClose();
+  };
+
+  /**
+   * Open flow with manifest-aware consent:
+   *   1. No `widget.json`    → legacy web widget, open immediately.
+   *   2. Manifest kind=web   → no subprocess, no consent needed.
+   *   3. Manifest kind=plugin|hybrid + prior approval covers the current
+   *      permission set → auto-approve silently.
+   *   4. Otherwise           → show the Review Permissions modal.
+   */
+  const handleOpen = async (widget: WidgetInfo) => {
+    const id = widget.widget_id;
+    try {
+      const envelope = await readWidgetManifest(id);
+      if (!envelope) {
+        openWidgetOnCanvas(id);
+        return;
+      }
+      const result = validateManifest(envelope.raw);
+      if (!result.ok) {
+        pushToast("Widget manifest invalid", result.errors.join("; "));
+        return;
+      }
+      const manifest = result.manifest;
+      if (manifest.kind === "web") {
+        openWidgetOnCanvas(id);
+        return;
+      }
+      const prior = (await readWidgetApproval(id).catch(() => null)) as
+        | ApprovalRecord
+        | null;
+      if (!requiresReconsent(manifest, prior)) {
+        openWidgetOnCanvas(id);
+        return;
+      }
+      setConsent({ widgetId: id, manifest, manifestHash: envelope.hash });
+    } catch (err) {
+      pushToast("Failed to read widget manifest", String(err));
+    }
+  };
+
+  const handleApproveConsent = async () => {
+    if (!consent) return;
+    setApproving(true);
+    try {
+      const record: ApprovalRecord = {
+        manifestHash: consent.manifestHash,
+        approvedAt: new Date().toISOString(),
+        permissionNames: permissionNames(consent.manifest),
+        apiVersion: consent.manifest.apiVersion,
+      };
+      await writeWidgetApproval(consent.widgetId, JSON.stringify(record, null, 2));
+      const id = consent.widgetId;
+      setConsent(null);
+      openWidgetOnCanvas(id);
+    } catch (err) {
+      pushToast("Failed to save approval", String(err));
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const handleDenyConsent = () => {
+    setConsent(null);
   };
 
   const handleDelete = async (e: React.MouseEvent, widget: WidgetInfo) => {
@@ -376,6 +456,67 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
       console.warn("[widget] Failed to delete:", err);
     }
   };
+
+  if (consent) {
+    return (
+      <div className="wdg-dialog-overlay" onClick={handleDenyConsent}>
+        <div className="wdg-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="wdg-dialog-header">
+            <span className="wdg-dialog-title">Review Permissions</span>
+            <button className="wdg-dialog-close" onClick={handleDenyConsent}>
+              <svg width="10" height="10" viewBox="0 0 10 10">
+                <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+          <div className="wdg-dialog-body">
+            <div className="wdg-consent-intro">
+              <div className="wdg-consent-title">
+                <strong>{consent.manifest.name}</strong>
+                <span className="wdg-consent-version">v{consent.manifest.version}</span>
+              </div>
+              <div className="wdg-consent-subtitle">
+                This {consent.manifest.kind === "hybrid" ? "hybrid plugin" : "plugin"} is
+                requesting the following permissions:
+              </div>
+            </div>
+            {consent.manifest.permissions.length === 0 ? (
+              <div className="wdg-empty">
+                No host permissions requested — this plugin runs sandboxed.
+              </div>
+            ) : (
+              <ul className="wdg-consent-list">
+                {consent.manifest.permissions.map((p) => (
+                  <li key={p.name} className="wdg-consent-item">
+                    <div className="wdg-consent-item-head">
+                      <span className="wdg-consent-item-label">{labelForPermission(p.name)}</span>
+                      <code className="wdg-consent-item-name">{p.name}</code>
+                    </div>
+                    <div className="wdg-consent-item-reason">{p.reason}</div>
+                    {p.scopes && p.scopes.length > 0 && (
+                      <div className="wdg-consent-item-scopes">
+                        Scopes: {p.scopes.join(", ")}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="wdg-form-actions wdg-consent-actions">
+              <button className="wdg-btn wdg-btn--cancel" onClick={handleDenyConsent}>Deny</button>
+              <button
+                className="wdg-btn wdg-btn--create"
+                onClick={handleApproveConsent}
+                disabled={approving}
+              >
+                {approving ? "Approving..." : "Approve"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="wdg-dialog-overlay" onClick={onClose}>

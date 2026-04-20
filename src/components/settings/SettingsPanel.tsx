@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { useThemeStore } from "../../stores/themeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { startDiscordBot, stopDiscordBot, discordBotStatus, generateTheme, onThemeGenChunk, onThemeGenDone, startOpenwolfDaemon, stopOpenwolfDaemon, openwolfDaemonStatus } from "../../lib/tauriApi";
+import { startDiscordBot, stopDiscordBot, discordBotStatus, renameDiscordSession, discordCleanupOrphaned, generateTheme, onThemeGenChunk, onThemeGenDone, startOpenwolfDaemon, stopOpenwolfDaemon, openwolfDaemonStatus } from "../../lib/tauriApi";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsPanel.css";
 
 import { FONT_OPTIONS, fontStack } from "../../lib/fonts";
 import type { ThemeDefinition } from "../../lib/types";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { useCanvasStore } from "../../stores/canvasStore";
+import { useClaudeStore, STORAGE_KEY as CLAUDE_STORAGE_KEY } from "../../stores/claudeStore";
 import { useVoiceStore } from "../../stores/voiceStore";
 import { downloadVoiceModel, voiceModelsStatus, onVoiceDownloadProgress, setVoiceSensitivity as setVoiceSensitivityBackend, type VoiceModelKind } from "../../lib/voiceApi";
 
@@ -105,6 +106,8 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const voiceModels = useVoiceStore((s) => s.modelsDownloaded);
   const setVoiceEnabled = useVoiceStore((s) => s.setEnabled);
   const setVoiceModelsDownloaded = useVoiceStore((s) => s.setModelsDownloaded);
+  const voiceWakeWord = useVoiceStore((s) => s.wakeWord);
+  const setVoiceWakeWord = useVoiceStore((s) => s.setWakeWord);
   const [voiceProgress, setVoiceProgress] = useState<Record<VoiceModelKind, number>>({ wake: 0, command: 0, dictation: 0 });
   const [voiceDownloading, setVoiceDownloading] = useState<Record<VoiceModelKind, boolean>>({ wake: false, command: false, dictation: false });
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
@@ -594,6 +597,23 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 </div>
 
                 <div className="sp-row sp-row--col">
+                  <label className="sp-label">Wake Word</label>
+                  <select
+                    className="sp-select"
+                    value={voiceWakeWord}
+                    onChange={(e) => setVoiceWakeWord(e.target.value as "jarvis" | "t64")}
+                  >
+                    <option value="jarvis">Hey Jarvis (stock)</option>
+                    <option value="t64">T Six Four (custom, requires training)</option>
+                  </select>
+                  <span className="sp-hint">
+                    {voiceWakeWord === "t64"
+                      ? "Drop t_six_four.onnx into ~/.terminal64/stt-models/wake/t64/ — see docs/wake-training.md. Falls back to Jarvis if missing."
+                      : "Built-in openWakeWord model."}
+                  </span>
+                </div>
+
+                <div className="sp-row sp-row--col">
                   <div className="sp-row">
                     <label className="sp-label">Wake Sensitivity</label>
                     <span className="sp-value">{Math.round(voiceSensitivity * 100)}%</span>
@@ -702,6 +722,41 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                   } else {
                     await startDiscordBot(discordToken, discordServerId);
                     setBotConnected(true);
+                    // Wait for gateway to be ready, then link all open Claude panels
+                    await new Promise((r) => setTimeout(r, 2000));
+                    const terminals = useCanvasStore.getState().terminals;
+                    // Canvas `t.title` is a stale snapshot; read the live name from claudeStore.
+                    let claudeSaved: Record<string, { name?: string; cwd?: string }> = {};
+                    try {
+                      const raw = localStorage.getItem(CLAUDE_STORAGE_KEY);
+                      if (raw) claudeSaved = JSON.parse(raw);
+                    } catch (err) {
+                      console.warn("[discord] Failed to read claude store:", err);
+                    }
+                    const claudeSessions = useClaudeStore.getState().sessions;
+                    for (const t of terminals) {
+                      if (t.panelType !== "claude") continue;
+                      const liveName = claudeSessions[t.terminalId]?.name;
+                      const savedName = claudeSaved[t.terminalId]?.name;
+                      const name = (liveName || savedName || "").trim();
+                      if (!name) continue;
+                      const cwd = claudeSessions[t.terminalId]?.cwd
+                        || claudeSaved[t.terminalId]?.cwd
+                        || t.cwd
+                        || "";
+                      try {
+                        await renameDiscordSession(t.terminalId, name, cwd);
+                      } catch (err) {
+                        console.warn("[discord] Failed to rename/link session:", t.terminalId, err);
+                        await new Promise((r) => setTimeout(r, 1500));
+                        await renameDiscordSession(t.terminalId, name, cwd).catch(() => {});
+                      }
+                      await new Promise((r) => setTimeout(r, 500));
+                    }
+                    const activeIds = useCanvasStore.getState().terminals
+                      .filter((x) => x.panelType === "claude")
+                      .map((x) => x.terminalId);
+                    discordCleanupOrphaned(activeIds).catch(() => {});
                   }
                 } catch (err) {
                   alert(String(err));

@@ -211,6 +211,19 @@ impl WhisperRunner {
             let _ = h.join();
         }
     }
+
+    /// One-shot transcribe of a pre-loaded 16 kHz mono f32 buffer. Does not
+    /// touch the streaming state (rolling buffer, worker thread, agreement
+    /// prefix). Used by the Discord voice-note pipeline to feed an entire
+    /// OGG-Opus attachment through whisper in a single pass.
+    #[cfg(feature = "voice-dictation")]
+    pub fn transcribe_oneshot(&self, audio: &[f32]) -> Result<String, String> {
+        transcribe(&self.ctx, audio)
+    }
+    #[cfg(not(feature = "voice-dictation"))]
+    pub fn transcribe_oneshot(&self, _audio: &[f32]) -> Result<String, String> {
+        Err("whisper feature not enabled at build time".to_string())
+    }
 }
 
 impl Drop for WhisperRunner {
@@ -506,10 +519,14 @@ fn transcribe(ctx: &WhisperContext, audio: &[f32]) -> Result<String, String> {
     params.set_no_speech_thold(0.8);
     params.set_logprob_thold(-0.6);
     params.set_entropy_thold(2.0);
-    // Prime whisper so "Jarvis" is recognized as a proper name rather
-    // than a random word needing commas around it. Short prompt only —
-    // long prompts can bias the output.
-    params.set_initial_prompt("Jarvis is the assistant's name.");
+    // Vocabulary bias for the whole product surface: the wake word,
+    // the assistant, the app, and the platforms it commonly talks
+    // about. Whisper's small.en model mis-hears "Claude" as "clod",
+    // "Roblox" as "roadblocks", and garbles "T64" into numerics
+    // without this nudge. Keep it short — long prompts drift style.
+    params.set_initial_prompt(
+        "Jarvis, Claude, Terminal 64, T64, Roblox, Discord, TypeScript, Tauri.",
+    );
     state
         .full(params, audio)
         .map_err(|e| format!("whisper full: {e}"))?;

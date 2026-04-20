@@ -22,7 +22,7 @@ import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
+import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, loadSessionHistory, mapHistoryMessages, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
 import { type Toast, subscribeToasts, dismissToast, pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
 import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
@@ -109,32 +109,74 @@ function App() {
         // Wait for gateway to be ready, then link all open Claude panels sequentially
         await new Promise((r) => setTimeout(r, 2000));
         const terminals = useCanvasStore.getState().terminals;
-        for (const t of terminals) {
-          if (t.panelType === "claude") {
-            const title = t.title;
-            if (title && title !== "Claude") {
-              let cwd = t.cwd || "";
-              try {
-                const raw = localStorage.getItem(STORAGE_KEY);
-                if (raw) { const d = JSON.parse(raw); cwd = d[t.terminalId]?.cwd || cwd; }
-              } catch (e) {
-                console.warn("[discord] Failed to read cwd from localStorage:", e);
-              }
-              try {
-                await linkSessionToDiscord(t.terminalId, title, cwd);
-              } catch (err) {
-                console.warn("[discord] Failed to link session:", t.terminalId, err);
-                // Retry once after a delay
-                await new Promise((r) => setTimeout(r, 1500));
-                await linkSessionToDiscord(t.terminalId, title, cwd).catch(() => {});
-              }
-              // Small delay between links to avoid Discord rate limits
-              await new Promise((r) => setTimeout(r, 500));
-            }
+        // Pull the authoritative name/cwd from claudeStore — canvas `t.title` is a
+        // stale snapshot that isn't updated when the user renames a Claude session.
+        let claudeSaved: Record<string, { name?: string; cwd?: string }> = {};
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) claudeSaved = JSON.parse(raw);
+        } catch (e) {
+          console.warn("[discord] Failed to read claude store:", e);
+        }
+        const claudeSessions = useClaudeStore.getState().sessions;
+
+        // Dedupe: if an offline/orphan session shares a name with a currently-open
+        // Claude panel, drop the orphan (the open one is the "new" one the user cares about).
+        const activeClaudeSids = new Set(
+          terminals.filter((x) => x.panelType === "claude").map((x) => x.terminalId)
+        );
+        const normalize = (n: string) => n.trim().toLowerCase();
+        const activeNames = new Set<string>();
+        for (const sid of activeClaudeSids) {
+          const n = claudeSessions[sid]?.name || claudeSaved[sid]?.name;
+          if (n && n.trim()) activeNames.add(normalize(n));
+        }
+        const orphanSids: string[] = [];
+        for (const [sid, data] of Object.entries(claudeSaved)) {
+          if (activeClaudeSids.has(sid)) continue;
+          const n = data?.name;
+          if (n && activeNames.has(normalize(n))) orphanSids.push(sid);
+        }
+        if (orphanSids.length) {
+          try {
+            const updated = { ...claudeSaved };
+            for (const sid of orphanSids) delete updated[sid];
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+            claudeSaved = updated;
+          } catch (e) {
+            console.warn("[dedupe] Failed to prune orphans from claude store:", e);
           }
+          const cs = useClaudeStore.getState();
+          for (const sid of orphanSids) {
+            if (cs.sessions[sid]) cs.removeSession(sid);
+            unlinkSessionFromDiscord(sid).catch(() => {});
+          }
+          console.log("[dedupe] Removed", orphanSids.length, "duplicate-named orphan session(s)");
+        }
+        for (const t of terminals) {
+          if (t.panelType !== "claude") continue;
+          const liveName = claudeSessions[t.terminalId]?.name;
+          const savedName = claudeSaved[t.terminalId]?.name;
+          const name = (liveName || savedName || "").trim();
+          if (!name) continue;
+          const cwd = claudeSessions[t.terminalId]?.cwd
+            || claudeSaved[t.terminalId]?.cwd
+            || t.cwd
+            || "";
+          try {
+            await renameDiscordSession(t.terminalId, name, cwd);
+          } catch (err) {
+            console.warn("[discord] Failed to rename/link session:", t.terminalId, err);
+            await new Promise((r) => setTimeout(r, 1500));
+            await renameDiscordSession(t.terminalId, name, cwd).catch(() => {});
+          }
+          await new Promise((r) => setTimeout(r, 500));
         }
         // Clean up Discord channels that no longer match any linked session
-        discordCleanupOrphaned().catch(() => {});
+        const activeIds = useCanvasStore.getState().terminals
+          .filter((x) => x.panelType === "claude")
+          .map((x) => x.terminalId);
+        discordCleanupOrphaned(activeIds).catch(() => {});
       }).catch(() => {});
     }
     // Auto-start OpenWolf daemon if enabled. Prefer the project-intel widget's
@@ -221,6 +263,22 @@ function App() {
         execute: () => useThemeStore.getState().setTheme(theme.name),
       });
     }
+  }, []);
+
+  // Reactively rename Discord channels when a Claude session's name/cwd changes.
+  useEffect(() => {
+    const unsub = useClaudeStore.subscribe((state, prev) => {
+      for (const [sid, sess] of Object.entries(state.sessions)) {
+        const before = prev.sessions[sid];
+        if (!before) continue;
+        const nameChanged = before.name !== sess.name;
+        const cwdChanged = before.cwd !== sess.cwd;
+        if ((nameChanged || cwdChanged) && sess.name && sess.name.trim()) {
+          renameDiscordSession(sid, sess.name, sess.cwd || "").catch(() => {});
+        }
+      }
+    });
+    return unsub;
   }, []);
 
   // Cleanup closed terminals (only if not popped out)

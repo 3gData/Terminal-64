@@ -26,6 +26,7 @@ mod claude_manager;
 mod discord_bot;
 mod mic_manager;
 mod permission_server;
+mod plugin_manifest_store;
 mod pty_manager;
 mod types;
 mod vector_store;
@@ -94,6 +95,7 @@ use claude_manager::ClaudeManager;
 use discord_bot::DiscordBot;
 use mic_manager::MicManager;
 use permission_server::PermissionServer;
+use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -2218,9 +2220,12 @@ fn rename_discord_session(
 }
 
 #[tauri::command]
-fn discord_cleanup_orphaned(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn discord_cleanup_orphaned(
+    state: tauri::State<'_, AppState>,
+    active_session_ids: Vec<String>,
+) -> Result<(), String> {
     let bot = state.discord_bot.lock().map_err(|e| e.to_string())?;
-    bot.cleanup_orphaned()
+    bot.cleanup_orphaned(active_session_ids)
 }
 
 #[tauri::command]
@@ -3944,7 +3949,7 @@ fn start_voice(
 ) -> Result<(), String> {
     use voice::adapters::{CommandAdapter, DictationAdapter, VadAdapter, WakeAdapter};
 
-    match WakeAdapter::try_load() {
+    match WakeAdapter::try_load("jarvis") {
         Ok(a) => state.voice_manager.set_wake_runner(Box::new(a)),
         Err(e) => {
             safe_eprintln!("[voice] wake runner unavailable: {}", e);
@@ -4268,6 +4273,9 @@ pub fn run() {
             delete_widget_folder,
             install_widget_zip,
             get_widget_server_port,
+            read_widget_manifest,
+            read_widget_approval,
+            write_widget_approval,
             widget_get_state,
             widget_set_state,
             widget_clear_state,

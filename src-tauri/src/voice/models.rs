@@ -109,6 +109,36 @@ pub fn registry() -> &'static [ModelInfo] {
             ],
             total_bytes: 5_300_000,
         },
+        // Custom "T Six Four" wake model. Classifier head is user-trained via
+        // Colab (see docs/wake-training.md); the mel + embedding models are
+        // shared with the stock "jarvis" bundle since openWakeWord freezes
+        // those. The t_six_four.onnx file has no auto-download URL — users
+        // drop it into ~/.terminal64/stt-models/wake/t64/ themselves.
+        ModelInfo {
+            kind: ModelKind::Wake,
+            name: "t64",
+            files: &[
+                ModelFile {
+                    name: "t_six_four.onnx",
+                    url: "",
+                    sha256: "",
+                    bytes: 2_100_000,
+                },
+                ModelFile {
+                    name: "melspectrogram.onnx",
+                    url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx",
+                    sha256: "",
+                    bytes: 700_000,
+                },
+                ModelFile {
+                    name: "embedding_model.onnx",
+                    url: "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx",
+                    sha256: "",
+                    bytes: 2_500_000,
+                },
+            ],
+            total_bytes: 5_300_000,
+        },
         ModelInfo {
             kind: ModelKind::Vad,
             name: "silero",

@@ -2,6 +2,11 @@ import { create } from "zustand";
 
 export type VoiceState = "idle" | "listening" | "dictating" | "awaitingCommand";
 
+/** Which wake-word classifier to load. "jarvis" is the stock openWakeWord
+ * "Hey Jarvis" model shipped out of the box. "t64" is a user-trained
+ * "T Six Four" model — see `docs/wake-training.md`. */
+export type WakeWord = "jarvis" | "t64";
+
 export type VoiceIntentKind = "Send" | "Exit" | "Rewrite" | "Dictation" | "SelectSession";
 
 export type CommandFlashKind = "Send" | "Exit" | "Rewrite";
@@ -47,6 +52,7 @@ export interface ChatInputVoiceActions {
 interface PersistedVoice {
   enabled: boolean;
   modelsDownloaded: VoiceModelsDownloaded;
+  wakeWord: WakeWord;
 }
 
 interface VoiceStoreState {
@@ -62,6 +68,7 @@ interface VoiceStoreState {
   tentative: string;
   error: string | null;
   modelsDownloaded: VoiceModelsDownloaded;
+  wakeWord: WakeWord;
   activeSessionId: string | null;
   listeningProgress: number;
 
@@ -89,6 +96,7 @@ interface VoiceStoreState {
   setLastIntent: (intent: VoiceIntent | null) => void;
   setError: (error: string | null) => void;
   setModelsDownloaded: (patch: Partial<VoiceModelsDownloaded>) => void;
+  setWakeWord: (w: WakeWord) => void;
   setActiveSessionId: (id: string | null) => void;
   setListeningProgress: (p: number) => void;
 
@@ -104,6 +112,7 @@ const STORAGE_KEY = "terminal64-voice";
 const defaultPersisted: PersistedVoice = {
   enabled: false,
   modelsDownloaded: { wake: false, command: false, dictation: false },
+  wakeWord: "jarvis",
 };
 
 function loadPersisted(): PersistedVoice {
@@ -118,6 +127,7 @@ function loadPersisted(): PersistedVoice {
           command: !!parsed.modelsDownloaded?.command,
           dictation: !!parsed.modelsDownloaded?.dictation,
         },
+        wakeWord: parsed.wakeWord === "t64" ? "t64" : "jarvis",
       };
     }
   } catch (e) {
@@ -131,6 +141,7 @@ function persist(state: VoiceStoreState) {
     const data: PersistedVoice = {
       enabled: state.enabled,
       modelsDownloaded: state.modelsDownloaded,
+      wakeWord: state.wakeWord,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (e) {
@@ -228,6 +239,11 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => ({
 
   setModelsDownloaded: (patch) => {
     set({ modelsDownloaded: { ...get().modelsDownloaded, ...patch } });
+    persist(get());
+  },
+
+  setWakeWord: (wakeWord) => {
+    set({ wakeWord });
     persist(get());
   },
 

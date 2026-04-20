@@ -73,6 +73,102 @@
   word-break: break-word;
 }
 
+/* Plugin crash card — layered on top of .wdg-panel--error */
+.wdg-plugin-error {
+  padding: 16px;
+  gap: 10px;
+}
+
+.wdg-plugin-error code {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  padding: 1px 5px;
+  background: rgba(243, 139, 168, 0.12);
+  border-radius: 3px;
+}
+
+.wdg-plugin-error-detail {
+  font-size: 11px;
+  max-width: 90%;
+  text-align: center;
+  color: var(--fg-secondary, #bac2de);
+}
+
+/* Review Permissions consent screen */
+.wdg-consent-intro { margin-bottom: 4px; }
+.wdg-consent-title { display: flex; align-items: baseline; gap: 8px; }
+.wdg-consent-title strong { font-size: 14px; color: var(--fg, #cdd6f4); }
+.wdg-consent-version {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-muted, #9399b2);
+}
+.wdg-consent-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fg-secondary, #bac2de);
+}
+.wdg-consent-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wdg-consent-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+  background: var(--bg-tertiary, rgba(255,255,255,0.02));
+}
+.wdg-consent-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.wdg-consent-item-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg, #cdd6f4);
+}
+.wdg-consent-item-name {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--fg-muted, #9399b2);
+}
+.wdg-consent-item-reason {
+  font-size: 11.5px;
+  color: var(--fg-secondary, #bac2de);
+  line-height: 1.45;
+}
+.wdg-consent-item-scopes {
+  margin-top: 4px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--fg-muted, #9399b2);
+}
+.wdg-consent-actions { margin-top: 14px; }
+
+.wdg-plugin-error-stderr {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.4;
+  max-width: 100%;
+  max-height: 120px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--fg-muted, #9399b2);
+  white-space: pre-wrap;
+  margin: 0;
+  text-align: left;
+  width: min(90%, 520px);
+}
+
 /* Widget Dialog */
 .wdg-dialog-overlay {
   position: fixed;

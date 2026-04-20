@@ -325,6 +325,44 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-04-18"
+    },
+    {
+      "id": "bug-017",
+      "timestamp": "2026-04-19",
+      "error_message": "Reopening Terminal 64 re-executes the last Bash command in an infinite loop — stuck forever",
+      "file": "src-tauri/src/claude_manager.rs",
+      "root_cause": "Claude CLI's --resume treats the JSONL as the conversation source-of-truth. If the previous run died mid-tool (app force-quit while a heavy Bash was running), the JSONL contains an assistant tool_use record with no matching user tool_result. On resume, the CLI sees the dangling tool_use and re-executes the tool from scratch. Heavy bash freezes the app (bug-018), user force-quits, dangling tool_use on disk, reopen → retry → freeze → force-quit → replay. Infinite loop.",
+      "fix": "Added sanitize_dangling_tool_uses(cwd, session_id): before every cmd.spawn() in spawn_and_stream, scan the session JSONL for tool_use IDs with no matching tool_result block, and append synthetic user records with a cancelled tool_result (is_error: true, content explaining the interruption, preserving parentUuid / cwd / version / gitBranch metadata). This satisfies the CLI's pairing check so --resume skips the dangling calls instead of retrying them.",
+      "tags": [
+        "claude",
+        "resume",
+        "jsonl",
+        "tool_use",
+        "replay",
+        "infinite-loop"
+      ],
+      "related_bugs": ["bug-018"],
+      "occurrences": 1,
+      "last_seen": "2026-04-19"
+    },
+    {
+      "id": "bug-018",
+      "timestamp": "2026-04-19",
+      "error_message": "Heavy bash commands run through Claude freeze the entire frontend and app",
+      "file": "src-tauri/src/claude_manager.rs",
+      "root_cause": "The Claude CLI stdout reader emits each JSONL line directly as a single Tauri event. A heavy Bash tool_result can be tens to hundreds of MB. Frontend JSON.parse on megabytes of text, React render of the bubble, and Zustand's debounced localStorage persistence (JSON.stringify of the full sessions map) all run on the main thread → renderer freezes for seconds, appearing as a full-app hang.",
+      "fix": "Added cap_event_size() wrapper around every emit in spawn_and_stream's stdout reader. If the line exceeds 512KB, parse JSON and rewrite oversized tool_result / text block content to 'head + truncation marker + tail' (96KB + 96KB, UTF-8 char-boundary safe via char_boundary_floor/ceil). If JSON parse fails, fall back to a hard byte-slice cap. The CLI's own JSONL keeps the full output for future turns; only the live UI stream is truncated.",
+      "tags": [
+        "claude",
+        "performance",
+        "freeze",
+        "bash",
+        "tauri-ipc",
+        "main-thread"
+      ],
+      "related_bugs": ["bug-017"],
+      "occurrences": 1,
+      "last_seen": "2026-04-19"
     }
   ]
 }

@@ -19,22 +19,66 @@ pub struct WakeAdapter {
     inner: WakeDetector,
 }
 
+/// Per-bundle wake-word config: the bundle name (matches `voice::models`
+/// registry) plus the classifier filename inside the bundle dir. The mel
+/// and embedding ONNX files are always the shared openWakeWord ones.
+struct WakeBundle {
+    bundle: &'static str,
+    classifier: &'static str,
+}
+const WAKE_JARVIS: WakeBundle = WakeBundle {
+    bundle: "jarvis",
+    classifier: "jarvis.onnx",
+};
+const WAKE_T64: WakeBundle = WakeBundle {
+    bundle: "t64",
+    classifier: "t_six_four.onnx",
+};
+
 impl WakeAdapter {
-    pub fn try_load() -> Result<Self, String> {
-        let info = find(ModelKind::Wake, "jarvis")
-            .ok_or_else(|| "wake model not in registry".to_string())?;
-        if !is_downloaded(info) {
-            return Err("wake model not downloaded".to_string());
+    /// Load the currently-configured wake bundle. `name` matches the voice
+    /// store's `wakeWord` setting ("jarvis" | "t64"). If the requested bundle
+    /// isn't fully downloaded (common for the user-trained t64 before they
+    /// drop in their onnx), falls back to jarvis so voice stays functional.
+    pub fn try_load(name: &str) -> Result<Self, String> {
+        let primary = match name {
+            "t64" => &WAKE_T64,
+            _ => &WAKE_JARVIS,
+        };
+        match Self::load_bundle(primary) {
+            Ok(adapter) => Ok(adapter),
+            Err(e) if primary.bundle != "jarvis" => {
+                safe_eprintln!(
+                    "[voice/wake] {} bundle not ready ({}); falling back to jarvis",
+                    primary.bundle,
+                    e
+                );
+                Self::load_bundle(&WAKE_JARVIS)
+            }
+            Err(e) => Err(e),
         }
-        let dir = model_dir(ModelKind::Wake, "jarvis")?;
+    }
+
+    fn load_bundle(b: &WakeBundle) -> Result<Self, String> {
+        let info = find(ModelKind::Wake, b.bundle)
+            .ok_or_else(|| format!("wake bundle {} not in registry", b.bundle))?;
+        if !is_downloaded(info) {
+            return Err(format!("wake bundle {} not fully present", b.bundle));
+        }
+        let dir = model_dir(ModelKind::Wake, b.bundle)?;
         let mel = dir.join("melspectrogram.onnx");
         let emb = dir.join("embedding_model.onnx");
-        let cls = dir.join("jarvis.onnx");
+        let cls = dir.join(b.classifier);
         for p in [&mel, &emb, &cls] {
             if !p.exists() {
                 return Err(format!("wake file missing: {}", p.display()));
             }
         }
+        safe_eprintln!(
+            "[voice/wake] loading bundle '{}' (classifier: {})",
+            b.bundle,
+            b.classifier
+        );
         let inner = WakeDetector::load(&mel, &emb, &cls)?;
         Ok(Self { inner })
     }

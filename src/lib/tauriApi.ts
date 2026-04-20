@@ -185,8 +185,8 @@ export async function unlinkSessionFromDiscord(sessionId: string): Promise<void>
   return invoke("unlink_session_from_discord", { sessionId });
 }
 
-export async function discordCleanupOrphaned(): Promise<void> {
-  return invoke("discord_cleanup_orphaned");
+export async function discordCleanupOrphaned(activeSessionIds: string[]): Promise<void> {
+  return invoke("discord_cleanup_orphaned", { activeSessionIds });
 }
 
 export async function shellExec(command: string, cwd?: string): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -361,6 +361,26 @@ export async function installWidgetZip(zipPath: string): Promise<string> {
 
 export async function getWidgetServerPort(): Promise<number> {
   return invoke("get_widget_server_port");
+}
+
+// Plugin manifest + approval (widget.json / .approved.json)
+
+export interface WidgetManifestEnvelope {
+  raw: unknown;
+  rawText: string;
+  hash: string;
+}
+
+export async function readWidgetManifest(widgetId: string): Promise<WidgetManifestEnvelope | null> {
+  return invoke("read_widget_manifest", { widgetId });
+}
+
+export async function readWidgetApproval(widgetId: string): Promise<unknown | null> {
+  return invoke("read_widget_approval", { widgetId });
+}
+
+export async function writeWidgetApproval(widgetId: string, content: string): Promise<void> {
+  return invoke("write_widget_approval", { widgetId, content });
 }
 
 // Widget persistent state

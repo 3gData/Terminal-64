@@ -596,7 +596,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   }, [session?.activeLoop]);
 
   // Listen for Discord messages routed through the frontend pipeline
-  const handleSendRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const handleSendRef = useRef<((text: string, permissionOverride?: PermissionMode, fromDiscord?: boolean) => Promise<void>) | null>(null);
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen<{ session_id: string; username: string; prompt: string }>(
@@ -606,7 +606,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         const { username, prompt } = event.payload;
         const displayText = `[${username}]: ${prompt}`;
         if (handleSendRef.current) {
-          handleSendRef.current(displayText).catch((err) =>
+          handleSendRef.current(displayText, undefined, true).catch((err) =>
             useClaudeStore.getState().setError(sessionId, String(err))
           );
         }
@@ -702,7 +702,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   );
 
   const handleSend = useCallback(
-    async (text: string, permissionOverride?: PermissionMode) => {
+    async (text: string, permissionOverride?: PermissionMode, fromDiscord = false) => {
       const loopMatch = text.match(/^\/loop\s*(.*)/i);
       if (loopMatch) {
         const args = loopMatch[1]!.trim();
@@ -732,7 +732,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         });
         // Fire the first iteration immediately
         addUserMessage(sessionId, loopPrompt);
-        emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
+        if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
         useClaudeStore.getState().tickLoop(sessionId);
         await actualSend(loopPrompt, permissionOverride);
         return;
@@ -807,7 +807,7 @@ Rules:
             ].filter((l) => l !== null).join("\n");
             // Show the original /command in chat history, send the resolved content
             addUserMessage(sessionId, text);
-            emit("gui-message", { session_id: sessionId, content: text }).catch(() => {});
+            if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: text }).catch(() => {});
             await actualSend(injectedPrompt, permissionOverride);
             return;
           } catch (err) {
@@ -846,7 +846,7 @@ Rules:
       }
 
       addUserMessage(sessionId, prompt);
-      emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
+      if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
       await actualSend(prompt, permissionOverride);
     },
     [sessionId, attachedFiles, addUserMessage, actualSend, reloadCommands, slashCommands, effectiveCwd]

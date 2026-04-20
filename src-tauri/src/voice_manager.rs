@@ -35,109 +35,168 @@ use crate::types::{VoiceIntent, VoiceIntentKind, VoiceState};
 ///   uses this to decide between firing the intent now vs. entering
 ///   command mode.
 ///
-/// Returns `None` when "jarvis" is absent from the transcript.
-fn split_jarvis(text: &str) -> Option<(String, VoiceIntent, bool)> {
-    const SEND: &[&str] = &["send", "submit", "go", "fire", "ship", "sendit"];
-    const EXIT: &[&str] = &[
-        "exit",
-        "cancel",
-        "nevermind",
-        "never",
-        "stop",
-        "abort",
-        "quit",
-        "scratch",
-    ];
-    const REWRITE: &[&str] = &["rewrite", "rephrase", "fix", "cleanup", "clean", "polish"];
+/// Address-word tokens that can precede an in-dictation command. "jarvis"
+/// is always accepted so muscle memory works regardless of the configured
+/// wake word. When the wake word is T64 we also accept "sixty"/"four" and
+/// the spelled-out "t" so "T sixty four send" parses correctly. The parser
+/// looks for a multi-token suffix match starting from the end.
+/// Substring patterns that mark the boundary between residual prompt and
+/// trailing command word(s). These are matched against the flattened
+/// lowercased transcript (punct → space, digits intact), so whisper's
+/// habit of fusing numbers into adjacent words ("64send") still parses.
+fn address_substrings_for_wake(wake: &str) -> &'static [&'static str] {
+    match wake {
+        "t64" => &[
+            // Canonical written form.
+            "sixty four",
+            "sixty-four",
+            "sixtyfour",
+            // Whisper's fused forms when you actually say "T sixty four".
+            "t64",
+            "t 64",
+            "tee 64",
+            "tee sixty four",
+            // Bare number — last-resort. Longer substrings win on ties
+            // (see rfind + tie-break in split_address), so "t64" and
+            // "sixty four" take precedence when present.
+            "64",
+        ],
+        _ => &["hey jarvis", "ok jarvis", "okay jarvis", "jarvis"],
+    }
+}
 
-    // Tokenize both cased (for slicing the residual) and lowercase
-    // (for matching). Whitespace-split plus punctuation strip.
-    let lower: String = text
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c.is_whitespace() {
-                c.to_ascii_lowercase()
-            } else {
-                ' '
+/// Command-word substrings (no word-boundary requirement) — matched in
+/// the tail text after the address. Ordered longer-first so "submit"
+/// isn't shadowed by "sub" etc.
+const CMD_SEND: &[&str] = &["submit", "sendit", "send", "ship", "fire", "go"];
+const CMD_EXIT: &[&str] = &[
+    "cancel",
+    "nevermind",
+    "abort",
+    "scratch",
+    "quit",
+    "stop",
+    "exit",
+    "never",
+];
+const CMD_REWRITE: &[&str] = &["rephrase", "rewrite", "cleanup", "polish", "clean", "fix"];
+
+fn classify_command_tail_str(tail: &str) -> VoiceIntent {
+    let t = tail.to_ascii_lowercase();
+    for w in CMD_SEND {
+        if t.contains(w) {
+            return VoiceIntent::send();
+        }
+    }
+    for w in CMD_EXIT {
+        if t.contains(w) {
+            return VoiceIntent::exit();
+        }
+    }
+    for w in CMD_REWRITE {
+        if t.contains(w) {
+            return VoiceIntent::rewrite();
+        }
+    }
+    // Non-empty tail with unknown word → default Send.
+    VoiceIntent::send()
+}
+
+/// Returns `None` when no address substring is found.
+///
+/// Matches on the flattened lowercased transcript (letters/digits kept,
+/// punctuation → space, run of spaces collapsed). This lets it handle
+/// whisper's quirk of fusing numbers with adjacent words, e.g. "64send"
+/// or "64cend" — it finds "64" and the tail "send"/"cend" is then
+/// substring-matched for command words.
+fn split_address(text: &str, wake: &str) -> Option<(String, VoiceIntent, bool)> {
+    // Build the flattened string + a map from flat-index → original-index
+    // so we can reconstruct the residual with original casing/punctuation.
+    let mut flat = String::with_capacity(text.len());
+    let mut flat_to_orig: Vec<usize> = Vec::with_capacity(text.len());
+    let mut prev_space = true;
+    for (i, c) in text.char_indices() {
+        let ok = c.is_alphanumeric();
+        let space = c.is_whitespace();
+        if ok {
+            flat.push(c.to_ascii_lowercase());
+            flat_to_orig.push(i);
+            prev_space = false;
+        } else if space || !ok {
+            if !prev_space {
+                flat.push(' ');
+                flat_to_orig.push(i);
+                prev_space = true;
             }
-        })
-        .collect();
-    let lower_tokens: Vec<&str> = lower.split_whitespace().collect();
-    let orig_tokens: Vec<&str> = text.split_whitespace().collect();
-    if lower_tokens.is_empty() {
+        }
+    }
+    if flat.trim().is_empty() {
         return None;
     }
 
-    // Find the LAST "jarvis" in the token stream. Using the last occurrence
-    // so that a transcript like "ask jarvis what jarvis thinks, jarvis send"
-    // still boundaries on the final address, not the first mention.
-    let jarvis_idx = lower_tokens.iter().rposition(|t| *t == "jarvis")?;
-
-    // Determine the command intent from tokens AFTER "jarvis". Match any
-    // token in the command tail against the keyword lists; if none match,
-    // default to Send.
-    let command_tail = &lower_tokens[jarvis_idx + 1..];
-    let has_command_tail = !command_tail.is_empty();
-    let intent = classify_command_tail(command_tail, SEND, EXIT, REWRITE);
-
-    // Determine how many prefix tokens to drop from the residual: strip
-    // "jarvis" itself, and an optional "hey"/"ok"/"okay"/"yo" filler
-    // immediately before it.
-    let mut residual_end = jarvis_idx;
-    if residual_end > 0 {
-        let prev = lower_tokens[residual_end - 1];
-        if matches!(prev, "hey" | "ok" | "okay" | "yo") {
-            residual_end -= 1;
+    // Find the RIGHTMOST occurrence of any address substring in flat.
+    let addresses = address_substrings_for_wake(wake);
+    let mut best: Option<(usize, usize)> = None; // (flat_start, substr_len)
+    for addr in addresses {
+        // rfind handles overlap correctly and is O(n·m) which is fine here.
+        if let Some(pos) = flat.rfind(addr) {
+            let len = addr.len();
+            match best {
+                Some((prev_pos, _)) if prev_pos >= pos => {}
+                _ => best = Some((pos, len)),
+            }
         }
     }
+    // Tie-break: among matches ending AT the same flat position, prefer
+    // the longest substring ("sixty four" over "64" if both end there).
+    for addr in addresses {
+        if let Some(pos) = flat.rfind(addr) {
+            let len = addr.len();
+            if let Some((best_pos, best_len)) = best {
+                if pos + len == best_pos + best_len && len > best_len {
+                    best = Some((pos, len));
+                }
+            }
+        }
+    }
+    let (flat_start, flat_addr_len) = best?;
+    let flat_addr_end = flat_start + flat_addr_len;
 
-    // Rebuild residual from ORIGINAL tokens (preserves casing/punct).
-    // Token counts for `lower_tokens` and `orig_tokens` match because
-    // both are whitespace-split over the same string (punctuation stays
-    // attached to the original tokens, but word boundaries align).
-    let residual: String = orig_tokens[..residual_end.min(orig_tokens.len())]
-        .join(" ")
+    // Tail text (after the address) for command classification.
+    let tail_flat = flat[flat_addr_end..].trim();
+    let has_command_tail = !tail_flat.is_empty();
+    let intent = if has_command_tail {
+        classify_command_tail_str(tail_flat)
+    } else {
+        // Empty tail → no command was spoken after the address; caller
+        // will treat this as "enter command mode" and wait for the next
+        // utterance. We return a placeholder intent; it's not consumed.
+        VoiceIntent::send()
+    };
+
+    // Map flat_start back to the original text byte offset so we can
+    // slice the residual in original form (preserving casing + punct).
+    let orig_end_byte = if flat_start == 0 {
+        0
+    } else {
+        flat_to_orig
+            .get(flat_start.saturating_sub(1))
+            .copied()
+            .map(|b| {
+                // Advance past the char at that byte so the residual
+                // doesn't include the trailing space-separator.
+                let c = text[b..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                b + c
+            })
+            .unwrap_or(text.len())
+    };
+    let residual = text[..orig_end_byte.min(text.len())]
         .trim_end_matches(|c: char| {
             c.is_whitespace() || c == ',' || c == '.' || c == '!' || c == '?'
         })
         .to_string();
 
     Some((residual, intent, has_command_tail))
-}
-
-fn classify_command_tail(
-    tail: &[&str],
-    send: &[&str],
-    exit: &[&str],
-    rewrite: &[&str],
-) -> VoiceIntent {
-    for t in tail {
-        if send.iter().any(|w| stem_eq(t, w)) {
-            return VoiceIntent::send();
-        }
-        if exit.iter().any(|w| stem_eq(t, w)) {
-            return VoiceIntent::exit();
-        }
-        if rewrite.iter().any(|w| stem_eq(t, w)) {
-            return VoiceIntent::rewrite();
-        }
-    }
-    // No explicit control word found — user said "jarvis" (+ maybe garbage
-    // punctuation / filler). Default to Send.
-    VoiceIntent::send()
-}
-
-fn stem_eq(token: &str, candidate: &str) -> bool {
-    if token == candidate {
-        return true;
-    }
-    const SUFFIXES: &[&str] = &["s", "es", "ed", "d", "ing", "er"];
-    if let Some(rest) = token.strip_prefix(candidate) {
-        if SUFFIXES.contains(&rest) {
-            return true;
-        }
-    }
-    false
 }
 
 // ---- Runner trait contracts (implemented by the model-runtime agent) ----
@@ -194,6 +253,9 @@ pub struct VoiceManager {
     state: Arc<Mutex<VoiceState>>,
     runners: Arc<Mutex<Runners>>,
     app: Arc<Mutex<Option<AppHandle>>>,
+    /// Which wake-word bundle is active. Drives the mid-dictation command
+    /// parser's address-phrase set ("jarvis" vs "T sixty four").
+    wake_word: Arc<Mutex<String>>,
 }
 
 impl VoiceManager {
@@ -209,7 +271,14 @@ impl VoiceManager {
                 vad: None,
             })),
             app: Arc::new(Mutex::new(None)),
+            wake_word: Arc::new(Mutex::new("jarvis".to_string())),
         })
+    }
+
+    pub fn set_wake_word(&self, name: &str) {
+        if let Ok(mut g) = self.wake_word.lock() {
+            *g = name.to_string();
+        }
     }
 
     // --- Runner injection (called by the model-runtime agent) ---
@@ -428,19 +497,14 @@ impl VoiceManager {
                     // 80 ms cadence, no second mic stream needed.
                     self.emit_waveform(&frame);
 
-                    // Safety valve #1: wake-word resets to Idle. Lets the user
-                    // say "Hey Jarvis" to bail out of a stuck Dictating state.
-                    if self.feed_wake(&frame) {
-                        safe_eprintln!("[voice] wake during Dictating → Idle");
-                        dictation_buffer.clear();
-                        dictation_any_speech = false;
-                        dictation_idle_frames = 0;
-                        silence_run = 0;
-                        command_mode = false;
-                        self.reset_vad();
-                        self.set_state(VoiceState::Idle);
-                        continue;
-                    }
+                    // Intentionally do NOT bail out of Dictating on a wake-word
+                    // detection. Mid-dictation commands flow through the
+                    // transcript + split_address parser ("T sixty four send",
+                    // "Jarvis rewrite", etc) so the wake word appearing here
+                    // IS the expected input, not a stuck-state escape hatch.
+                    // The idle-timeout below (DICT_IDLE_TIMEOUT_FRAMES) still
+                    // handles actually-stuck states without killing good
+                    // dictation before the command finishes.
 
                     // Prefer a real streaming dictation runner when present.
                     // Otherwise buffer audio and use the command runner
@@ -716,8 +780,14 @@ impl VoiceManager {
             }
         }
 
-        // "Jarvis" appears in the transcript. Split on it.
-        if let Some((residual, intent, has_command_tail)) = split_jarvis(&trimmed) {
+        // Address word appears in the transcript ("jarvis" / "T sixty four" /
+        // etc). Split the residual from the trailing command.
+        let wake = self
+            .wake_word
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "jarvis".to_string());
+        if let Some((residual, intent, has_command_tail)) = split_address(&trimmed, &wake) {
             let residual_trimmed = residual.trim().to_string();
             if has_command_tail {
                 // "jarvis send" (or similar). Carry the residual as the

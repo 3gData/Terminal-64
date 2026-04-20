@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod audio_file;
 pub mod command_stt;
 pub mod intent;
 pub mod models;
