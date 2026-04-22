@@ -51,6 +51,9 @@ hex = "0.4"
 # a baseline dev dep yet. Enable with `--features voice-dictation` once cmake
 # is provisioned on the build host. The voice/whisper.rs stub compiles either way.
 whisper-rs = { version = "0.13", default-features = false, optional = true }
+# Discord voice-note transcription: after afconvert/ffmpeg turns the OGG Opus
+# attachment into a WAV, symphonia reads it into f32 PCM for whisper-rs.
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
 
 [features]
 default = ["voice-dictation"]

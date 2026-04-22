@@ -485,6 +485,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
       ) : isClaude ? (
         <div className="ft-body ft-body--claude">
           <ClaudeChat
+            key={term.terminalId}
             sessionId={term.terminalId}
             cwd={term.cwd}
             skipPermissions={term.claudeSkipPermissions}

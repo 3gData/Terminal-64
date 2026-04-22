@@ -264,6 +264,8 @@ export interface SkillInfo {
   has_skill_md: boolean;
   modified: number;
   created?: number;
+  imported_from?: string;
+  pending_backfill?: boolean;
 }
 
 export interface ResolvedSkill {

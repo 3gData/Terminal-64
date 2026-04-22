@@ -19,6 +19,8 @@ button:focus-visible {
   overflow: hidden;
   font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
   font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* ---- Header ---- */

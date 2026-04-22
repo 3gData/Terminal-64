@@ -32,8 +32,8 @@ export interface VoiceDownloadProgressPayload {
   progress: number; // 0..1
 }
 
-export async function startVoice(): Promise<void> {
-  return invoke("start_voice");
+export async function startVoice(wakeWord?: "jarvis" | "t64"): Promise<void> {
+  return invoke("start_voice", { wakeWord: wakeWord ?? "jarvis" });
 }
 
 export async function setVoiceSensitivity(sensitivity: number): Promise<void> {

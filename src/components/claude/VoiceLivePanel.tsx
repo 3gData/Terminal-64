@@ -77,6 +77,16 @@ function formatIntent(kind: string, payload?: string): string | null {
   }
 }
 
+/** Tail the last N words of a running partial so the status panel shows a
+ *  short rolling glimpse ("…word1 word2 word3") instead of the whole
+ *  sentence — keeps the badge compact and stops distracting the user while
+ *  they're mid-sentence. */
+function lastWords(text: string, n: number): string {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length <= n) return tokens.join(" ");
+  return "…" + tokens.slice(-n).join(" ");
+}
+
 function deriveDisplay(args: {
   state: VoiceState;
   partial: string;
@@ -85,6 +95,9 @@ function deriveDisplay(args: {
 }): { text: string; tone: "neutral" | "error" | "active" } {
   const { state, partial, recentIntent, error } = args;
   if (error) return { text: error, tone: "error" };
+  if (partial.trim() && state === "dictating") {
+    return { text: lastWords(partial, 3), tone: "active" };
+  }
   if (partial.trim()) return { text: partial, tone: "active" };
   if (recentIntent) return { text: recentIntent, tone: "active" };
   if (state === "listening") return { text: "Waiting for command…", tone: "neutral" };

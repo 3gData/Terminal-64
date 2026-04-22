@@ -160,11 +160,12 @@ fn run_whisper(ctx: &WhisperContext, audio: &[f32]) -> Result<String, String> {
     // would split a two-word query like "deploy planner".
     params.set_single_segment(true);
 
-    // Decoder bias: front-load the command vocabulary and the literal
-    // "Jarvis" so wake-echo doesn't leak into the transcript. Keep it
-    // short — long prompts drift the style.
+    // Decoder bias: command vocab + the product-surface proper nouns
+    // (so a post-wake session name like "Roblox scripts" or
+    // "Terminal 64 UI" transcribes correctly instead of as homophones).
     params.set_initial_prompt(
-        "Jarvis. Commands: send, submit, go, exit, cancel, stop, rewrite, rephrase.",
+        "Jarvis. Commands: send, submit, go, exit, cancel, stop, rewrite, rephrase. \
+         Terminal 64, T64, Claude, Roblox, Discord, TypeScript, Tauri.",
     );
 
     // Grammar path is prepared but off-by-default; see module docstring.

@@ -369,13 +369,24 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
     if (!onRegisterVoiceActions) return;
     const actions: ChatInputVoiceActions = {
       send: (text?: string) => {
-        // When called from voice, `text` is the authoritative payload
-        // composed upstream (snapshot of what user saw, including prior
-        // commits). When called from keyboard Enter, `text` is undefined
-        // and we fall back to the textarea. Never concat — caller owns
-        // the full payload.
+        // Voice path: `text` is the CURRENT utterance's clean residual from
+        // the backend's split_jarvis (no "jarvis"/"send" tokens). Combine
+        // with `committedBaseRef` — the clean base from prior Dictation
+        // intents — to get [prior commits] + [this residual]. NEVER trust
+        // the live textarea: the last partial before finalize may have
+        // written garbled "jarvis send" tokens ("64cend", etc.) into it.
+        //
+        // Keyboard path: `text` is undefined, use the textarea (user owns
+        // whatever they typed there).
+        const base = (committedBaseRef.current ?? "").trim();
         rollbackPartial();
-        const payload = (text ?? getTextDirect()).trim();
+        let payload: string;
+        if (text !== undefined) {
+          const current = text.trim();
+          payload = base ? (current ? `${base} ${current}` : base) : current;
+        } else {
+          payload = getTextDirect().trim();
+        }
         setTextDirect("");
         if (payload) onSendRef.current(payload);
         setTextDirect("");
@@ -386,8 +397,15 @@ export default function ChatInput({ onSend, onCancel, onAttach, onRewrite, isRew
         onCancelRef.current();
       },
       rewrite: (text?: string) => {
+        const base = (committedBaseRef.current ?? "").trim();
         rollbackPartial();
-        const current = (text ?? getTextDirect()).trim();
+        let current: string;
+        if (text !== undefined) {
+          const r = text.trim();
+          current = base ? (r ? `${base} ${r}` : base) : r;
+        } else {
+          current = getTextDirect().trim();
+        }
         setTextDirect(current);
         const res = onRewriteRef.current?.(current, (t: string) => setTextDirect(t), { isVoice: true });
         Promise.resolve(res as unknown as Promise<void> | void).then(() => {

@@ -28,15 +28,15 @@ import { getSessionsForVoiceMatch } from "../stores/claudeStore";
  * ChatInput actions. Also drives backend start/stop via the `enabled` flag.
  */
 export function useVoiceControl() {
-  // React to enabled toggle → start/stop backend.
+  // React to enabled + wakeWord changes → restart backend. Without wakeWord
+  // in the deps, changing the wake word in settings doesn't swap the
+  // loaded classifier until the user manually toggles voice off/on.
   const enabled = useVoiceStore((s) => s.enabled);
+  const wakeWord = useVoiceStore((s) => s.wakeWord);
   useEffect(() => {
     if (enabled) {
-      startVoice()
+      startVoice(wakeWord)
         .then(() => {
-          // Push saved sensitivity after start so the slider value users set
-          // in a previous session actually reaches the wake detector. The
-          // backend defaults to 0.5-equivalent threshold until this lands.
           const raw = Number(localStorage.getItem("terminal64-voice-sensitivity"));
           const s = Number.isFinite(raw) && raw > 0 ? raw : 0.85;
           void setVoiceSensitivity(s).catch(() => {});
@@ -52,7 +52,7 @@ export function useVoiceControl() {
       };
     }
     return;
-  }, [enabled]);
+  }, [enabled, wakeWord]);
 
   // Wire event listeners once on mount; tear them all down on unmount.
   useEffect(() => {
@@ -112,39 +112,27 @@ export function useVoiceControl() {
         return;
       }
 
-      // Two-phase finalize: first END the dictation cleanly (mute, clear
-      // store fields, rollback any live partial from the textarea, give
-      // stragglers a 350 ms window to arrive and be muted), THEN fire the
-      // actual action with the authoritative payload. Without this wait,
-      // late committed/tentative events from the dying worker can still
-      // repaint the textarea between our clear and our send.
-      //
-      // The snapshot captures what's actually in the textarea RIGHT NOW —
-      // including text committed by prior Dictation intents — so when the
-      // current "jarvis send" utterance has an empty residual (it was just
-      // the command, no prefix), we still send the accumulated dictation.
-      // Without this, dictating → pausing → saying "Jarvis send" would wipe
-      // the textarea and send only the trailing partial that leaked through.
+      // Two-phase finalize. Mute partials immediately so any in-flight
+      // committed/tentative events from the dying whisper worker don't
+      // repaint the textarea. Wait DRAIN_MS for stragglers, THEN call the
+      // action. ChatInput's send/rewrite handlers combine
+      // `committedBaseRef` (clean prior-dictation base) with the intent
+      // payload (clean residual) — we never feed them the polluted live
+      // textarea, which may contain garbled "jarvis send" → "64cend"
+      // tokens from the last partial tick.
       const DRAIN_MS = 350;
-      const endDictationThen = (action: (snapshot: string) => void) => {
+      const endDictationThen = (action: () => void) => {
         muteNow();
-        const snapshot = (actions.getText?.() ?? "").trim();
         const s = useVoiceStore.getState();
         s.clearDictationSplit();
         s.setPartial("");
-        actions.setText("");
-        setTimeout(() => action(snapshot), DRAIN_MS);
+        setTimeout(action, DRAIN_MS);
       };
       switch (intent.kind) {
         case "Send":
-          endDictationThen((snapshot) => {
-            // Prefer the textarea snapshot: it's what the user SAW on screen
-            // and includes prior commits from mid-dictation pause finalizes
-            // plus any manually-typed content. intent.payload is only the
-            // current chunk's residual — a subset. Fall back to it only
-            // when the snapshot is empty (mute blocked all partials).
-            const payload = snapshot || intent.payload?.trim() || "";
-            if (payload) actions.send(payload);
+          endDictationThen(() => {
+            const residual = intent.payload?.trim() ?? "";
+            if (residual) actions.send(residual);
             else actions.send();
           });
           break;
@@ -152,9 +140,9 @@ export function useVoiceControl() {
           endDictationThen(() => actions.exit());
           break;
         case "Rewrite":
-          endDictationThen((snapshot) => {
-            const payload = snapshot || intent.payload?.trim() || "";
-            if (payload) actions.rewrite(payload);
+          endDictationThen(() => {
+            const residual = intent.payload?.trim() ?? "";
+            if (residual) actions.rewrite(residual);
             else actions.rewrite();
           });
           break;

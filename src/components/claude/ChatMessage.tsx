@@ -616,7 +616,7 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
     const slashMatch = content.match(SLASH_CMD_RE);
     const isSlashCmd = slashMatch && !isMerge;
     return (
-      <div className="cc-message cc-message--user">
+      <div className="cc-message cc-message--user" data-msg-id={message.id}>
         {menuBtn}
         {isMerge ? (
           <MergeResultCard content={content} />
@@ -644,7 +644,7 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
   const renderedContent = useMemo(() => cleanContent ? renderContent(cleanContent) : null, [cleanContent]);
 
   return (
-    <div className="cc-message cc-message--assistant">
+    <div className="cc-message cc-message--assistant" data-msg-id={message.id}>
       {menuBtn}
       {renderedContent && (
         <div className={`cc-bubble cc-bubble--assistant${mood !== "normal" ? ` cc-bubble--${mood}` : ""}`}>

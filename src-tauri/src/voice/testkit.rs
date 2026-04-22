@@ -108,7 +108,7 @@ pub fn run_self_test(app: &AppHandle) -> SelfTestReport {
 
     // --- Stage 1: wake ---
     stages.push(time_stage("wake", || {
-        let mut a = WakeAdapter::try_load()?;
+        let mut a = WakeAdapter::try_load("jarvis")?;
         // 80 ms chunks (1280 samples @ 16 kHz) are what the detector expects.
         for chunk in silent.chunks_exact(1280).take(6) {
             let _ = a.feed(chunk);
@@ -228,7 +228,7 @@ pub fn run_fixtures(
 
     // Load each adapter once and reuse across fixtures. Skip stages whose
     // models aren't present — the per-file result records which stage ran.
-    let mut wake = WakeAdapter::try_load().ok();
+    let mut wake = WakeAdapter::try_load("jarvis").ok();
     let mut vad = VadAdapter::try_load().ok();
     let mut cmd = CommandAdapter::try_load().ok();
     let mut dict = DictationAdapter::try_load(app.clone()).ok();

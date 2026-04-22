@@ -77,6 +77,10 @@
 - "Safety net" sets `isStreaming=true` on any non-result/non-ping event. Top-level `{type:"error"}` (rate limit, overloaded, auth) MUST be handled explicitly: `setError` + `setStreaming(false)` + clear pending + `return`. Otherwise spinner never stops.
 - `content_block_delta` + `input_json_delta`: always check `blocks[last].type === "tool_use"` before accumulating inputJson — `thinking` blocks can interleave.
 
+### Claude CLI --resume replay (2026-04-19)
+- If the previous run died mid-tool, the session JSONL can contain an assistant `tool_use` block with no matching user `tool_result`. On `--resume`, the CLI RE-EXECUTES the dangling tool (infinite replay). Before every spawn, scan the JSONL and append synthetic cancelled `tool_result` records (is_error: true) for any unresolved tool_use IDs. See `sanitize_dangling_tool_uses()` in `claude_manager.rs`. Preserve `parentUuid`, `cwd`, `version`, `gitBranch` on the synthetic record so the CLI accepts it.
+- Claude CLI stdout lines can be hundreds of MB for large Bash outputs. Emitting them raw as one Tauri event freezes the renderer (JSON.parse + React render + localStorage persistence on megabytes). Cap lines > 512KB in the reader thread (`cap_event_size()`) — truncate `tool_result`/`text` content to head 96KB + tail 96KB with a marker. The CLI's own JSONL keeps the full output for future turns; only the live UI stream is truncated.
+
 ## Decision Log
 
 <!-- Significant technical decisions with rationale. Why X was chosen over Y. -->

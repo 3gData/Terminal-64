@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from "react";
+import { flushSync } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -15,6 +16,8 @@ import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
 import { CLAUDE_BUILTIN_COMMANDS } from "../../lib/claudeSlashCommands";
 import ChatInput from "./ChatInput";
+import PromptIsland from "./PromptIsland";
+import { useChatScrollState } from "./useChatScrollState";
 import { registerChatInputVoiceActions, unregisterChatInputVoiceActions, useVoiceStore, type ChatInputVoiceActions } from "../../stores/voiceStore";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { endDelegation } from "../../hooks/useDelegationOrchestrator";
@@ -249,12 +252,34 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const incrementPromptCount = useClaudeStore((s) => s.incrementPromptCount);
   const setDraftPrompt = useClaudeStore((s) => s.setDraftPrompt);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const chatBodyRef = useRef<HTMLDivElement>(null);
+  const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  const [chatBodyEl, setChatBodyEl] = useState<HTMLDivElement | null>(null);
+  const setChatBody = useCallback((el: HTMLDivElement | null) => {
+    chatBodyRef.current = el;
+    setChatBodyEl(el);
+  }, []);
   const containerRef = useRef<HTMLDivElement>(null);
   const loopTimerRef = useRef<number | null>(null);
   const INITIAL_VISIBLE = 40;
   const LOAD_MORE_BATCH = 30;
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
+  // firstVisibleIdx locks the top of the rendered window. New messages grow
+  // the window at the bottom — they never shift the top — so the user's
+  // scroll position stays stable while streaming. Load-more decreases this.
+  // Lazy initializer: on first mount, read the current session's message
+  // length from the store and start the window at len-INITIAL_VISIBLE. Without
+  // this, the first render uses firstVisibleIdx=0 and React commits ALL
+  // messages (potentially thousands) before the sessionId effect corrects it
+  // — causing seconds of freeze on large chats.
+  const [firstVisibleIdx, setFirstVisibleIdx] = useState(() => {
+    const len = useClaudeStore.getState().sessions[sessionId]?.messages?.length ?? 0;
+    return Math.max(0, len - INITIAL_VISIBLE);
+  });
+  // Prompt island: pill at top that expands into a picker of past user prompts.
+  // Scroll state owned by `useChatScrollState`, which binds to the live
+  // `.cc-messages` element via its React state (not a ref) so it reattaches
+  // deterministically across editOverlay/showPlanViewer round-trips.
+  const [islandOpen, setIslandOpen] = useState(false);
+  const { isScrolledUp, progress: scrollProgress } = useChatScrollState(chatBodyEl);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [configMcpServers, setConfigMcpServers] = useState<McpServer[]>([]);
   const [showMcpDrop, setShowMcpDrop] = useState(false);
@@ -347,86 +372,314 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     document.documentElement.style.setProperty("--claude-font", fontStack(useSettingsStore.getState().claudeFont || "system"));
   }, []);
   // ── Scroll management ──────────────────────────────────────────────
-  // stickyBottom: true when we should auto-follow new content.
-  // Uses hysteresis: must scroll >150px away to unstick, <30px to re-stick.
-  // This prevents smooth-scroll animations and programmatic scrolls from
-  // corrupting the flag.
-  const stickyBottom = useRef(true);
-  const visibleCountRef = useRef(visibleCount);
-  visibleCountRef.current = visibleCount;
+  // Auto-follow pattern used by production chat UIs (ChatGPT, Discord, Slack):
+  //   1. Track "pinned to bottom" purely from scroll position, with a small
+  //      tolerance for sub-pixel rounding.
+  //   2. Any upward user intent (wheel, PageUp/Home/ArrowUp, touch drag) breaks
+  //      the pin immediately — before the next streaming tick can re-scroll.
+  //   3. Content-growth auto-scrolls (messages, streaming text, permission
+  //      prompts) only fire while pinned. Users who scrolled up stay put.
+  //   4. Scrolling back within BOTTOM_TOLERANCE_PX re-pins, resuming auto-follow.
+  const BOTTOM_TOLERANCE_PX = 8;
+  const pinnedToBottom = useRef(true);
+  const programmaticScroll = useRef(false);
+  const firstVisibleIdxRef = useRef(firstVisibleIdx);
+  firstVisibleIdxRef.current = firstVisibleIdx;
   const messageLenRef = useRef(session?.messages?.length ?? 0);
   messageLenRef.current = session?.messages?.length ?? 0;
-  // For load-more: save scrollHeight before prepending so we can restore position
-  const loadMoreScrollHeight = useRef(0);
+  // Load-more gating:
+  //   - `lastLoadMoreAt` is a time-based cooldown. After a successful
+  //     load-more, we ignore new requests for 600ms so rapid scroll ticks
+  //     can't fire it twice. Without this, scrollTop staying in the top
+  //     trigger region (either because browser anchoring didn't kick in, or
+  //     because the user is still actively scrolling up) would recursively
+  //     load the ENTIRE history in one swipe.
+  //   - `inTopRegionRef` makes the trigger edge-sensitive: it only fires
+  //     when scrollTop TRANSITIONS from outside the top region to inside.
+  //     Staying in the region does nothing. The user must scroll back out
+  //     and in again to trigger another load.
   const loadMorePending = useRef(false);
+  const lastLoadMoreAt = useRef(0);
+  const inTopRegionRef = useRef(false);
+  const LOAD_MORE_TRIGGER_PX = 300;
+  const LOAD_MORE_COOLDOWN_MS = 600;
+  // Anchor element for load-more: a specific message element (by data-msg-id)
+  // whose top-relative-to-viewport we snapshot before prepend. After prepend
+  // and during subsequent async layout shifts (markdown hydration, image
+  // decode, KaTeX, syntax highlight), a useLayoutEffect + ResizeObserver
+  // keeps nudging scrollTop so this exact anchor stays at the same offset
+  // from the container top — locking the user's reading position.
+  const anchorRef = useRef<{ id: string; offsetFromTop: number } | null>(null);
+
+  const captureAnchor = useCallback(() => {
+    const el = chatBodyRef.current;
+    if (!el) return;
+    const containerTop = el.getBoundingClientRect().top;
+    const msgs = el.querySelectorAll<HTMLElement>("[data-msg-id]");
+    for (const m of msgs) {
+      const r = m.getBoundingClientRect();
+      if (r.bottom > containerTop + 1) {
+        const id = m.dataset["msgId"];
+        if (id) anchorRef.current = { id, offsetFromTop: r.top - containerTop };
+        return;
+      }
+    }
+    anchorRef.current = null;
+  }, []);
+
+  const triggerLoadMore = useCallback(() => {
+    if (loadMorePending.current) return;
+    if (firstVisibleIdxRef.current <= 0) return;
+    const now = performance.now();
+    if (now - lastLoadMoreAt.current < LOAD_MORE_COOLDOWN_MS) return;
+    loadMorePending.current = true;
+    lastLoadMoreAt.current = now;
+    captureAnchor();
+    // flushSync forces the render + useLayoutEffect (anchor restore) to
+    // complete inside this call. Without it, React batches the state update;
+    // the user's scroll momentum ticks fire more scroll events BEFORE the
+    // restore runs, and we see a visible jump. flushSync collapses
+    // capture → prepend → restore into a single atomic handler invocation.
+    flushSync(() => {
+      setFirstVisibleIdx((v) => Math.max(0, v - LOAD_MORE_BATCH));
+    });
+    requestAnimationFrame(() => { loadMorePending.current = false; });
+  }, [captureAnchor]);
+  // The scroll handler's lastScrollTop lives in a ref so the load-more anchor
+  // can sync it after shifting scrollTop. Otherwise the anchor jump would look
+  // like a huge downward delta to the next scroll event and could retrigger
+  // load-more in a loop or re-pin sticky-bottom incorrectly.
+  const lastScrollTopRef = useRef(0);
+  const suppressNextScroll = useRef(false);
+
+  const scrollToBottom = useCallback(() => {
+    const el = chatBodyRef.current;
+    if (!el) return;
+    programmaticScroll.current = true;
+    el.scrollTop = el.scrollHeight;
+  }, []);
 
   useEffect(() => {
-    setVisibleCount(INITIAL_VISIBLE);
-    stickyBottom.current = true;
+    const len = useClaudeStore.getState().sessions[sessionId]?.messages?.length ?? 0;
+    setFirstVisibleIdx(Math.max(0, len - INITIAL_VISIBLE));
+    pinnedToBottom.current = true;
     loadMorePending.current = false;
-    requestAnimationFrame(() => {
-      const el = chatBodyRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-  }, [sessionId]);
+    setIslandOpen(false);
+    hasInitializedWindowRef.current = len > 0;
+    requestAnimationFrame(scrollToBottom);
+  }, [sessionId, scrollToBottom]);
 
-  // Scroll event handler — detect user intent + load-more trigger
+  // Unnamed / JSONL-resumed sessions mount with messages.length === 0 — the
+  // history arrives asynchronously after load_session_history resolves. The
+  // lazy useState initializer + sessionId effect both fired against an empty
+  // store, so firstVisibleIdx was stuck at 0 when the messages finally
+  // arrived → first paint committed ALL of them (severe lag) and the scroll
+  // container was far taller than expected (breaks island pinning logic).
+  // This one-shot guard catches the first transition from "no messages" to
+  // "messages present" and re-initializes the window + scroll to bottom.
+  const hasInitializedWindowRef = useRef(false);
+  useEffect(() => {
+    const len = session?.messages?.length ?? 0;
+    if (hasInitializedWindowRef.current) return;
+    if (len === 0) return;
+    hasInitializedWindowRef.current = true;
+    setFirstVisibleIdx(Math.max(0, len - INITIAL_VISIBLE));
+    pinnedToBottom.current = true;
+    requestAnimationFrame(scrollToBottom);
+  }, [session?.messages?.length, scrollToBottom]);
+
+  // Listen for user intent + scroll state. Wheel/keyboard/touch events fire
+  // BEFORE the browser's scroll event, letting us unpin before the next
+  // streaming tick can yank the user back down. Scroll-direction tracking is
+  // the backstop: any upward scrollTop delta unpins, regardless of input type.
   useEffect(() => {
     const el = chatBodyRef.current;
     if (!el) return;
-    const handler = () => {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      // Hysteresis: only change sticky state at clear thresholds
-      if (dist > 150) stickyBottom.current = false;
-      else if (dist < 30) stickyBottom.current = true;
-      // Load more when scrolled near top
-      if (el.scrollTop < 80 && visibleCountRef.current < messageLenRef.current && !loadMorePending.current) {
-        loadMorePending.current = true;
-        loadMoreScrollHeight.current = el.scrollHeight;
-        setVisibleCount((v) => Math.min(v + LOAD_MORE_BATCH, messageLenRef.current));
+
+    const distFromBottom = () =>
+      el.scrollHeight - el.scrollTop - el.clientHeight;
+
+    // Tracks our own programmatic scrolls so the scroll-direction check
+    // doesn't interpret them as user intent.
+    lastScrollTopRef.current = el.scrollTop;
+    programmaticScroll.current = false;
+    suppressNextScroll.current = false;
+    inTopRegionRef.current = el.scrollTop < LOAD_MORE_TRIGGER_PX;
+    lastLoadMoreAt.current = 0;
+
+    const onScroll = () => {
+      const current = el.scrollTop;
+      const delta = current - lastScrollTopRef.current;
+      lastScrollTopRef.current = current;
+
+      if (suppressNextScroll.current) {
+        // Load-more anchor jump — don't update pin or trigger load-more.
+        suppressNextScroll.current = false;
+        return;
+      }
+      if (programmaticScroll.current) {
+        // This scroll came from our auto-follow — it lands at the bottom.
+        programmaticScroll.current = false;
+        pinnedToBottom.current = true;
+      } else if (delta < -1) {
+        // User moved upward — unpin immediately.
+        pinnedToBottom.current = false;
+      } else {
+        // Re-pin only when genuinely near bottom.
+        pinnedToBottom.current = distFromBottom() <= BOTTOM_TOLERANCE_PX;
+      }
+
+      // If the user genuinely scrolled away from the top region, release the
+      // load-more anchor early so a late ResizeObserver callback can't yank
+      // scrollTop during an in-flight user scroll.
+      if (current > LOAD_MORE_TRIGGER_PX * 2 && anchorRef.current) {
+        anchorRef.current = null;
+      }
+
+      // Load more when scrolled near top. Capture the topmost visible message
+      // (by data-msg-id) plus its pixel offset from the viewport top. After
+      // the prepend, the layout effect restores scrollTop so that same
+      // element sits at the same offset — visual position is preserved
+      // exactly regardless of how tall the added content is.
+      // Edge-triggered: only fire when scrollTop TRANSITIONS from above the
+      // trigger threshold into it. Staying below the threshold does nothing,
+      // so a single upward scroll loads exactly one batch — no recursion.
+      const nowInTopRegion = el.scrollTop < LOAD_MORE_TRIGGER_PX;
+      if (nowInTopRegion && !inTopRegionRef.current && delta < 0) {
+        triggerLoadMore();
+      }
+      inTopRegionRef.current = nowInTopRegion;
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) {
+        pinnedToBottom.current = false;
       }
     };
-    el.addEventListener("scroll", handler, { passive: true });
-    return () => el.removeEventListener("scroll", handler);
-  }, [sessionId]);
 
-  // After load-more prepends messages: restore scroll position synchronously
-  // before the browser paints, so the user sees no jump.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home") {
+        pinnedToBottom.current = false;
+      }
+    };
+
+    let touchStartY = 0;
+    const onTouchStart = (e: TouchEvent) => {
+      touchStartY = e.touches[0]?.clientY ?? 0;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? 0;
+      if (y - touchStartY > 5) {
+        pinnedToBottom.current = false;
+      }
+    };
+
+    el.addEventListener("scroll", onScroll, { passive: true });
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("keydown", onKeyDown);
+    el.addEventListener("touchstart", onTouchStart, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("keydown", onKeyDown);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+    };
+    // Rebind when the live `.cc-messages` element changes (overlay/plan-viewer
+    // round-trips swap it in and out of the tree). chatBodyEl is updated by
+    // the callback ref on mount/unmount, so listeners always attach to the
+    // current DOM node.
+  }, [sessionId, triggerLoadMore, chatBodyEl]);
+
+  // Load-more scroll restore + continuous chase.
+  //
+  // Runs after every firstVisibleIdx change. If an anchor was captured BEFORE
+  // the prepend, we find the same element by data-msg-id, measure how far it
+  // moved, and nudge scrollTop by the delta to put it back. Then we attach a
+  // ResizeObserver to every element above (and including) the anchor — any
+  // async layout shift (markdown hydration, image decode, syntax highlighter,
+  // webfont) fires the observer, which re-runs the restore. WKWebView's
+  // missing overflow-anchor is irrelevant: we do the anchoring ourselves,
+  // and we chase shifts every frame for up to 2.5s instead of measuring once.
   useLayoutEffect(() => {
-    if (!loadMorePending.current) return;
+    const anchor = anchorRef.current;
+    if (!anchor) return;
     const el = chatBodyRef.current;
-    if (el && loadMoreScrollHeight.current > 0) {
-      el.scrollTop = el.scrollHeight - loadMoreScrollHeight.current;
+    if (!el) return;
+
+    const restore = () => {
+      const target = el.querySelector<HTMLElement>(
+        `[data-msg-id="${CSS.escape(anchor.id)}"]`
+      );
+      if (!target) return;
+      const containerTop = el.getBoundingClientRect().top;
+      const current = target.getBoundingClientRect().top - containerTop;
+      const delta = current - anchor.offsetFromTop;
+      if (Math.abs(delta) > 0.5) {
+        suppressNextScroll.current = true;
+        el.scrollTop += delta;
+        lastScrollTopRef.current = el.scrollTop;
+      }
+    };
+
+    restore();
+
+    const ro = new ResizeObserver(restore);
+    const target = el.querySelector<HTMLElement>(
+      `[data-msg-id="${CSS.escape(anchor.id)}"]`
+    );
+    if (target) {
+      // Observe every sibling above the anchor (prepended content), plus
+      // the anchor itself (catches its internal children growing — e.g. a
+      // KaTeX block or avatar image inside the anchor message).
+      let n: Element | null = el.firstElementChild;
+      while (n && n !== target) {
+        ro.observe(n);
+        n = n.nextElementSibling;
+      }
+      ro.observe(target);
     }
-    loadMorePending.current = false;
-    loadMoreScrollHeight.current = 0;
-  }, [visibleCount]);
 
-  // New messages arrived — scroll to bottom if sticky
+    const settle = window.setTimeout(() => {
+      ro.disconnect();
+      anchorRef.current = null;
+    }, 2500);
+
+    return () => {
+      clearTimeout(settle);
+      ro.disconnect();
+    };
+  }, [firstVisibleIdx]);
+
+  // Auto-close the island picker whenever an overlay takes over the chat
+  // body. Without this, islandOpen can survive an overlay round-trip and
+  // leave the island stuck visible when the chat comes back.
   useEffect(() => {
-    if (!stickyBottom.current) return;
-    const el = chatBodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [session?.messages?.length]);
+    if (editOverlay || showPlanViewer) setIslandOpen(false);
+  }, [editOverlay, showPlanViewer]);
 
-  // Permission prompt appeared — always scroll down
+  // Auto-follow content growth: messages, streaming text, and permission
+  // prompts only scroll down while pinned to the bottom.
+  useEffect(() => {
+    if (pinnedToBottom.current) scrollToBottom();
+  }, [session?.messages?.length, scrollToBottom]);
+
   useEffect(() => {
     if (!session?.pendingPermission) return;
-    const el = chatBodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [session?.pendingPermission]);
+    if (pinnedToBottom.current) scrollToBottom();
+  }, [session?.pendingPermission, scrollToBottom]);
 
-  // Streaming text scroll — side-effect-only subscription so it doesn't re-render the component
   useEffect(() => {
     return useClaudeStore.subscribe((state, prev) => {
       const text = state.sessions[sessionId]?.streamingText;
       const prevText = prev.sessions[sessionId]?.streamingText;
-      if (text && text !== prevText && stickyBottom.current) {
-        const el = chatBodyRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+      if (text && text !== prevText && pinnedToBottom.current) {
+        scrollToBottom();
       }
     });
-  }, [sessionId]);
+  }, [sessionId, scrollToBottom]);
   useEffect(() => {
     const handler = () => { setShowModelDrop(false); setShowEffortDrop(false); setShowMcpDrop(false); };
     window.addEventListener("click", handler);
@@ -596,7 +849,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   }, [session?.activeLoop]);
 
   // Listen for Discord messages routed through the frontend pipeline
-  const handleSendRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const handleSendRef = useRef<((text: string, permissionOverride?: PermissionMode, fromDiscord?: boolean) => Promise<void>) | null>(null);
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen<{ session_id: string; username: string; prompt: string }>(
@@ -606,7 +859,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         const { username, prompt } = event.payload;
         const displayText = `[${username}]: ${prompt}`;
         if (handleSendRef.current) {
-          handleSendRef.current(displayText).catch((err) =>
+          handleSendRef.current(displayText, undefined, true).catch((err) =>
             useClaudeStore.getState().setError(sessionId, String(err))
           );
         }
@@ -702,7 +955,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   );
 
   const handleSend = useCallback(
-    async (text: string, permissionOverride?: PermissionMode) => {
+    async (text: string, permissionOverride?: PermissionMode, fromDiscord = false) => {
       const loopMatch = text.match(/^\/loop\s*(.*)/i);
       if (loopMatch) {
         const args = loopMatch[1]!.trim();
@@ -732,7 +985,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         });
         // Fire the first iteration immediately
         addUserMessage(sessionId, loopPrompt);
-        emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
+        if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
         useClaudeStore.getState().tickLoop(sessionId);
         await actualSend(loopPrompt, permissionOverride);
         return;
@@ -807,7 +1060,7 @@ Rules:
             ].filter((l) => l !== null).join("\n");
             // Show the original /command in chat history, send the resolved content
             addUserMessage(sessionId, text);
-            emit("gui-message", { session_id: sessionId, content: text }).catch(() => {});
+            if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: text }).catch(() => {});
             await actualSend(injectedPrompt, permissionOverride);
             return;
           } catch (err) {
@@ -846,7 +1099,7 @@ Rules:
       }
 
       addUserMessage(sessionId, prompt);
-      emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
+      if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: prompt }).catch(() => {});
       await actualSend(prompt, permissionOverride);
     },
     [sessionId, attachedFiles, addUserMessage, actualSend, reloadCommands, slashCommands, effectiveCwd]
@@ -1406,11 +1659,11 @@ Coordinate actively. If another agent is working on a file you need, mention it 
     if (!session) return [];
     const elements: React.ReactNode[] = [];
     const allMsgs = session.messages;
-    const startIdx = Math.max(0, allMsgs.length - visibleCount);
+    const startIdx = Math.min(firstVisibleIdx, Math.max(0, allMsgs.length - 1));
     const msgs = allMsgs.slice(startIdx);
     if (startIdx > 0) {
       elements.push(
-        <div key="load-more" className="cc-load-more" onClick={() => setVisibleCount((v) => Math.min(v + LOAD_MORE_BATCH, allMsgs.length))}>
+        <div key="load-more" className="cc-load-more" onClick={triggerLoadMore}>
           ▲ {startIdx} older message{startIdx !== 1 ? "s" : ""} — click or scroll up to load
         </div>
       );
@@ -1424,7 +1677,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         const dur = prevMsg.timestamp - lastUserTs;
         if (dur > 2000) {
           elements.push(
-            <div key={`fin-${i}`} className="cc-turn-divider">
+            <div key={`fin-${msg.id}`} className="cc-turn-divider">
               <span className="cc-turn-divider-text">Finished after {formatDuration(Math.floor(dur / 1000))}</span>
             </div>
           );
@@ -1442,7 +1695,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
           } else break;
         }
         if (j > i + 1) {
-          elements.push(<div key={`rg-${i}`} className="cc-message cc-message--assistant"><div className="cc-tc-list"><ToolGroupCard tcs={groupTcs} /></div></div>);
+          elements.push(<div key={`rg-${msg.id}`} data-msg-id={msg.id} className="cc-message cc-message--assistant"><div className="cc-tc-list"><ToolGroupCard tcs={groupTcs} /></div></div>);
           i = j;
           continue;
         }
@@ -1463,14 +1716,60 @@ Coordinate actively. If another agent is working on a file you need, mention it 
       const dur = lastMsg.timestamp - lastUserTs;
       if (dur > 2000) {
         elements.push(
-          <div key="fin-tail" className="cc-turn-divider">
+          <div key={`fin-tail-${lastMsg.id}`} className="cc-turn-divider">
             <span className="cc-turn-divider-text">Finished after {formatDuration(Math.floor(dur / 1000))}</span>
           </div>
         );
       }
     }
     return elements;
-  }, [session?.messages, visibleCount, session?.autoCompactStatus, session?.autoCompactStartedAt, session?.isStreaming, onRewindClick, handleFork, handleEditClick]);
+  }, [session?.messages, firstVisibleIdx, session?.autoCompactStatus, session?.autoCompactStartedAt, session?.isStreaming, onRewindClick, handleFork, handleEditClick]);
+
+  // Indexed user prompts (includes /slash commands) for the prompt-island picker.
+  const userPrompts = useMemo(() => {
+    const out: { id: string; idx: number; content: string; timestamp: number; isCmd: boolean }[] = [];
+    const msgs = session?.messages ?? [];
+    let promptIdx = 0;
+    for (const m of msgs) {
+      if (m.role !== "user") continue;
+      if (!m.content) continue;
+      if (m.content.startsWith("All delegated tasks have finished")) continue; // merge results aren't prompts
+      promptIdx += 1;
+      out.push({
+        id: m.id,
+        idx: promptIdx,
+        content: m.content,
+        timestamp: m.timestamp,
+        isCmd: /^\//.test(m.content.trim()),
+      });
+    }
+    return out;
+  }, [session?.messages]);
+
+  const jumpToPrompt = useCallback((msgId: string) => {
+    // Ensure the target is rendered — if it's above firstVisibleIdx, expand.
+    const msgs = useClaudeStore.getState().sessions[sessionId]?.messages ?? [];
+    const targetIdx = msgs.findIndex((m) => m.id === msgId);
+    if (targetIdx < 0) return;
+    if (targetIdx < firstVisibleIdxRef.current) {
+      setFirstVisibleIdx(targetIdx);
+    }
+    setIslandOpen(false);
+    // Defer to next frame so the (possibly) newly mounted node exists in the DOM.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const root = chatBodyRef.current;
+        if (!root) return;
+        const target = root.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(msgId)}"]`);
+        if (!target) return;
+        // Unpin so auto-follow doesn't fight us after the jump.
+        pinnedToBottom.current = false;
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.setAttribute("data-jump-flash", "1");
+        window.setTimeout(() => target.removeAttribute("data-jump-flash"), 1300);
+      });
+    });
+  }, [sessionId]);
 
   if (!session) return <div className="cc-container cc-loading">Initializing...</div>;
 
@@ -1664,6 +1963,19 @@ Coordinate actively. If another agent is working on a file you need, mention it 
       {/* Main area */}
       <div className="cc-main">
         <div className="cc-chat-col">
+          {/* Prompt island — visibility is driven by the live scroll state
+              of `.cc-messages` via `useChatScrollState`. Reattaches cleanly
+              on overlay round-trips because the scroll element is tracked
+              as React state, not a ref. */}
+          <PromptIsland
+            prompts={userPrompts}
+            isScrolledUp={isScrolledUp}
+            progress={scrollProgress}
+            open={islandOpen}
+            onOpen={() => setIslandOpen(true)}
+            onClose={() => setIslandOpen(false)}
+            onJump={jumpToPrompt}
+          />
           {editOverlay ? (
             <div className="cc-messages cc-edit-overlay">
               <div className="cc-edit-overlay-header">
@@ -1766,7 +2078,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               </div>
             </div>
           ) : (
-          <div className="cc-messages" ref={chatBodyRef}>
+          <div className="cc-messages" ref={setChatBody}>
             {!hasMessages && (
               <div className="cc-empty">
                 <div className="cc-empty-icon">
@@ -1848,6 +2160,21 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               </div>
             )}
             <div ref={messagesEndRef} />
+            {isScrolledUp && userPrompts.length > 0 && (
+              <button
+                className="cc-jump-bottom"
+                onClick={() => {
+                  pinnedToBottom.current = true;
+                  scrollToBottom();
+                }}
+                aria-label="Scroll to bottom"
+                title="Scroll to bottom"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 2V11M7 11L3 7M7 11L11 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            )}
           </div>
           )}
 

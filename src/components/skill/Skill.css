@@ -470,6 +470,18 @@
   min-width: 0;
 }
 
+.skl-card-imported {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background: color-mix(in srgb, #89dceb 12%, transparent);
+  color: #89dceb;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
 .skl-card-status {
   width: 7px;
   height: 7px;

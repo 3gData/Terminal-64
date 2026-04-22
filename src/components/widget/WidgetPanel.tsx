@@ -8,6 +8,7 @@ import { useCanvasStore } from "../../stores/canvasStore";
 import { useVoiceStore } from "../../stores/voiceStore";
 import { startVoice, stopVoice, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
 import { widgetBus } from "../../lib/widgetBus";
+import { invokePlugin, onPluginEvent, type PluginStreamHandle } from "../../lib/pluginApi";
 import "./Widget.css";
 
 interface WidgetPanelProps {
@@ -88,6 +89,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
 
   // Voice event forwarding unlisteners, keyed by subscription kind
   const voiceUnlistenersRef = useRef<{ intent?: () => void; partial?: () => void; final?: () => void }>({});
+
+  // Active plugin SSE subscriptions opened by the iframe via `t64:plugin`.
+  // Keyed by the subscription id the iframe supplied so it can unsubscribe later.
+  const pluginSubscriptionsRef = useRef<Map<string, PluginStreamHandle>>(new Map());
 
   useEffect(() => {
     getWidgetServerPort()
@@ -275,6 +280,51 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
         case "t64:request-state":
           post({ type: "t64:state", payload: { ...buildStateSnapshot(), id: msg.payload?.id } });
           return;
+
+        // Nested plugin namespace: `t64:plugin` carries a sub-action so the
+        // surface stays decoupled from the wire protocol. Shape:
+        //   { type: "t64:plugin", payload: { action, id, ...args } }
+        // Actions: "invoke" → forwards to pluginApi.invokePlugin.
+        //          "subscribe"/"unsubscribe" → pluginApi.onPluginEvent lifecycle.
+        case "t64:plugin": {
+          const action = msg.payload?.action;
+          const reqId = msg.payload?.id;
+          const targetPlugin = typeof msg.payload?.pluginId === "string"
+            ? msg.payload.pluginId
+            : widgetId;
+          if (action === "invoke") {
+            const method = msg.payload?.method;
+            if (typeof method !== "string") {
+              post({ type: "t64:plugin-result", payload: { id: reqId, ok: false, error: "method required" } });
+              return;
+            }
+            invokePlugin(targetPlugin, method, msg.payload?.args)
+              .then((result) => post({ type: "t64:plugin-result", payload: { id: reqId, ok: true, result } }))
+              .catch((err) => post({ type: "t64:plugin-result", payload: { id: reqId, ok: false, error: String(err?.message ?? err) } }));
+            return;
+          }
+          if (action === "subscribe") {
+            const topic = typeof msg.payload?.topic === "string" ? msg.payload.topic : "*";
+            const subId = typeof reqId === "string" ? reqId : Math.random().toString(36).slice(2);
+            const handle = onPluginEvent(targetPlugin, topic, (frame) => {
+              post({ type: "t64:plugin-event", payload: { id: subId, pluginId: targetPlugin, frame } });
+            });
+            pluginSubscriptionsRef.current.set(subId, handle);
+            post({ type: "t64:plugin-subscribed", payload: { id: subId } });
+            return;
+          }
+          if (action === "unsubscribe") {
+            const subId = typeof reqId === "string" ? reqId : "";
+            const handle = pluginSubscriptionsRef.current.get(subId);
+            if (handle) {
+              handle.close();
+              pluginSubscriptionsRef.current.delete(subId);
+            }
+            return;
+          }
+          post({ type: "t64:plugin-result", payload: { id: reqId, ok: false, error: `unknown plugin action: ${String(action)}` } });
+          return;
+        }
 
         case "t64:pick-directory": {
           const reqId = msg.payload?.id;
@@ -744,6 +794,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
       try { vu.partial?.(); } catch { /* ignore */ }
       try { vu.final?.(); } catch { /* ignore */ }
       voiceUnlistenersRef.current = {};
+      for (const handle of pluginSubscriptionsRef.current.values()) {
+        try { handle.close(); } catch { /* ignore */ }
+      }
+      pluginSubscriptionsRef.current.clear();
     };
   }, [widgetUrl, widgetId]);
 
