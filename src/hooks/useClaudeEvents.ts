@@ -106,16 +106,16 @@ const sessionToolMaps = new Map<string, Map<string, string>>();
 const sessionFilePathMaps = new Map<string, Map<string, string>>();
 
 const MAX_TOOL_MAP_ENTRIES = 2000;
-function getSessionMap(store: Map<string, Map<string, string>>, sessionId: string): Map<string, string> {
+function getSessionMap<V>(store: Map<string, Map<string, V>>, sessionId: string): Map<string, V> {
   let map = store.get(sessionId);
   if (!map) {
-    map = new Map();
+    map = new Map<string, V>();
     store.set(sessionId, map);
   }
   return map;
 }
 
-function evictIfNeeded(map: Map<string, string>) {
+function evictIfNeeded<V>(map: Map<string, V>) {
   if (map.size > MAX_TOOL_MAP_ENTRIES) {
     const excess = map.size - MAX_TOOL_MAP_ENTRIES;
     const iter = map.keys();

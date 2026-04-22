@@ -363,6 +363,63 @@
       "related_bugs": ["bug-017"],
       "occurrences": 1,
       "last_seen": "2026-04-19"
+    },
+    {
+      "id": "bug-019",
+      "timestamp": "2026-04-22",
+      "error_message": "After rewinding or forking a Claude session, refreshing/reloading from JSONL shows all the 'deleted' messages back. Users reported rewind+fork as 'hella unreliable'.",
+      "file": "src/components/claude/ClaudeChat.tsx, src-tauri/src/lib.rs",
+      "root_cause": "Commit db0113b5 (2026-04-15 'lil update') removed the JSONL truncation call from handleRewind, leaving only the in-memory store truncation + --resume-session-at UUID recording for the next send. load_session_history reads every line in the JSONL sequentially (no parentUuid chain walking), so reload shows the original full history. Fork had a parallel bug: fork_session_jsonl copies the full parent JSONL to the new session but never truncates the copy, so the fork displays the entire parent history until a new prompt is sent.",
+      "fix": "1) Re-added the `truncateSessionJsonlByMessages` wrapper in src/lib/tauriApi.ts. 2) In handleRewind (both the undo-send fast path and the main rewind path), call truncateSessionJsonlByMessages after findRewindUuid succeeds — the --resume-session-at UUID is still inside the truncated file. 3) In fork_session_jsonl (Rust), after the std::fs::copy and chain-walk to find the fork UUID, call truncate_session_jsonl_by_messages on the destination so the fork shows only pre-fork messages on reload.",
+      "tags": [
+        "rewind",
+        "fork",
+        "jsonl",
+        "regression",
+        "session-history",
+        "load_session_history"
+      ],
+      "related_bugs": ["bug-001"],
+      "occurrences": 1,
+      "last_seen": "2026-04-22"
+    },
+    {
+      "id": "bug-020",
+      "timestamp": "2026-04-22",
+      "error_message": "On bypass permission mode, Claude silently rejects edits to skills/widgets/MCP/MD files instead of allowing or prompting. Reason written to JSONL: 'Unknown session — denied for safety'.",
+      "file": "src-tauri/src/permission_server.rs",
+      "root_cause": "handle_connection looks up session_id from run_token BEFORE checking the bypassPermissions payload field. When a hook fires with a stale token (race between close_claude_session and an in-flight hook, OR a leftover child process after rewind/spawn), session_id is empty and the PreToolUse branch fail-closes with permissionDecision=deny. The bypass check at the top of the PreToolUse handler never runs for unknown-session cases. Common triggers: rewind (cancel+close unregisters token, new send registers a new token, any residual hook from the old CLI lands on the stale token), skill/widget spawn via spawnClaudeWithPrompt (new session id + timing), permission server port restart.",
+      "fix": "Extract permission_mode from the hook payload BEFORE the session lookup gate. On PreToolUse with permission_mode=='bypassPermissions' AND empty session_id, respond with permissionDecision=allow (reason: 'bypassPermissions mode (session not registered)'). The secret in the URL already gates spoofing; an unknown run_token just means 'session unregistered', which shouldn't override user-opted bypass. Non-bypass modes still fail-closed because we need a session_id to route the frontend prompt.",
+      "tags": [
+        "permissions",
+        "bypass",
+        "hook-server",
+        "session-lookup",
+        "race",
+        "silent-deny"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-22"
+    },
+    {
+      "id": "bug-021",
+      "timestamp": "2026-04-22",
+      "error_message": "In bypass permission mode, edits to Claude Code's hardcoded sensitive-file list (.mcp.json, .claude.json, .zshrc, .git/, .vscode/, .idea/, .claude/, .husky/) silently fail with 'Claude requested permissions to edit X which is a sensitive file.' in --print mode. Claude Code's TUI shows an approval prompt; --print cannot surface one, so the tool errors out and the user sees no actionable UI.",
+      "file": "src/hooks/useClaudeEvents.ts, src/components/claude/ClaudeChat.tsx, src/stores/claudeStore.ts",
+      "root_cause": "Claude CLI's classifier (RC5/jtH in the minified binary) returns behavior:'ask' with decisionReason.type=='safetyCheck' for these paths. The check runs BEFORE PreToolUse hooks fire (confirmed via probe: no hook event, just an is_error tool_result). --permission-mode bypassPermissions, --dangerously-skip-permissions, and matching permissions.allow rules do not bypass it — the only bypass path is an allow rule whose ruleContent starts with '/.claude/' or '~/.claude/' AND ends with '/**' (YC5=[.git,.vscode,.idea,.claude,.husky]; wC5=[.gitconfig,.gitmodules,.bashrc,.bash_profile,.zshrc,.zprofile,.profile,.ripgreprc,.mcp.json,.claude.json]; allow prefixes lE_='/.claude/**', nE_='~/.claude/**'). No TUI prompt exists in --print mode.",
+      "fix": "Layer our own approval flow on top: useClaudeEvents detects tool_result errors with is_error=true and content matching 'which is a sensitive file' OR 'requested permissions to (edit|write to)' for Write/Edit/MultiEdit tools; cached tool_input (new sessionToolInputMaps) plus the file_path are stored as session.pendingSensitiveEdit. ClaudeChat renders a permission-style card reusing .cc-permission styling with 'Allow & Apply' / 'Skip' actions. On Allow, applySensitiveEditAndContinue reads the file via Tauri readFile, applies Write/Edit/MultiEdit semantics locally (replace_all aware, MultiEdit sequential), writes via writeFile, records the path in session.sensitiveEditApprovedPaths, then sends Claude a follow-up user message telling it the edit was manually applied and not to re-issue the tool call. Genericized getSessionMap<V>/evictIfNeeded<V> so the input map can store Record<string, unknown>.",
+      "tags": [
+        "permissions",
+        "sensitive-file",
+        "classifier",
+        "claude-cli",
+        "print-mode",
+        "workaround"
+      ],
+      "related_bugs": ["bug-020"],
+      "occurrences": 1,
+      "last_seen": "2026-04-22"
     }
   ]
 }

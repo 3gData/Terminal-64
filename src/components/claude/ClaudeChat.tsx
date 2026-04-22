@@ -6,7 +6,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useThemeStore } from "../../stores/themeStore";
-import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, readFileBase64, writeFile, loadSessionHistoryTail, mapHistoryMessages, findRewindUuid, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, ensureT64Mcp, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage, resolveSkillPrompt } from "../../lib/tauriApi";
+import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, listSlashCommands, resolvePermission, readFile, readFileBase64, writeFile, loadSessionHistoryTail, mapHistoryMessages, findRewindUuid, truncateSessionJsonlByMessages, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, ensureT64Mcp, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage, resolveSkillPrompt } from "../../lib/tauriApi";
 import type { SlashCommand, PermissionMode, McpServer, HookEvent, ChatMessage as ChatMessageData } from "../../lib/types";
 import type { McpServerStatus } from "../../stores/claudeStore";
 import { rewritePromptStream } from "../../lib/ai";
@@ -1282,6 +1282,12 @@ Rules:
       const keepMessages = updatedSess ? updatedSess.messages.length : 0;
       const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
       useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
+      try {
+        const result = await truncateSessionJsonlByMessages(sessionId, rewindCwd, keepMessages);
+        console.log("[rewind] Undo-send JSONL truncated:", result);
+      } catch (err) {
+        console.error("[rewind] Undo-send JSONL truncation failed:", err);
+      }
       setRewindText(targetMsg!.content);
       console.log("[rewind] === UNDO-SEND COMPLETE ===", { prefill: targetMsg!.content.slice(0, 80) });
       return;
@@ -1346,6 +1352,13 @@ Rules:
       const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
       console.log("[rewind] Found rewind UUID:", uuid, "for keepMessages:", keepMessages);
       useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
+
+      try {
+        const result = await truncateSessionJsonlByMessages(sessionId, rewindCwd, keepMessages);
+        console.log("[rewind] JSONL truncated:", result);
+      } catch (err) {
+        console.error("[rewind] JSONL truncation failed:", err);
+      }
 
       // Force-cancel any active delegation group AND collect modifiedFiles from
       // ALL groups ever spawned by this parent — parentToGroup only tracks the

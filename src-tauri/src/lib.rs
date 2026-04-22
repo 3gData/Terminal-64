@@ -25,6 +25,7 @@ mod browser_manager;
 mod claude_manager;
 mod discord_bot;
 mod mic_manager;
+mod permission_mcp;
 mod permission_server;
 mod plugin_manifest_store;
 mod pty_manager;
@@ -201,6 +202,19 @@ fn maybe_apply_openwolf(
     }
 }
 
+/// Map frontend permission_mode strings to the CLI's internal names. Anything
+/// else (default/auto/plan/acceptEdits) we pass through as-is — the MCP
+/// approver only short-circuits on the exact `bypassPermissions` string.
+fn cli_permission_mode(mode: &str) -> &str {
+    match mode {
+        "bypass_all" => "bypassPermissions",
+        "accept_edits" => "acceptEdits",
+        "plan" => "plan",
+        "auto" => "auto",
+        _ => "default",
+    }
+}
+
 #[tauri::command]
 fn create_claude_session(
     state: tauri::State<'_, AppState>,
@@ -210,11 +224,17 @@ fn create_claude_session(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    let settings_path = state
+    let cli_mode = cli_permission_mode(&req.permission_mode);
+    let registration = state
         .permission_server
-        .register_session(&req.session_id)
-        .ok()
-        .map(|(_, p)| p.to_string_lossy().to_string());
+        .register_session(&req.session_id, cli_mode)
+        .ok();
+    let settings_path = registration
+        .as_ref()
+        .map(|(_, s, _)| s.to_string_lossy().to_string());
+    let approver_path = registration
+        .as_ref()
+        .map(|(_, _, m)| m.to_string_lossy().to_string());
     maybe_apply_openwolf(
         &settings_path,
         &req.cwd,
@@ -225,7 +245,7 @@ fn create_claude_session(
     let channel = req.channel_server.clone();
     state
         .claude_manager
-        .create_session(&app_handle, req, settings_path, channel)
+        .create_session(&app_handle, req, settings_path, approver_path, channel)
 }
 
 #[tauri::command]
@@ -237,11 +257,17 @@ fn send_claude_prompt(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    let settings_path = state
+    let cli_mode = cli_permission_mode(&req.permission_mode);
+    let registration = state
         .permission_server
-        .register_session(&req.session_id)
-        .ok()
-        .map(|(_, p)| p.to_string_lossy().to_string());
+        .register_session(&req.session_id, cli_mode)
+        .ok();
+    let settings_path = registration
+        .as_ref()
+        .map(|(_, s, _)| s.to_string_lossy().to_string());
+    let approver_path = registration
+        .as_ref()
+        .map(|(_, _, m)| m.to_string_lossy().to_string());
     maybe_apply_openwolf(
         &settings_path,
         &req.cwd,
@@ -252,7 +278,7 @@ fn send_claude_prompt(
     let channel = req.channel_server.clone();
     state
         .claude_manager
-        .send_prompt(&app_handle, req, settings_path, channel)
+        .send_prompt(&app_handle, req, settings_path, approver_path, channel)
 }
 
 #[tauri::command]
@@ -1230,16 +1256,28 @@ fn fork_session_jsonl(
 ) -> Result<String, String> {
     let src = session_jsonl_path(&cwd, &parent_session_id)?;
     let dest = session_jsonl_path(&cwd, &new_session_id)?;
-    // Copy the full JSONL to preserve the parentUuid chain
+    // Copy the full JSONL so chain-walking can resolve the fork UUID
     std::fs::copy(&src, &dest).map_err(|e| format!("copy: {}", e))?;
     // Reuse find_rewind_uuid (chain-walking) to locate the fork point UUID
-    let uuid = find_rewind_uuid(new_session_id.clone(), cwd, keep_messages)?;
+    let uuid = find_rewind_uuid(new_session_id.clone(), cwd.clone(), keep_messages)?;
+    // Truncate the copy so reloads from JSONL show only the pre-fork messages.
+    // Without this, the fork appears with the full parent history until a new
+    // prompt is sent with --resume-session-at.
+    let truncate_status =
+        match truncate_session_jsonl_by_messages(new_session_id.clone(), cwd, keep_messages) {
+            Ok(_) => "ok",
+            Err(e) => {
+                safe_eprintln!("[fork] truncate failed: {}", e);
+                "err"
+            }
+        };
     safe_eprintln!(
-        "[fork] Copied full JSONL {} -> {} (fork at msg {}, uuid={})",
+        "[fork] Copied + truncated JSONL {} -> {} (fork at msg {}, uuid={}, truncate={})",
         parent_session_id,
         new_session_id,
         keep_messages,
-        &uuid
+        &uuid,
+        truncate_status,
     );
     Ok(uuid)
 }
@@ -4370,6 +4408,12 @@ fn install_bundled_widget(app_handle: tauri::AppHandle, widget_name: String) -> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Claude CLI re-invokes this binary as its MCP permission-prompt shim.
+    // Short-circuit before Tauri bootstrap so stdio is clean for JSON-RPC.
+    if permission_mcp::is_shim_mode() {
+        permission_mcp::run_shim_from_env();
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

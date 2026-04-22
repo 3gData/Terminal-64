@@ -118,39 +118,6 @@ function App() {
         }
         const claudeSessions = useClaudeStore.getState().sessions;
 
-        // Dedupe: if an offline/orphan session shares a name with a currently-open
-        // Claude panel, drop the orphan (the open one is the "new" one the user cares about).
-        const activeClaudeSids = new Set(
-          terminals.filter((x) => x.panelType === "claude").map((x) => x.terminalId)
-        );
-        const normalize = (n: string) => n.trim().toLowerCase();
-        const activeNames = new Set<string>();
-        for (const sid of activeClaudeSids) {
-          const n = claudeSessions[sid]?.name || claudeSaved[sid]?.name;
-          if (n && n.trim()) activeNames.add(normalize(n));
-        }
-        const orphanSids: string[] = [];
-        for (const [sid, data] of Object.entries(claudeSaved)) {
-          if (activeClaudeSids.has(sid)) continue;
-          const n = data?.name;
-          if (n && activeNames.has(normalize(n))) orphanSids.push(sid);
-        }
-        if (orphanSids.length) {
-          try {
-            const updated = { ...claudeSaved };
-            for (const sid of orphanSids) delete updated[sid];
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-            claudeSaved = updated;
-          } catch (e) {
-            console.warn("[dedupe] Failed to prune orphans from claude store:", e);
-          }
-          const cs = useClaudeStore.getState();
-          for (const sid of orphanSids) {
-            if (cs.sessions[sid]) cs.removeSession(sid);
-            unlinkSessionFromDiscord(sid).catch(() => {});
-          }
-          console.log("[dedupe] Removed", orphanSids.length, "duplicate-named orphan session(s)");
-        }
         for (const t of terminals) {
           if (t.panelType !== "claude") continue;
           const liveName = claudeSessions[t.terminalId]?.name;

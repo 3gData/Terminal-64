@@ -160,6 +160,10 @@ export async function findRewindUuid(sessionId: string, cwd: string, keepMessage
   return invoke("find_rewind_uuid", { sessionId, cwd, keepMessages });
 }
 
+export async function truncateSessionJsonlByMessages(sessionId: string, cwd: string, keepMessages: number): Promise<unknown> {
+  return invoke("truncate_session_jsonl_by_messages", { sessionId, cwd, keepMessages });
+}
+
 export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepMessages: number): Promise<string> {
   return invoke("fork_session_jsonl", { parentSessionId, newSessionId, cwd, keepMessages });
 }

@@ -1,3 +1,4 @@
+use crate::permission_mcp;
 use crate::types::HookEvent;
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
@@ -106,6 +107,11 @@ pub struct PermissionServer {
     pending: PendingMap,
     pub(crate) session_map: Arc<Mutex<HashMap<String, String>>>,
     settings_files: Arc<Mutex<HashMap<String, PathBuf>>>,
+    mcp_config_files: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// Last permission mode used when registering a given run_token. Needed so
+    /// `reregister_sessions` can rebuild the MCP config with the correct mode
+    /// after a port change.
+    mcp_session_modes: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) delegation_messages: Arc<Mutex<HashMap<String, Vec<DelegationMessage>>>>,
 }
 
@@ -126,6 +132,8 @@ impl PermissionServer {
             pending,
             session_map,
             settings_files: Arc::new(Mutex::new(HashMap::new())),
+            mcp_config_files: Arc::new(Mutex::new(HashMap::new())),
+            mcp_session_modes: Arc::new(Mutex::new(HashMap::new())),
             delegation_messages,
         };
         server.spawn_listener()?;
@@ -208,7 +216,8 @@ impl PermissionServer {
         Err("Permission server failed to restart after 5 attempts".into())
     }
 
-    /// After a restart on a new port, re-write all temp settings files with the new URL.
+    /// After a restart on a new port, re-write all temp settings + MCP config
+    /// files with the new URL so in-flight sessions keep working.
     fn reregister_sessions(&self) {
         let new_port = self.port.load(Ordering::SeqCst);
         let tokens: Vec<(String, String)> = self
@@ -218,6 +227,8 @@ impl PermissionServer {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+
+        let current_exe = std::env::current_exe().ok();
 
         for (run_token, session_id) in &tokens {
             let settings = build_hook_settings(new_port, &self.secret, run_token);
@@ -230,6 +241,37 @@ impl PermissionServer {
                 if let Err(e) = std::fs::write(path, settings.to_string()) {
                     safe_eprintln!(
                         "[perm-server] Failed to rewrite settings for session {}: {}",
+                        session_id,
+                        e
+                    );
+                }
+            }
+            if let (Some(exe), Some(mcp_path)) = (
+                current_exe.as_ref(),
+                self.mcp_config_files
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(run_token)
+                    .cloned(),
+            ) {
+                let mode = self
+                    .mcp_session_modes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(run_token)
+                    .cloned()
+                    .unwrap_or_default();
+                let cfg = permission_mcp::build_mcp_config(
+                    exe,
+                    new_port,
+                    &self.secret,
+                    run_token,
+                    session_id,
+                    &mode,
+                );
+                if let Err(e) = std::fs::write(&mcp_path, cfg.to_string()) {
+                    safe_eprintln!(
+                        "[perm-server] Failed to rewrite MCP config for session {}: {}",
                         session_id,
                         e
                     );
@@ -261,24 +303,59 @@ impl PermissionServer {
         }
     }
 
-    /// Get or create a settings file for a session. Reuses existing registration.
-    /// Auto-restarts the server if it's down.
-    pub fn register_session(&self, session_id: &str) -> Result<(String, PathBuf), String> {
-        // Ensure the listener is alive before registering
+    /// Get or create a settings + MCP-approver config pair for a session.
+    /// Returns `(run_token, hook_settings_path, mcp_config_path)`.
+    ///
+    /// The settings file carries the HTTP hook URLs; the MCP config tells
+    /// Claude CLI to spawn this binary (via `permission_mcp`) as a stdio
+    /// permission-prompt tool. Together they form the full permission plumbing
+    /// for a session.
+    pub fn register_session(
+        &self,
+        session_id: &str,
+        permission_mode: &str,
+    ) -> Result<(String, PathBuf, PathBuf), String> {
         self.ensure_alive()?;
 
-        // Reuse existing token if session is already registered
+        // Reuse existing registration if the session is already set up. We
+        // still refresh the stored mode + MCP config because the user may have
+        // switched permission_mode between turns.
         {
             let map = self.session_map.lock().map_err(|e| e.to_string())?;
             for (token, sid) in map.iter() {
                 if sid == session_id {
-                    if let Some(path) = self
+                    let settings = self
                         .settings_files
                         .lock()
                         .map_err(|e| e.to_string())?
                         .get(token)
-                    {
-                        return Ok((token.clone(), path.clone()));
+                        .cloned();
+                    let mcp = self
+                        .mcp_config_files
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .get(token)
+                        .cloned();
+                    if let (Some(s), Some(m)) = (settings, mcp) {
+                        // Refresh MCP config with the current mode so the next
+                        // CLI spawn sees the right value.
+                        if let Ok(exe) = std::env::current_exe() {
+                            let port = self.port.load(Ordering::SeqCst);
+                            let cfg = permission_mcp::build_mcp_config(
+                                &exe,
+                                port,
+                                &self.secret,
+                                token,
+                                session_id,
+                                permission_mode,
+                            );
+                            let _ = std::fs::write(&m, cfg.to_string());
+                        }
+                        self.mcp_session_modes
+                            .lock()
+                            .map_err(|e| e.to_string())?
+                            .insert(token.clone(), permission_mode.to_string());
+                        return Ok((token.clone(), s, m));
                     }
                 }
             }
@@ -286,14 +363,25 @@ impl PermissionServer {
 
         let run_token = random_token();
         let port = self.port.load(Ordering::SeqCst);
-        let settings = build_hook_settings(port, &self.secret, &run_token);
+        let short_token = &run_token[..run_token.len().min(12)];
 
-        let path = std::env::temp_dir().join(format!(
-            "t64-hook-{}.json",
-            &run_token[..run_token.len().min(12)]
-        ));
-        std::fs::write(&path, settings.to_string())
+        let settings = build_hook_settings(port, &self.secret, &run_token);
+        let settings_path = std::env::temp_dir().join(format!("t64-hook-{}.json", short_token));
+        std::fs::write(&settings_path, settings.to_string())
             .map_err(|e| format!("write settings: {}", e))?;
+
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+        let mcp_config = permission_mcp::build_mcp_config(
+            &exe,
+            port,
+            &self.secret,
+            &run_token,
+            session_id,
+            permission_mode,
+        );
+        let mcp_path = std::env::temp_dir().join(format!("t64-mcp-{}.json", short_token));
+        std::fs::write(&mcp_path, mcp_config.to_string())
+            .map_err(|e| format!("write mcp config: {}", e))?;
 
         self.session_map
             .lock()
@@ -302,17 +390,26 @@ impl PermissionServer {
         self.settings_files
             .lock()
             .map_err(|e| e.to_string())?
-            .insert(run_token.clone(), path.clone());
+            .insert(run_token.clone(), settings_path.clone());
+        self.mcp_config_files
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(run_token.clone(), mcp_path.clone());
+        self.mcp_session_modes
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(run_token.clone(), permission_mode.to_string());
 
         safe_eprintln!(
-            "[perm-server] Registered session {} with token {}",
+            "[perm-server] Registered session {} with token {} mode={}",
             session_id,
-            &run_token[..run_token.len().min(12)]
+            short_token,
+            permission_mode
         );
-        Ok((run_token, path))
+        Ok((run_token, settings_path, mcp_path))
     }
 
-    /// Unregister a session: remove mapping, delete temp file, deny pending requests.
+    /// Unregister a session: remove mapping, delete temp files, drop pending requests.
     pub fn unregister_session(&self, run_token: &str) {
         self.session_map
             .lock()
@@ -326,6 +423,18 @@ impl PermissionServer {
         {
             let _ = std::fs::remove_file(path);
         }
+        if let Some(path) = self
+            .mcp_config_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(run_token)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        self.mcp_session_modes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(run_token);
     }
 
     /// Resolve a pending permission request.
@@ -514,6 +623,131 @@ fn handle_connection(
         return Ok(());
     }
 
+    // ---- MCP approver route (from the stdio shim Claude CLI spawns) ----
+    //
+    // Fires whenever `--permission-prompt-tool mcp__t64__approve` is invoked by
+    // the CLI. This is the only path that can silence the sensitive-file
+    // classifier — we MUST NOT cancel the CLI's stream here; just wait on the
+    // user's decision and return `{behavior:"allow"|"deny"}` synchronously.
+    if path.starts_with("/mcp-approve/") {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() < 4 || parts[2] != secret {
+            send_http(&mut stream, 403, r#"{"error":"forbidden"}"#);
+            return Ok(());
+        }
+        let run_token = parts[3].to_string();
+
+        const MAX_BODY: usize = 1024 * 1024;
+        let content_length: usize = headers
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+            .min(MAX_BODY);
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader
+                .read_exact(&mut body)
+                .map_err(|e| format!("body: {}", e))?;
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let tool_name = parsed["tool_name"].as_str().unwrap_or("").to_string();
+        let tool_input = parsed["input"].clone();
+        let tool_use_id = parsed["tool_use_id"].as_str().unwrap_or("").to_string();
+
+        let session_id = sessions
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&run_token)
+            .cloned()
+            .unwrap_or_default();
+
+        // Unknown session (race during rewind/cancel/server-restart): fail
+        // closed to the CLI but with an explanatory message.
+        if session_id.is_empty() {
+            let deny = serde_json::json!({
+                "behavior": "deny",
+                "message": "Terminal 64: session is not registered (possibly closed or restarted). Skipping this tool call."
+            });
+            send_http(&mut stream, 200, &deny.to_string());
+            return Ok(());
+        }
+
+        // Look up session mode. The MCP shim forwarded whatever the CLI told
+        // it, but the authoritative mode lives in the launch map on the
+        // frontend — for MVP we consult the hook payload schema's
+        // `permission_mode` if present (future: /mcp-approve carries it
+        // explicitly). Bypass means the user already opted into sensitive-file
+        // edits, so we rubber-stamp without a prompt.
+        let permission_mode = parsed["permission_mode"].as_str().unwrap_or("");
+        if permission_mode == "bypassPermissions" {
+            let allow = serde_json::json!({
+                "behavior": "allow",
+                "updatedInput": tool_input,
+                "message": "Terminal 64 bypass mode"
+            });
+            safe_eprintln!(
+                "[perm-server] MCP bypass-allow {} for session {}",
+                tool_name,
+                &session_id[..session_id.len().min(8)]
+            );
+            send_http(&mut stream, 200, &allow.to_string());
+            return Ok(());
+        }
+
+        // Non-bypass: route to the UI via the existing pending channel.
+        let request_id = next_id();
+        safe_eprintln!(
+            "[perm-server] MCP approve request {} for {} in session {}",
+            request_id,
+            tool_name,
+            &session_id[..session_id.len().min(8)]
+        );
+        let (tx, rx) = mpsc::sync_channel(1);
+        pending
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(request_id.clone(), tx);
+
+        let _ = app_handle.emit(
+            "permission-request",
+            serde_json::json!({
+                "request_id": request_id,
+                "session_id": session_id,
+                "provider_id": "claude-code",
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "tool_use_id": tool_use_id,
+                "source": "mcp-approve",
+            }),
+        );
+
+        stream.set_read_timeout(None).ok();
+        let (allow, reason) = match rx.recv_timeout(Duration::from_secs(300)) {
+            Ok(decision) => decision,
+            Err(_) => {
+                pending
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .remove(&request_id);
+                (false, "Permission request timed out".to_string())
+            }
+        };
+
+        let resp = if allow {
+            serde_json::json!({
+                "behavior": "allow",
+                "updatedInput": tool_input,
+                "message": reason,
+            })
+        } else {
+            serde_json::json!({ "behavior": "deny", "message": reason })
+        };
+        send_http(&mut stream, 200, &resp.to_string());
+        return Ok(());
+    }
+
     // Parse path: /hook/{secret}/{run_token}
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() < 4 || parts[1] != "hook" || parts[2] != secret {
@@ -557,7 +791,14 @@ fn handle_connection(
         }
     };
 
-    // Look up session
+    // Look up session. The request has already passed the global `secret`
+    // check in the URL, so an unknown `run_token` means "session was
+    // unregistered" (race between close_claude_session and an in-flight hook,
+    // or a leftover child process from a previous spawn) — not a spoofed
+    // request. We still fail-closed for interactive modes because we need a
+    // session_id to route the prompt to; but bypassPermissions must allow
+    // regardless, otherwise the user silently loses tool calls they'd
+    // explicitly opted into.
     let session_id = sessions
         .lock()
         .map_err(|e| e.to_string())?
@@ -565,10 +806,29 @@ fn handle_connection(
         .cloned()
         .unwrap_or_default();
 
+    // Extract permission_mode before the session gate so bypass short-circuits
+    // even when the session lookup fails.
+    let payload_permission_mode = parsed["permission_mode"].as_str().unwrap_or("");
+
     if session_id.is_empty() {
-        // Unknown token — fail-closed. For PreToolUse we must return a
-        // permissionDecision of "deny" using the Claude Code 2.x shape;
-        // other events can just 200 {} and move on.
+        if event_name == "PreToolUse" && payload_permission_mode == "bypassPermissions" {
+            let resp = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "bypassPermissions mode (session not registered)"
+                }
+            });
+            safe_eprintln!(
+                "[perm-server] Bypass allow for unregistered token {} (tool={})",
+                &run_token[..run_token.len().min(12)],
+                parsed["tool_name"].as_str().unwrap_or("?"),
+            );
+            send_http(&mut stream, 200, &resp.to_string());
+            return Ok(());
+        }
+        // Unknown token + not bypass — fail-closed with a deny decision for
+        // PreToolUse; other events can just 200 {} and move on.
         if event_name == "PreToolUse" {
             let resp = serde_json::json!({
                 "hookSpecificOutput": {
@@ -609,8 +869,9 @@ fn handle_connection(
             // every hook payload. When the user has selected "bypass
             // permissions", the CLI won't prompt itself, but PreToolUse hooks
             // still fire — so we must auto-allow here or we'd prompt the user
-            // for tools they've already opted to bypass.
-            let permission_mode = parsed["permission_mode"].as_str().unwrap_or("");
+            // for tools they've already opted to bypass. Already parsed above
+            // so bypass can short-circuit the unknown-session path too.
+            let permission_mode = payload_permission_mode;
 
             // Emit the Claude-facing hook event for orchestrator / listeners.
             emit_hook_event(event_name, &parsed);

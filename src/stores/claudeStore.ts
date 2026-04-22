@@ -173,9 +173,12 @@ function saveToStorage(sessions: Record<string, ClaudeSession>) {
       console.warn("[claudeStore] Failed to parse existing sessions:", e);
     }
 
-    // Remove sessions that are no longer in memory if they're unnamed or delegation children
+    // Clean up delegation children that are no longer in memory. Unnamed-user
+    // sessions are NOT pruned here — `removeSession` handles that explicitly
+    // when the panel is closed. Pruning here just because a panel isn't yet
+    // mounted (e.g. during boot rehydration) would delete live history.
     for (const id of Object.keys(existing)) {
-      if (!sessions[id] && (!existing[id]?.name || existing[id]?.name?.startsWith("[D] "))) {
+      if (!sessions[id] && existing[id]?.name?.startsWith("[D] ")) {
         delete existing[id];
       }
     }
@@ -586,11 +589,14 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => ({ sessions: updateSession(s.sessions, sessionId, { promptQueue: [] }) }));
   },
 
-  // Load message history from disk JSONL (replaces current messages unconditionally)
+  // Load message history from disk JSONL. Only applies when the in-memory
+  // array is shorter than the disk snapshot — refuses to shrink existing
+  // history, which guards against stale JSONL clobbering a live session.
   loadFromDisk: (sessionId, messages) => {
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
+      if (session.messages.length >= messages.length) return s;
       const promptCount = messages.filter((m) => m.role === "user").length;
       const updated = updateSession(s.sessions, sessionId, { messages, promptCount, hasBeenStarted: promptCount > 0 });
       debouncedSave();

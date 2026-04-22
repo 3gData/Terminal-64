@@ -88,3 +88,6 @@
 | 05:22 | Wired frontend for claude skills reverse bridge (syncClaudeSkills + generateSkillMetadata + imported badge) | tauriApi.ts, types.ts, SkillDialog.tsx, Skill.css | tsc --noEmit clean | ~1.2k |
 | 05:25 | Added generate_skill_metadata Tauri command (Haiku backfill, sidecar .meta/{id}.json) | src-tauri/src/lib.rs | cargo check clean, clippy clean for new code | ~600 |
 | 05:30 | Reverse bridge (Rust): parse_skill_frontmatter helper, sync_claude_skills scans ~/.claude/skills + plugin cache and symlinks into T64 library with .meta/ sidecars, list_skills/delete_skill symlink-aware, setup hook background-sync | src-tauri/src/lib.rs | cargo check clean; clippy clean for lib.rs (6 pre-existing errors in discord_bot/voice_manager/widget_server unchanged) | ~2500 |
+| 21:36 | fix rewind/fork JSONL persistence | ClaudeChat.tsx, lib.rs, tauriApi.ts | added truncateSessionJsonlByMessages call in both rewind paths + truncation after fork copy | ~900 |
+| 22:10 | fix silent deny on bypass mode | permission_server.rs | bypass short-circuits before session lookup so unknown-token races allow | ~800 |
+| 22:40 | sensitive-file approval flow | ClaudeChat.tsx, useClaudeEvents.ts, claudeStore.ts | detect CLI classifier reject, show approval card, apply edit locally | ~2500 |
