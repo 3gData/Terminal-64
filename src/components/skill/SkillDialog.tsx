@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnClaudeWithPrompt } from "../../lib/tauriApi";
+import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnClaudeWithPrompt, syncClaudeSkills, generateSkillMetadata } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -108,7 +108,16 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
   const recentDirs = useSettingsStore((s) => s.recentDirs);
   const addRecentDir = useSettingsStore((s) => s.addRecentDir);
 
-  const refreshList = () => listSkills().then(setSkills).catch(() => {});
+  const refreshList = () => listSkills().then((list) => {
+    setSkills(list);
+    for (const s of list) {
+      if (s.pending_backfill) {
+        generateSkillMetadata(s.name)
+          .then(() => listSkills().then(setSkills).catch(() => {}))
+          .catch(() => {});
+      }
+    }
+  }).catch(() => {});
 
   useEffect(() => {
     if (!isOpen) return;
@@ -121,7 +130,10 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
     setDetailContent(null);
     semantic.clear();
     setSearchMode("keyword");
-    refreshList();
+    (async () => {
+      try { await syncClaudeSkills(); } catch {}
+      refreshList();
+    })();
     setTimeout(() => searchRef.current?.focus(), 120);
   }, [isOpen]);
 
@@ -526,6 +538,9 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
                           <div className="skl-card-content">
                             <div className="skl-card-top">
                               <span className="skl-card-name">{s.name}</span>
+                              {s.imported_from && (
+                                <span className="skl-card-imported" title={`Imported from ${s.imported_from}`}>imported</span>
+                              )}
                               <span className={`skl-card-status ${s.has_skill_md ? "skl-card-status--ready" : "skl-card-status--empty"}`} />
                             </div>
                             {s.description && (

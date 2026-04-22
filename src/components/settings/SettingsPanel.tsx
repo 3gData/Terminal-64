@@ -125,6 +125,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   // Quick Theme
   const [themePrompt, setThemePrompt] = useState("");
   const [themeGenerating, setThemeGenerating] = useState(false);
+  const [themeError, setThemeError] = useState<string | null>(null);
   const themeGenIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -191,39 +192,54 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
   const handleGenerateTheme = async () => {
     if (!themePrompt.trim() || themeGenerating) return;
+    setThemeError(null);
     setThemeGenerating(true);
 
     const unlistenChunk = await onThemeGenChunk(() => {});
     const unlistenDone = await onThemeGenDone((payload) => {
-      if (themeGenIdRef.current && payload.id === themeGenIdRef.current) {
-        try {
-          // Extract JSON from response (may have markdown fences)
-          let json = payload.text.trim();
-          const fenceMatch = json.match(/```(?:json)?\s*([\s\S]*?)```/);
-          if (fenceMatch && fenceMatch[1]) json = fenceMatch[1].trim();
-          const theme = JSON.parse(json) as ThemeDefinition;
-          const requiredUi = ["bg","bgSecondary","bgTertiary","fg","fgSecondary","fgMuted","border","accent","accentHover","tabActiveBg","tabInactiveBg","tabActiveFg","tabInactiveFg","tabHoverBg","scrollbar","scrollbarHover"] as const;
-          if (theme.name && theme.ui && theme.terminal && requiredUi.every((k) => theme.ui[k])) {
-            addTheme(theme);
-            setTheme(theme.name);
-            setSetting({ theme: theme.name });
-            setThemePrompt("");
-          }
-        } catch (err) {
-          console.error("[quick-theme] Failed to parse theme JSON:", err);
+      if (!themeGenIdRef.current || payload.id !== themeGenIdRef.current) return;
+
+      try {
+        if (!payload.text.trim()) {
+          throw new Error("empty response from claude — check claude CLI auth");
         }
-        setThemeGenerating(false);
-        themeGenIdRef.current = null;
-        unlistenChunk();
-        unlistenDone();
+        // Strip markdown fences if Haiku wrapped the JSON in one
+        let json = payload.text.trim();
+        const fenceMatch = json.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fenceMatch && fenceMatch[1]) json = fenceMatch[1].trim();
+        const theme = JSON.parse(json) as ThemeDefinition;
+
+        const requiredUi = ["bg","bgSecondary","bgTertiary","fg","fgSecondary","fgMuted","border","accent","accentHover","tabActiveBg","tabInactiveBg","tabActiveFg","tabInactiveFg","tabHoverBg","scrollbar","scrollbarHover"] as const;
+        if (!theme.name || !theme.ui || !theme.terminal) {
+          throw new Error("response missing name/ui/terminal fields");
+        }
+        const missing = requiredUi.filter((k) => !theme.ui[k]);
+        if (missing.length > 0) {
+          throw new Error(`theme.ui missing fields: ${missing.join(", ")}`);
+        }
+
+        addTheme(theme);
+        setTheme(theme.name);
+        setSetting({ theme: theme.name });
+        setThemePrompt("");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[quick-theme] Failed:", msg, "\nResponse:", payload.text);
+        setThemeError(msg);
       }
+      setThemeGenerating(false);
+      themeGenIdRef.current = null;
+      unlistenChunk();
+      unlistenDone();
     });
 
     try {
       const genId = await generateTheme(themePrompt.trim());
       themeGenIdRef.current = genId;
     } catch (err) {
-      console.error("[quick-theme] Failed to start generation:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[quick-theme] Failed to start generation:", msg);
+      setThemeError(`failed to start: ${msg}`);
       setThemeGenerating(false);
       unlistenChunk();
       unlistenDone();
@@ -313,6 +329,11 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                   {themeGenerating ? "..." : "Go"}
                 </button>
               </div>
+              {themeError && (
+                <span className="sp-hint" style={{ color: "#f38ba8" }}>
+                  Theme generation failed: {themeError}
+                </span>
+              )}
             </div>
           </Section>
 

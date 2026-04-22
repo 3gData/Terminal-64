@@ -407,6 +407,14 @@ export async function listSkills(): Promise<SkillInfo[]> {
   return invoke("list_skills");
 }
 
+export async function syncClaudeSkills(): Promise<string[]> {
+  return invoke("sync_claude_skills");
+}
+
+export async function generateSkillMetadata(skillId: string): Promise<void> {
+  return invoke("generate_skill_metadata", { skillId });
+}
+
 export async function deleteSkill(skillId: string): Promise<void> {
   return invoke("delete_skill", { skillId });
 }

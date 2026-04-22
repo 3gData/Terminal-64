@@ -446,11 +446,8 @@ Rules:
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose")
-        .arg("--include-partial-messages")
         .arg("--model")
         .arg("haiku")
-        .arg("--effort")
-        .arg("high")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
@@ -477,43 +474,61 @@ Rules:
     std::thread::spawn(move || {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(stdout);
-        let mut full_text = String::new();
+        // Prefer the terminal `result` event (single source of truth for final
+        // text). Fall back to accumulating top-level `assistant` text blocks
+        // if `result` never arrives (e.g. CLI error before completion).
+        let mut final_text: Option<String> = None;
+        let mut fallback_text = String::new();
         for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                let event_type = parsed["type"].as_str().unwrap_or("");
-                if event_type == "content_block_delta" {
-                    if let Some(text) = parsed["delta"]["text"].as_str() {
-                        full_text.push_str(text);
-                        let _ = app_handle.emit(
-                            "theme-gen-chunk",
-                            serde_json::json!({ "id": gid, "text": text }),
-                        );
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let event_type = parsed["type"].as_str().unwrap_or("");
+            match event_type {
+                // Live-streamed text deltas for UI preview. Claude Code ≥2.1
+                // wraps deltas inside a `stream_event` envelope.
+                "stream_event" => {
+                    let inner_type = parsed["event"]["type"].as_str().unwrap_or("");
+                    if inner_type == "content_block_delta" {
+                        let delta_type = parsed["event"]["delta"]["type"].as_str().unwrap_or("");
+                        if delta_type == "text_delta" {
+                            if let Some(text) = parsed["event"]["delta"]["text"].as_str() {
+                                let _ = app_handle.emit(
+                                    "theme-gen-chunk",
+                                    serde_json::json!({ "id": gid, "text": text }),
+                                );
+                            }
+                        }
                     }
-                } else if event_type == "assistant" {
+                }
+                "assistant" => {
                     if let Some(content) = parsed["message"]["content"].as_array() {
                         for block in content {
                             if block["type"].as_str() == Some("text") {
                                 if let Some(text) = block["text"].as_str() {
-                                    full_text.push_str(text);
-                                    let _ = app_handle.emit(
-                                        "theme-gen-chunk",
-                                        serde_json::json!({ "id": gid, "text": text }),
-                                    );
+                                    fallback_text.push_str(text);
                                 }
                             }
                         }
                     }
                 }
+                "result" => {
+                    if let Some(text) = parsed["result"].as_str() {
+                        final_text = Some(text.to_string());
+                    }
+                }
+                _ => {}
             }
         }
+        let text = final_text.unwrap_or(fallback_text);
+        safe_eprintln!("[theme-gen] Done ({}), {} chars", gid, text.len());
         let _ = app_handle.emit(
             "theme-gen-done",
-            serde_json::json!({ "id": gid, "text": full_text }),
+            serde_json::json!({ "id": gid, "text": text }),
         );
-        safe_eprintln!("[theme-gen] Done ({})", gid);
     });
 
     Ok(gen_id)
@@ -2783,6 +2798,43 @@ fn skills_base_dir() -> Result<std::path::PathBuf, String> {
     Ok(home.join(".terminal64").join("skills"))
 }
 
+/// Read a SKILL.md file and extract `name` and `description` from its YAML
+/// frontmatter. Returns `(None, None)` on read failure or when no frontmatter
+/// is present. Values are trimmed of surrounding quotes.
+fn parse_skill_frontmatter(path: &std::path::Path) -> (Option<String>, Option<String>) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+    let content_trimmed = content.trim_start();
+    let yaml_block = if let Some(rest) = content_trimmed.strip_prefix("---") {
+        if let Some(end) = rest.find("---") {
+            rest[..end].trim()
+        } else {
+            ""
+        }
+    } else {
+        ""
+    };
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    for line in yaml_block.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                name = Some(val.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("description:") {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                description = Some(val.to_string());
+            }
+        }
+    }
+    (name, description)
+}
+
 #[tauri::command]
 fn create_skill_folder(skill_id: String) -> Result<String, String> {
     let dir = skills_base_dir()?.join(&skill_id);
@@ -2816,15 +2868,31 @@ fn list_skills() -> Result<Vec<serde_json::Value>, String> {
     if !base.exists() {
         return Ok(vec![]);
     }
+    let meta_dir = base.join(".meta");
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".meta" {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let meta_path = entry.path().join("skill.json");
-        let skill_md_exists = entry.path().join("SKILL.md").exists();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let is_symlink = file_type.is_symlink();
+        let path = entry.path();
+        // For symlinks, follow to check whether the target is a directory.
+        let is_dir_target = if is_symlink {
+            path.is_dir()
+        } else {
+            file_type.is_dir()
+        };
+        if !is_dir_target {
+            continue;
+        }
+        let skill_md_path = path.join("SKILL.md");
+        let skill_md_exists = skill_md_path.exists();
         let modified = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -2835,22 +2903,60 @@ fn list_skills() -> Result<Vec<serde_json::Value>, String> {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        if let Ok(content) = std::fs::read_to_string(&meta_path) {
-            if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) {
-                meta["has_skill_md"] = serde_json::json!(skill_md_exists);
-                meta["modified"] = serde_json::json!(modified);
-                out.push(meta);
-                continue;
+        // Prefer the sidecar sidecar at .meta/{name}.json for symlinked entries
+        // (imported from outside ~/.terminal64/skills/), fall back to inline
+        // skill.json for skills we own outright.
+        let mut meta: Option<serde_json::Value> = None;
+        if is_symlink {
+            let sidecar = meta_dir.join(format!("{}.json", name));
+            if let Ok(content) = std::fs::read_to_string(&sidecar) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                    meta = Some(parsed);
+                }
             }
         }
-        // Fallback if no skill.json
-        out.push(serde_json::json!({
-            "name": name,
-            "description": "",
-            "tags": [],
-            "has_skill_md": skill_md_exists,
-            "modified": modified,
-        }));
+        if meta.is_none() {
+            let meta_path = path.join("skill.json");
+            if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                    meta = Some(parsed);
+                }
+            }
+        }
+        let mut meta = meta.unwrap_or_else(|| {
+            serde_json::json!({
+                "name": name,
+                "description": "",
+                "tags": [],
+            })
+        });
+        if meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
+            meta["name"] = serde_json::json!(name);
+        }
+        // If description is still empty, fall back to the SKILL.md frontmatter
+        // so imported skills without a backfilled sidecar still render a label.
+        let empty_desc = meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.is_empty())
+            .unwrap_or(true);
+        if empty_desc && skill_md_exists {
+            let (_, desc) = parse_skill_frontmatter(&skill_md_path);
+            if let Some(d) = desc {
+                meta["description"] = serde_json::json!(d);
+            }
+        }
+        meta["has_skill_md"] = serde_json::json!(skill_md_exists);
+        meta["modified"] = serde_json::json!(modified);
+        if is_symlink {
+            meta["is_symlink"] = serde_json::json!(true);
+        }
+        out.push(meta);
     }
     out.sort_by(|a, b| b["modified"].as_u64().cmp(&a["modified"].as_u64()));
     Ok(out)
@@ -2858,11 +2964,126 @@ fn list_skills() -> Result<Vec<serde_json::Value>, String> {
 
 #[tauri::command]
 fn delete_skill(skill_id: String) -> Result<(), String> {
-    let dir = skills_base_dir()?.join(&skill_id);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("rm: {}", e))?;
+    let base = skills_base_dir()?;
+    let dir = base.join(&skill_id);
+    // Use symlink_metadata so we inspect the link itself rather than the
+    // target — deleting a symlink must not recurse into the imported source.
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::remove_file(&dir).map_err(|e| format!("rm symlink: {}", e))?;
+        }
+        Ok(_) => {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("rm: {}", e))?;
+        }
+        Err(_) => {} // doesn't exist — nothing to do
     }
+    // Drop sidecar metadata if it exists; ignore errors (e.g. already gone).
+    let sidecar = base.join(".meta").join(format!("{}.json", skill_id));
+    let _ = std::fs::remove_file(&sidecar);
     Ok(())
+}
+
+/// Scan `~/.claude/skills/` and `~/.claude/plugins/cache/*/skills/` for skills
+/// not yet present in `~/.terminal64/skills/`, symlink them in, and write a
+/// sidecar metadata file at `.meta/{name}.json`. Returns the names that were
+/// newly imported this run.
+#[tauri::command]
+fn sync_claude_skills() -> Result<Vec<String>, String> {
+    let home = dirs::home_dir().ok_or("No home dir")?;
+    let base = skills_base_dir()?;
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir skills: {}", e))?;
+    let meta_dir = base.join(".meta");
+    std::fs::create_dir_all(&meta_dir).map_err(|e| format!("mkdir meta: {}", e))?;
+
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    let claude_skills = home.join(".claude").join("skills");
+    if claude_skills.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&claude_skills) {
+            for e in entries.flatten() {
+                sources.push(e.path());
+            }
+        }
+    }
+    let cache = home.join(".claude").join("plugins").join("cache");
+    if cache.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&cache) {
+            for pkg in entries.flatten() {
+                let skills_sub = pkg.path().join("skills");
+                if skills_sub.is_dir() {
+                    if let Ok(sks) = std::fs::read_dir(&skills_sub) {
+                        for sk in sks.flatten() {
+                            sources.push(sk.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut imported: Vec<String> = Vec::new();
+    for src in sources {
+        // Skip our own outgoing bridge symlinks (ensure_skills_plugin creates
+        // ~/.claude/skills/<name> -> ~/.terminal64/skills/<name>); re-importing
+        // them would create a cycle.
+        if let Ok(target) = std::fs::read_link(&src) {
+            if target.starts_with(&base) {
+                continue;
+            }
+        }
+        // Must be a directory (real or symlinked) containing SKILL.md.
+        if !src.is_dir() {
+            continue;
+        }
+        let skill_md = src.join("SKILL.md");
+        if !skill_md.exists() {
+            continue;
+        }
+        let name = match src.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
+        if name == ".meta" {
+            continue;
+        }
+        let dest = base.join(&name);
+        // Anything already occupying the slot wins — don't clobber a local
+        // skill with an imported one of the same name.
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            safe_eprintln!(
+                "[skills-sync] conflict: '{}' already exists at {:?}, skipping import from {:?}",
+                name,
+                dest,
+                src
+            );
+            continue;
+        }
+        if let Err(e) = create_dir_link(&src, &dest) {
+            safe_eprintln!("[skills-sync] link {:?} -> {:?} failed: {}", dest, src, e);
+            continue;
+        }
+        let (_, description) = parse_skill_frontmatter(&skill_md);
+        // Always flag for Haiku backfill — frontmatter can give us a
+        // description but never tags, so imported skills need the model pass
+        // to populate tags (and fill description if the frontmatter lacked one).
+        let sidecar = serde_json::json!({
+            "name": name,
+            "description": description.clone().unwrap_or_default(),
+            "tags": Vec::<String>::new(),
+            "imported_from": src.to_string_lossy(),
+            "pending_backfill": true,
+        });
+        let side_path = meta_dir.join(format!("{}.json", name));
+        match serde_json::to_string_pretty(&sidecar) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&side_path, json) {
+                    safe_eprintln!("[skills-sync] write sidecar {:?} failed: {}", side_path, e);
+                }
+            }
+            Err(e) => safe_eprintln!("[skills-sync] serialize sidecar '{}': {}", name, e),
+        }
+        imported.push(name);
+    }
+    Ok(imported)
 }
 
 #[tauri::command]
@@ -2971,17 +3192,14 @@ fn resolve_skill_prompt(
         ("", content_trimmed)
     };
 
-    // Extract frontmatter fields
-    let mut resolved_name = skill_name.clone();
+    // Extract frontmatter fields. Name/description come from the shared
+    // helper; allowed-tools is still parsed inline since the helper only
+    // returns the two fields the rest of the codebase needs.
+    let (frontmatter_name, _) = parse_skill_frontmatter(&skill_md);
+    let resolved_name = frontmatter_name.unwrap_or_else(|| skill_name.clone());
     let mut allowed_tools: Vec<String> = Vec::new();
     for line in yaml_block.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("name:") {
-            let val = rest.trim().trim_matches('"').trim_matches('\'');
-            if !val.is_empty() {
-                resolved_name = val.to_string();
-            }
-        }
         if let Some(rest) = trimmed.strip_prefix("allowed-tools:") {
             let val = rest.trim();
             if !val.is_empty() {
@@ -3237,6 +3455,131 @@ fn ensure_skills_plugin() -> Result<(), String> {
         "[skills] Plugin bridge installed at {}",
         plugin_dir.display()
     );
+    Ok(())
+}
+
+#[tauri::command]
+async fn generate_skill_metadata(skill_id: String) -> Result<(), String> {
+    const SYSTEM_PROMPT: &str = "You analyse the contents of a Claude Code SKILL.md file and emit metadata for a skill library entry.\n\nOutput rules:\n- Output ONLY a single JSON object, no prose, no code fences.\n- Schema: {\"description\": string, \"tags\": string[]}.\n- description: one sentence, <= 160 chars, plain English, summarising what the skill does and when to use it.\n- tags: 3 to 6 lowercase kebab-case tokens (a-z, 0-9, hyphens). No spaces, no underscores, no punctuation.\n- Do not include any other keys.";
+    const MODEL: &str = "claude-haiku-4-5-20251001";
+
+    let dir = skills_base_dir()?.join(&skill_id);
+    let skill_md = dir.join("SKILL.md");
+    let content = std::fs::read_to_string(&skill_md)
+        .map_err(|e| format!("read {}: {}", skill_md.display(), e))?;
+
+    // Mirror rewrite_prompt's auth: it shells out to the Claude CLI which
+    // resolves credentials itself. For a direct Messages API call we use the
+    // standard ANTHROPIC_API_KEY env var, which the CLI also honours.
+    let api_key =
+        std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
+
+    let user_msg = format!("SKILL.md contents:\n\n{}", content);
+    let body = serde_json::json!({
+        "model": MODEL,
+        "max_tokens": 300,
+        "system": SYSTEM_PROMPT,
+        "messages": [{ "role": "user", "content": user_msg }],
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("anthropic request: {}", e))?;
+
+    let status = resp.status();
+    let resp_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("read response: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("anthropic {}: {}", status, resp_text));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&resp_text)
+        .map_err(|e| format!("parse response: {} body={}", e, resp_text))?;
+    let text = parsed["content"]
+        .as_array()
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find_map(|b| b.get("text").and_then(|t| t.as_str()))
+        })
+        .ok_or_else(|| format!("no text in response: {}", resp_text))?;
+
+    // Tolerate ```json ... ``` fences and surrounding whitespace.
+    let mut payload = text.trim();
+    if let Some(rest) = payload.strip_prefix("```json") {
+        payload = rest.trim();
+    } else if let Some(rest) = payload.strip_prefix("```") {
+        payload = rest.trim();
+    }
+    if let Some(rest) = payload.strip_suffix("```") {
+        payload = rest.trim();
+    }
+    // If the model wrapped its JSON in extra prose, slice between first { and last }.
+    let payload_owned = if !payload.starts_with('{') {
+        let start = payload
+            .find('{')
+            .ok_or_else(|| format!("no json object in: {}", text))?;
+        let end = payload
+            .rfind('}')
+            .ok_or_else(|| format!("no json object close in: {}", text))?;
+        payload[start..=end].to_string()
+    } else {
+        payload.to_string()
+    };
+
+    let meta_resp: serde_json::Value = serde_json::from_str(&payload_owned)
+        .map_err(|e| format!("parse metadata json: {} body={}", e, payload_owned))?;
+    let description = meta_resp["description"]
+        .as_str()
+        .ok_or("missing description")?
+        .to_string();
+    let tags: Vec<String> = meta_resp["tags"]
+        .as_array()
+        .ok_or("missing tags")?
+        .iter()
+        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+        .collect();
+
+    // Sidecar metadata lives in ~/.terminal64/skills/.meta/{id}.json so the
+    // skill folder itself stays untouched (it may be a symlink we don't own).
+    let meta_dir = skills_base_dir()?.join(".meta");
+    std::fs::create_dir_all(&meta_dir).map_err(|e| format!("mkdir meta: {}", e))?;
+    let meta_path = meta_dir.join(format!("{}.json", skill_id));
+
+    let mut meta: serde_json::Value = if meta_path.exists() {
+        let existing =
+            std::fs::read_to_string(&meta_path).map_err(|e| format!("read meta: {}", e))?;
+        serde_json::from_str(&existing).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if !meta.is_object() {
+        meta = serde_json::json!({});
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    meta["name"] = serde_json::json!(skill_id);
+    meta["description"] = serde_json::json!(description);
+    meta["tags"] = serde_json::json!(tags);
+    meta["pending_backfill"] = serde_json::json!(false);
+    meta["modified"] = serde_json::json!(now);
+
+    let serialized =
+        serde_json::to_string_pretty(&meta).map_err(|e| format!("serialize meta: {}", e))?;
+    std::fs::write(&meta_path, serialized).map_err(|e| format!("write meta: {}", e))?;
     Ok(())
 }
 
@@ -3946,10 +4289,13 @@ fn vector_reindex_all(state: tauri::State<'_, AppState>) -> Result<String, Strin
 fn start_voice(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    wake_word: Option<String>,
 ) -> Result<(), String> {
     use voice::adapters::{CommandAdapter, DictationAdapter, VadAdapter, WakeAdapter};
 
-    match WakeAdapter::try_load("jarvis") {
+    let wake = wake_word.as_deref().unwrap_or("jarvis");
+    state.voice_manager.set_wake_word(wake);
+    match WakeAdapter::try_load(wake) {
         Ok(a) => state.voice_manager.set_wake_runner(Box::new(a)),
         Err(e) => {
             safe_eprintln!("[voice] wake runner unavailable: {}", e);
@@ -4201,6 +4547,29 @@ pub fn run() {
                 });
             }
 
+            // Bridge skills on startup: set up the outgoing ~/.claude/skills
+            // symlinks, then pull in any skills that live under ~/.claude/skills
+            // or plugin cache so they show up in T64's library. Runs on a
+            // background thread so filesystem I/O never blocks the window from
+            // appearing; both calls are idempotent (also triggered from the
+            // frontend), so running twice is safe.
+            {
+                std::thread::spawn(|| {
+                    if let Err(e) = ensure_skills_plugin() {
+                        safe_eprintln!("[skills-setup] ensure_skills_plugin: {}", e);
+                    }
+                    match sync_claude_skills() {
+                        Ok(imported) if !imported.is_empty() => safe_eprintln!(
+                            "[skills-sync] imported {} skill(s): {:?}",
+                            imported.len(),
+                            imported
+                        ),
+                        Ok(_) => {}
+                        Err(e) => safe_eprintln!("[skills-sync] failed: {}", e),
+                    }
+                });
+            }
+
             // Disable native WKWebView pinch-to-zoom magnification on macOS
             // so our custom canvas zoom isn't fighting the browser's own zoom
             #[cfg(target_os = "macos")]
@@ -4313,6 +4682,8 @@ pub fn run() {
             resolve_skill_prompt,
             get_skill_creator_path,
             ensure_skills_plugin,
+            sync_claude_skills,
+            generate_skill_metadata,
             vector_search,
             vector_index_file,
             vector_index_session,

@@ -5,6 +5,7 @@
 
 | Time | Description | File(s) | Outcome | ~Tokens |
 |------|-------------|---------|---------|---------|
+| 2026-04-21 | Rewrote PromptIsland: new useChatScrollState hook drives visibility from distFromBottom; callback ref for .cc-messages so listeners rebind on overlay round-trips; removed dead isScrolledUp/scrollProgress state; gate is `isScrolledUp` not `progress > 0.005`; added key={terminalId} on ClaudeChat | PromptIsland.tsx, useChatScrollState.ts (new), ClaudeChat.tsx, FloatingTerminal.tsx | tsc clean | ~3500 |
 | 2026-04-16 | Enhanced RewindPromptDialog with git-style line stats (+/-), generate description via Haiku | ClaudeChat.tsx, ClaudeChat.css, lib.rs | Complete, compiles clean | ~500 |
 | 2026-04-16 | Fixed rewind "undo send" bug — rewinding to last user msg no longer reverts files | ClaudeChat.tsx | Complete, compiles clean | ~200 |
 
@@ -28,6 +29,7 @@
 | 14:03 | Fix chat bg flicker — promote .floating-terminal to compositor layer (will-change/translateZ/contain/isolation) to stop border-radius+scaled-transform paint flicker | src/components/canvas/FloatingTerminal.css | fixed | ~600 |
 | 17:49 | agent3: frontend voice state + IPC layer | voiceStore.ts, voiceApi.ts, sessionFuzzyMatch.ts, useVoiceControl.ts, claudeStore.ts | 5 files created/edited | ~2000 |
 | 17:55 | agent2: Rust voice orchestrator + IPC — VoiceManager state machine (Idle/Listening/Dictating), runner traits, intent parser with stem-matched keyword classifier + table tests (8 pass), VoiceIntent/VoiceState/VoiceModelsStatus types, start_voice/stop_voice/voice_models_status/download_voice_model Tauri commands. Aligned to Agent 3's frontend contract (PascalCase intent kinds, flat payload, snake_case state). Info.plist NSMicrophoneUsageDescription broadened to cover voice. | src-tauri/src/{voice_manager.rs, voice/intent.rs, voice/mod.rs, types.rs, lib.rs, Info.plist} | cargo check clean, 8/8 intent tests pass | ~6500 |
+| 05:31 | Claude→T64 reverse skill bridge: sync_claude_skills scans ~/.claude/skills + plugin cache, symlinks new skills into ~/.terminal64/skills, writes sidecar at .meta/{name}.json with imported_from + pending_backfill; list_skills reads sidecar for symlinks + falls back to SKILL.md frontmatter; delete_skill unlinks symlinks safely; generate_skill_metadata backfills description/tags via Haiku (ANTHROPIC_API_KEY); SkillDialog runs sync on open + fires backfill in background, shows "imported" badge | src-tauri/src/lib.rs, src/lib/tauriApi.ts, src/lib/types.ts, src/components/skill/SkillDialog.tsx, src/components/skill/Skill.css | cargo check+tsc clean; pre-existing clippy errors in widget_server/discord_bot/voice_manager out of scope | ~5000 |
 | 16:05 | Filled ONNX inference bodies: wake (mel→emb→cls), moonshine (enc→dec greedy, no KV cache), vad (silero v5 unified state). Added tokenizers = 0.22 direct dep; bumped ndarray 0.16→0.17 to align with ort's transitive version. | src-tauri/src/voice/{wake,moonshine,vad}.rs, Cargo.toml | cargo check clean | ~4000 |
 | 18:47 | Fix stuck-Dictating state in voice: wake-word safety valve + 12s idle timeout + trim_silence + shorter silence threshold (12 frames) | src-tauri/src/voice_manager.rs | cargo check passes | ~500 |
 | 19:22 | Wire real whisper.cpp dictation (small.en-q5_1, Metal) via whisper-rs 0.13, add DictationAdapter, stay-in-Dictating across pauses, voice-dictation feature on by default | voice/whisper.rs, voice/adapters.rs, voice/models.rs, voice_manager.rs, lib.rs, Cargo.toml | cargo check passes | ~2500 |
@@ -52,3 +54,37 @@
 | Time | Action | File(s) | Outcome | ~Tokens |
 |------|--------|---------|---------|--------|
 | 18:33 | UX fixes: Settings z-index 100→210; global Escape handlers on Settings/Claude/Skill/Widget dialogs; round resize width/height | SettingsPanel.css, SettingsPanel.tsx, ClaudeDialog.tsx, SkillDialog.tsx, WidgetDialog.tsx, canvasStore.ts | done | ~1800 |
+
+## Session: 2026-04-19 23:21
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 23:32 | Edited src-tauri/src/claude_manager.rs | modified spawn_and_stream() | ~326 |
+| 23:32 | Edited src-tauri/src/claude_manager.rs | modified send_prompt() | ~57 |
+| 23:32 | Edited src-tauri/src/claude_manager.rs | modified cancel() | ~68 |
+| 23:32 | Edited src-tauri/src/claude_manager.rs | modified lines() | ~276 |
+| 23:33 | Edited src-tauri/src/claude_manager.rs | modified session_jsonl_path() | ~2752 |
+
+## Session: 2026-04-19 23:34
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 23:36 | Fix Bash replay loop + heavy-output freeze | src-tauri/src/claude_manager.rs | sanitize_dangling_tool_uses() before spawn + cap_event_size() in stdout reader; cargo fmt/clippy/check clean | ~3k |
+| 23:42 | Created ../../../../tmp/sanitize-jsonl.mjs | — | ~701 |
+| 23:43 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 23:44 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 23:48 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 23:55 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 00:00 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 00:03 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 00:05 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 00:06 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+| 00:08 | Session end: 1 writes across 1 files (sanitize-jsonl.mjs) | 1 reads | ~11110 tok |
+
+## Session: 2026-04-20 04:00
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 05:22 | Wired frontend for claude skills reverse bridge (syncClaudeSkills + generateSkillMetadata + imported badge) | tauriApi.ts, types.ts, SkillDialog.tsx, Skill.css | tsc --noEmit clean | ~1.2k |
+| 05:25 | Added generate_skill_metadata Tauri command (Haiku backfill, sidecar .meta/{id}.json) | src-tauri/src/lib.rs | cargo check clean, clippy clean for new code | ~600 |
+| 05:30 | Reverse bridge (Rust): parse_skill_frontmatter helper, sync_claude_skills scans ~/.claude/skills + plugin cache and symlinks into T64 library with .meta/ sidecars, list_skills/delete_skill symlink-aware, setup hook background-sync | src-tauri/src/lib.rs | cargo check clean; clippy clean for lib.rs (6 pre-existing errors in discord_bot/voice_manager/widget_server unchanged) | ~2500 |

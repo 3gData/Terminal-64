@@ -31,3 +31,8 @@ src-tauri/gen/
 .wolf/designqc-captures/
 .wolf/token-ledger.json
 .wolf/suggestions.json
+
+# Python venvs (wake-word training scripts)
+scripts/.wake-venv/
+scripts/__pycache__/
+scripts/*.pyc

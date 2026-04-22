@@ -422,6 +422,23 @@
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+  /* Browser-native scroll anchoring: when content is inserted above the
+     viewport (load-more prepend, or async-loaded images/code in already-
+     prepended messages), the browser automatically shifts scrollTop to keep
+     the visible content locked in place. This is the only approach that
+     survives content-shift-after-render cases (syntax highlighters, images
+     decoding, markdown rendering). JS-based restore measures once and can't
+     chase subsequent layout shifts — browser anchoring chases every frame. */
+  overflow-anchor: auto;
+  /* Prevent rubber-band/overscroll at the top from masking our scroll restore. */
+  overscroll-behavior-y: contain;
+  /* Force instant scroll — any smooth-scroll in flight would fight our
+     load-more scroll restore and cause a visible teleport. */
+  scroll-behavior: auto;
+  /* Shift the scrollbar inward so it doesn't sit under the FloatingTerminal's
+     east resize handle (8px wide at the panel edge). Without this, clicking
+     the scrollbar triggers a resize instead of scrolling. */
+  margin-right: 8px;
 }
 
 .cc-messages::-webkit-scrollbar {
@@ -479,6 +496,10 @@
   border-radius: 4px;
   margin: 4px 8px;
   transition: color 0.1s, background 0.1s;
+  /* Exclude the sentinel from Chromium's scroll-anchor candidates — the JS
+     anchor-capture is authoritative; we don't want the browser picking this
+     banner (which unmounts when we hit the oldest message) as an anchor. */
+  overflow-anchor: none;
 }
 .cc-load-more:hover {
   color: var(--fg, #cdd6f4);
@@ -561,6 +582,7 @@
 .cc-message--assistant { position: relative; }
 
 .cc-msg-menu-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -575,11 +597,23 @@
   cursor: pointer;
   letter-spacing: 1px;
   line-height: 1;
+  transition-property: background-color, color, transform;
+  transition-duration: 0.1s;
+}
+
+.cc-msg-menu-btn::before {
+  content: "";
+  position: absolute;
+  inset: -11px -9px;
 }
 
 .cc-msg-menu-btn:hover {
   color: var(--fg, #cdd6f4);
   background: rgba(137, 180, 250, 0.1);
+}
+
+.cc-msg-menu-btn:active {
+  transform: scale(0.96);
 }
 
 .cc-ctx-menu {
@@ -824,8 +858,19 @@
   border-radius: 4px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.1s, color 0.1s;
+  transition-property: opacity, color, background-color, transform;
+  transition-duration: 0.1s;
   z-index: 5;
+}
+
+.cc-copy-btn::before {
+  content: "";
+  position: absolute;
+  inset: -9px;
+}
+
+.cc-copy-btn:active {
+  transform: scale(0.96);
 }
 
 .cc-code-block:hover .cc-copy-btn,
@@ -1483,13 +1528,18 @@
   font-size: 11px;
   border-radius: 5px;
   cursor: pointer;
-  transition: all 0.1s;
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 0.1s;
   text-align: left;
 }
 
 .cc-question-btn:hover {
   background: rgba(137, 180, 250, 0.1);
   border-color: rgba(137, 180, 250, 0.3);
+}
+
+.cc-question-btn:active {
+  transform: scale(0.96);
 }
 
 .cc-question-label {
@@ -1681,6 +1731,7 @@
 .cc-ctx-badge {
   font-size: 10px;
   color: var(--fg-muted, #6c7086);
+  font-variant-numeric: tabular-nums;
 }
 .cc-ctx-badge--warn {
   color: #f9e2af;
@@ -1824,6 +1875,8 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  outline: 1px solid rgba(255, 255, 255, 0.1);
+  outline-offset: -1px;
 }
 
 .cc-image-thumb-x {
@@ -1864,13 +1917,18 @@
   font-size: 10px;
   border-radius: 4px;
   cursor: pointer;
-  transition: all 0.1s;
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 0.1s;
 }
 
 .cc-toolbar-btn:hover {
   color: #f9e2af;
   border-color: rgba(249, 226, 175, 0.3);
   background: rgba(249, 226, 175, 0.06);
+}
+
+.cc-toolbar-btn:active {
+  transform: scale(0.96);
 }
 
 .cc-toolbar-btn--active {
@@ -2035,6 +2093,7 @@
   font-size: 11px;
   color: var(--fg-muted, #6c7086);
   font-family: 'Cascadia Code', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- Queue badge in status line ---- */
@@ -2116,13 +2175,18 @@
   padding: 2px 8px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: all 0.15s;
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 0.15s;
 }
 
 .cc-loop-stop:hover {
   background: rgba(243, 139, 168, 0.15);
   border-color: #f38ba8;
   color: #f38ba8;
+}
+
+.cc-loop-stop:active {
+  transform: scale(0.96);
 }
 
 .cc-queue {
@@ -2374,6 +2438,327 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  position: relative;
+}
+
+/* ---- Prompt Island: Dynamic Island–style pill that expands to a prompt picker ---- */
+
+.cc-island {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  z-index: 12;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-secondary, #181825) 88%, transparent);
+  backdrop-filter: saturate(140%) blur(18px);
+  -webkit-backdrop-filter: saturate(140%) blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 6px 22px rgba(0, 0, 0, 0.35);
+  color: var(--fg, #cdd6f4);
+  /* Morph animation — pill (closed) → card (open) */
+  width: 140px;
+  height: 32px;
+  border-radius: 999px;
+  transform: translate(-50%, 0) scale(1);
+  transform-origin: top center;
+  transition-property: width, height, border-radius, box-shadow, background-color, opacity, transform;
+  transition-duration: 0.28s;
+  transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.cc-island--open {
+  width: min(86%, 520px);
+  /* Percentage scales with the chat column, so the island fits inside small
+     panels without overflowing the input area. */
+  height: min(70%, 440px);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-secondary, #181825) 94%, transparent);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 24px 60px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.cc-island-pill {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 1;
+  transition-property: opacity, transform;
+  transition-duration: 0.18s;
+}
+
+.cc-island--open .cc-island-pill {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.9);
+}
+
+.cc-island-progress {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ft-border, #cba6f7);
+  line-height: 0;
+}
+
+.cc-island-progress svg {
+  display: block;
+  transition: color 0.15s ease;
+}
+
+.cc-island-label {
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.cc-island-pill:hover { color: #fff; }
+.cc-island-pill:active { transform: scale(0.96); }
+
+.cc-jump-bottom {
+  position: sticky;
+  bottom: 14px;
+  align-self: flex-end;
+  margin-top: auto;
+  margin-right: 4px;
+  z-index: 11;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-secondary, #181825) 88%, transparent);
+  backdrop-filter: saturate(140%) blur(18px);
+  -webkit-backdrop-filter: saturate(140%) blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 6px 22px rgba(0, 0, 0, 0.35);
+  color: var(--fg, #cdd6f4);
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.32, 0.72, 0, 1), color 0.15s ease, background-color 0.15s ease;
+  animation: cc-jump-bottom-in 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.cc-jump-bottom:hover {
+  color: #fff;
+  background: color-mix(in srgb, var(--bg-secondary, #181825) 94%, transparent);
+}
+
+.cc-jump-bottom:active {
+  transform: scale(0.94);
+}
+
+@keyframes cc-jump-bottom-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Island enter/exit when scrolling crosses the bottom-pin boundary */
+.cc-island-box {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+  transition-delay: 0s;
+}
+
+.cc-island--open .cc-island-box {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0.12s;
+}
+
+.cc-island-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted, #a6adc8);
+}
+
+.cc-island-close {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--fg-muted, #a6adc8);
+  cursor: pointer;
+  border-radius: 6px;
+  transition-property: background-color, color, transform;
+  transition-duration: 0.12s;
+}
+.cc-island-close:hover { background: rgba(255, 255, 255, 0.08); color: var(--fg, #cdd6f4); }
+.cc-island-close:active { transform: scale(0.94); }
+
+.cc-island-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cc-island-list::-webkit-scrollbar { width: 6px; }
+.cc-island-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.cc-island-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--fg, #cdd6f4);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition-property: background-color, border-color, transform, color;
+  transition-duration: 0.12s;
+  transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.cc-island-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10%;
+  bottom: 10%;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--ft-border, #cba6f7);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.cc-island-item:hover {
+  background: rgba(203, 166, 247, 0.08);
+  border-color: rgba(203, 166, 247, 0.18);
+  transform: translateX(2px);
+}
+
+.cc-island-item:hover::before {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.cc-island-item:active { transform: translateX(2px) scale(0.985); }
+
+.cc-island-item-idx {
+  flex-shrink: 0;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-muted, #6c7086);
+  padding: 3px 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cc-island-item--cmd .cc-island-item-idx {
+  color: #a6e3a1;
+  background: rgba(166, 227, 161, 0.1);
+}
+
+.cc-island-item-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg, #cdd6f4);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+}
+
+.cc-island-item-time {
+  flex-shrink: 0;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  align-self: center;
+}
+
+.cc-island-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  font-size: 12px;
+  color: var(--fg-muted, #6c7086);
+  text-align: center;
+}
+
+.cc-island-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 11;
+  background: rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.cc-island-backdrop--open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Highlight flash on jumped-to message */
+@keyframes cc-island-flash {
+  0%   { box-shadow: 0 0 0 0 rgba(203, 166, 247, 0.6); background-color: rgba(203, 166, 247, 0.18); }
+  60%  { box-shadow: 0 0 0 10px rgba(203, 166, 247, 0); background-color: rgba(203, 166, 247, 0.12); }
+  100% { box-shadow: 0 0 0 0 rgba(203, 166, 247, 0); background-color: transparent; }
+}
+.cc-message[data-jump-flash="1"] {
+  animation: cc-island-flash 1.2s cubic-bezier(0.32, 0.72, 0, 1);
+  border-radius: 10px;
 }
 
 /* ---- Side panel extension (pops out to the right) ---- */
@@ -2506,11 +2891,16 @@
   font-weight: 600;
   border-radius: 4px;
   cursor: pointer;
-  transition: all 0.1s;
+  transition-property: background-color, border-color, color, transform;
+  transition-duration: 0.1s;
 }
 
 .cc-plan-build:hover {
   background: rgba(166, 227, 161, 0.22);
+}
+
+.cc-plan-build:active:not(:disabled) {
+  transform: scale(0.96);
 }
 
 .cc-plan-build:disabled {
@@ -2668,6 +3058,8 @@
   border-radius: 6px;
   margin: 4px 0;
   display: block;
+  outline: 1px solid rgba(255, 255, 255, 0.1);
+  outline-offset: -1px;
 }
 
 .cc-inline-file {

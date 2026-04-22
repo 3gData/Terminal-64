@@ -284,7 +284,12 @@
   font-weight: 500;
   cursor: pointer;
   border: none;
-  transition: background 0.1s;
+  transition-property: background-color, color, transform, opacity;
+  transition-duration: 0.1s;
+}
+
+.wdg-btn:active:not(:disabled) {
+  transform: scale(0.96);
 }
 
 .wdg-btn--create {
