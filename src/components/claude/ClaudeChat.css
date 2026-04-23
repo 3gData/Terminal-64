@@ -429,28 +429,26 @@
 .cc-messages {
   flex: 1;
   overflow-y: auto;
+  /* Virtuoso positions its items internally and ignores flex/gap on its
+     root, so we drop `display: flex` + `gap` here. Horizontal scroll is
+     suppressed explicitly — without it, any message with a wide code block
+     or table lets the whole list pan sideways. */
+  overflow-x: hidden;
   padding: 16px 14px 48px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
   min-height: 0;
-  /* Browser-native scroll anchoring: when content is inserted above the
-     viewport (load-more prepend, or async-loaded images/code in already-
-     prepended messages), the browser automatically shifts scrollTop to keep
-     the visible content locked in place. This is the only approach that
-     survives content-shift-after-render cases (syntax highlighters, images
-     decoding, markdown rendering). JS-based restore measures once and can't
-     chase subsequent layout shifts — browser anchoring chases every frame. */
-  overflow-anchor: auto;
-  /* Prevent rubber-band/overscroll at the top from masking our scroll restore. */
+  /* Prevent rubber-band/overscroll at the top from masking streaming snaps. */
   overscroll-behavior-y: contain;
-  /* Force instant scroll — any smooth-scroll in flight would fight our
-     load-more scroll restore and cause a visible teleport. */
   scroll-behavior: auto;
   /* Shift the scrollbar inward so it doesn't sit under the FloatingTerminal's
      east resize handle (8px wide at the panel edge). Without this, clicking
      the scrollbar triggers a resize instead of scrolling. */
   margin-right: 8px;
+}
+
+/* Virtuoso renders each item wrapped in our own `.cc-row` div. The 10px
+   vertical rhythm the old flex `gap` provided lives on that wrapper. */
+.cc-row + .cc-row {
+  margin-top: 10px;
 }
 
 .cc-messages::-webkit-scrollbar {

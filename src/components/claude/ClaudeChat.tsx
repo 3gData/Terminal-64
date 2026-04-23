@@ -1511,26 +1511,29 @@ Coordinate actively. If another agent is working on a file you need, mention it 
 
   const renderRow = useCallback(
     (_idx: number, row: VisualRow) => {
+      let inner: React.ReactNode;
       switch (row.kind) {
         case "turnDivider":
         case "finishedTail":
-          return (
+          inner = (
             <div className="cc-turn-divider">
               <span className="cc-turn-divider-text">
                 Finished after {formatDuration(Math.floor(row.dur / 1000))}
               </span>
             </div>
           );
+          break;
         case "group":
-          return (
+          inner = (
             <div data-msg-id={row.msgId} className="cc-message cc-message--assistant">
               <div className="cc-tc-list">
                 <ToolGroupCard tcs={row.tcs} />
               </div>
             </div>
           );
+          break;
         case "message":
-          return (
+          inner = (
             <ChatMessage
               message={row.msg}
               onRewind={onRewindClick}
@@ -1538,9 +1541,14 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               onEditClick={handleEditClick}
             />
           );
+          break;
         case "compact":
-          return <CompactDivider status={row.status} startedAt={row.startedAt} />;
+          inner = <CompactDivider status={row.status} startedAt={row.startedAt} />;
+          break;
       }
+      // Virtuoso strips our old flex gap; wrap each row so the 10px rhythm
+      // can live on `.cc-row + .cc-row`.
+      return <div className="cc-row">{inner}</div>;
     },
     [onRewindClick, handleFork, handleEditClick],
   );
