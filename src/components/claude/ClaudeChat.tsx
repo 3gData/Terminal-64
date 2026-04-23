@@ -1292,10 +1292,12 @@ Rules:
         useClaudeStore.getState().setError(sessionId, `Rewind failed: ${err}`);
         return;
       }
-      const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
-      useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
+      // Mutate the store immediately so the UI reflects the undo-send
+      // without blocking on findRewindUuid's whole-file parse.
       useClaudeStore.getState().truncateFromMessage(sessionId, messageId);
       setRewindText(targetMsg!.content);
+      const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
+      useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
       console.log("[rewind] === UNDO-SEND COMPLETE ===", { prefill: targetMsg!.content.slice(0, 80) });
       return;
     }
@@ -1354,21 +1356,24 @@ Rules:
         return;
       }
 
-      // Find the UUID of the last message we want to keep.  The next --resume
-      // will pass --resume-session-at <uuid> so Claude CLI slices its own
-      // parentUuid chain correctly (matching how Claude's own /rewind works:
-      // append-only JSONL).
-      const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
-      console.log("[rewind] Found rewind UUID:", uuid, "for keepMessages:", keepMessages);
-      useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
-
-      // Disk is now authoritative — mirror the truncation into the store.
+      // Disk is now authoritative — mirror the truncation into the store
+      // IMMEDIATELY so the UI reflects the rewind without waiting for
+      // findRewindUuid (which reads + parses the entire JSONL and can take
+      // multiple seconds on large sessions).
       store.truncateFromMessage(sessionId, messageId);
       if (trailingUser) {
         store.truncateFromMessage(sessionId, trailingUser.id);
         console.log("[rewind] Removed trailing user message, prefilling:", rewindContent.slice(0, 80));
       }
       const sess = preSess;
+
+      // Find the UUID of the last message we want to keep. The next --resume
+      // will pass --resume-session-at <uuid> so Claude CLI slices its own
+      // parentUuid chain correctly (matching how Claude's own /rewind works:
+      // append-only JSONL).
+      const uuid = await findRewindUuid(sessionId, rewindCwd, keepMessages);
+      console.log("[rewind] Found rewind UUID:", uuid, "for keepMessages:", keepMessages);
+      useClaudeStore.getState().setResumeAtUuid(sessionId, uuid);
 
       // Force-cancel any active delegation group AND collect modifiedFiles from
       // ALL groups ever spawned by this parent — parentToGroup only tracks the
@@ -1464,7 +1469,7 @@ Rules:
     }
   }, [sessionId, effectiveCwd]);
 
-  const handleFork = useCallback((messageId: string) => {
+  const handleFork = useCallback(async (messageId: string) => {
     const store = useClaudeStore.getState();
     const sess = store.sessions[sessionId];
     if (!sess) return;
@@ -1484,12 +1489,22 @@ Rules:
       effectiveCwd, false, undefined, undefined, x, y, w, h,
     );
 
+    // Pre-create the fork's JSONL on disk by copying + truncating the parent's.
+    // Without this, `--resume <newSessionId>` on the first prompt fails because
+    // the CLI can't find a JSONL at that path. fork_session_jsonl does the
+    // copy + truncate atomically so the first prompt finds a ready session.
+    if (forkedMessages.length > 0) {
+      try {
+        await forkSessionJsonl(sessionId, newPanel.terminalId, effectiveCwd, msgIdx);
+        console.log("[fork] Pre-created fork JSONL:", newPanel.terminalId);
+      } catch (err) {
+        console.warn("[fork] forkSessionJsonl failed — falling back to --fork-session:", err);
+      }
+    }
+
     store.createSession(newPanel.terminalId);
     if (forkedMessages.length > 0) {
       store.loadFromDisk(newPanel.terminalId, forkedMessages);
-      // Use --fork-session to let the CLI handle forking from the parent session
-      store.setForkParentSessionId(newPanel.terminalId, sessionId);
-      console.log("[fork] Set forkParentSessionId on new session:", sessionId);
     }
     store.setCwd(newPanel.terminalId, effectiveCwd);
   }, [sessionId, effectiveCwd]);
