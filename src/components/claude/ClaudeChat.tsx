@@ -156,20 +156,19 @@ function RewindPromptDialog({ affectedFiles, toolSummary, onConfirm, onCancel }:
   );
 }
 
-/** Isolated streaming text component — subscribes only to streamingText,
- *  so updates don't re-render the entire message list. Wrapped in `.cc-row`
- *  so it picks up the same horizontal gutter as real messages (without it
- *  the streaming bubble kissed the left edge of the chat viewport). */
-function StreamingBubble({ sessionId }: { sessionId: string }) {
+/** Streaming bubble body — bare message/bubble, no .cc-row wrapper. Rendered
+ *  as a virtuoso item inside renderRow (which supplies the wrapper). Keeping
+ *  the streaming bubble as a regular list item — rather than inside the
+ *  Footer — stops Virtuoso from shrinking scrollTop on every token to anchor
+ *  the last "real" item, which was the visible "snap up" jitter. */
+function StreamingBubbleBody({ sessionId }: { sessionId: string }) {
   const text = useClaudeStore((s) => s.sessions[sessionId]?.streamingText);
   if (!text) return null;
   return (
-    <div className="cc-row">
-      <div className="cc-message cc-message--assistant">
-        <div className="cc-bubble cc-bubble--assistant cc-bubble--streaming">
-          {text}
-          <span className="cc-cursor" />
-        </div>
+    <div className="cc-message cc-message--assistant">
+      <div className="cc-bubble cc-bubble--assistant cc-bubble--streaming">
+        {text}
+        <span className="cc-cursor" />
       </div>
     </div>
   );
@@ -233,7 +232,6 @@ function ChatFooter({
 
   return (
     <>
-      <StreamingBubble sessionId={sessionId} />
       {current && pendingQuestions && (
         <div className="cc-question">
           <div className="cc-question-header">
@@ -511,32 +509,6 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     // Defer one frame so Virtuoso has the new data.
     requestAnimationFrame(() => scrollToBottom());
   }, [sessionId, scrollToBottom]);
-
-  // Our own auto-follow. Virtuoso's built-in `followOutput: 'auto'` uses
-  // scrollToIndex(LAST, 'end'), which aligns the last virtuoso item's bottom
-  // with the viewport — but the 64px cc-bottom-spacer lives inside the
-  // Footer BELOW the last item, so Virtuoso's auto-follow always lands the
-  // viewport 64px above the actual scroll-height. Combined with the 96px
-  // "at bottom" tolerance, that created a trap: any time the user scrolled
-  // into the final ~96px and a streaming chunk arrived, Virtuoso snapped
-  // them back up to the last-item-end (below their scroll target but above
-  // where they were trying to go), making it feel like the chat was
-  // fighting scroll-down attempts.
-  //
-  // Doing our own follow with raw el.scrollTop = el.scrollHeight respects
-  // the spacer and lands at the true bottom. Keyed on messages.length (new
-  // turn arrived) and streamingText (live token tick) so we catch both.
-  const lastMsgCount = session?.messages.length ?? 0;
-  const streamingText = session?.streamingText ?? "";
-  useEffect(() => {
-    if (!pinnedToBottom.current) return;
-    const el = chatBodyRef.current;
-    if (!el) return;
-    const raf = requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight;
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [lastMsgCount, streamingText]);
 
   // Auto-close the island picker whenever an overlay takes over the chat
   // body. Without this, islandOpen can survive an overlay round-trip and
@@ -1561,6 +1533,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
     | { kind: "turnDivider"; key: string; dur: number }
     | { kind: "group"; key: string; msgId: string; tcs: ToolCall[] }
     | { kind: "message"; key: string; msg: ChatMessageData }
+    | { kind: "streaming"; key: string }
     | {
         kind: "compact";
         key: string;
@@ -1649,12 +1622,21 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         rows.push({ kind: "finishedTail", key: `fin-tail-${lastMsg.id}`, dur });
       }
     }
+    // Streaming bubble rides as a terminal virtuoso item (not in the Footer).
+    // Virtuoso measures growing Footer content by *shrinking* scrollTop to
+    // keep the last item pinned — which is exactly the "snap up on every
+    // token" jitter users see. As a regular list item, Virtuoso treats its
+    // growth like normal list growth and stops fighting our auto-follow.
+    if (session.streamingText) {
+      rows.push({ kind: "streaming", key: "__streaming__" });
+    }
     return rows;
   }, [
     session?.messages,
     session?.autoCompactStatus,
     session?.autoCompactStartedAt,
     session?.isStreaming,
+    session?.streamingText,
   ]);
 
   const renderRow = useCallback(
@@ -1693,12 +1675,15 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         case "compact":
           inner = <CompactDivider status={row.status} startedAt={row.startedAt} />;
           break;
+        case "streaming":
+          inner = <StreamingBubbleBody sessionId={sessionId} />;
+          break;
       }
       // Virtuoso strips our old flex gap; wrap each row so the 10px rhythm
       // can live on `.cc-row + .cc-row`.
       return <div className="cc-row">{inner}</div>;
     },
-    [onRewindClick, handleFork, handleEditClick],
+    [onRewindClick, handleFork, handleEditClick, sessionId],
   );
 
   // Indexed user prompts (includes /slash commands) for the prompt-island picker.
@@ -2098,12 +2083,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             computeItemKey={(_idx, row) => row.key}
             itemContent={renderRow}
             scrollerRef={setChatBody}
-            // We implement auto-follow ourselves (see the effect keyed on
-            // messages.length + streamingText) because Virtuoso's built-in
-            // follow lands on the last item's bottom, ignoring the 64px
-            // footer spacer. atBottomStateChange still drives the `pinned`
-            // ref used by that effect.
-            followOutput={false}
+            // Virtuoso's built-in follow. Instant (not smooth) so streaming
+            // tokens don't chain smooth-scroll animations. The StreamingBubble
+            // is now a real list item (see VisualRow 'streaming'), so
+            // scrollToIndex(LAST) aligns to its bottom — no Footer-growth
+            // anchor-shift, no snap-up jitter.
+            followOutput={(isAtBottom) => (isAtBottom || pinnedToBottom.current ? "auto" : false)}
             atBottomStateChange={(atBottom) => {
               pinnedToBottom.current = atBottom;
             }}
