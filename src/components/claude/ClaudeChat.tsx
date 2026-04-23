@@ -482,10 +482,10 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // (reveal-gates, jumpToPrompt) can branch on it, and we expose a few
   // imperative helpers that delegate to Virtuoso via `virtuosoRef`.
   //
-  // 96px tolerance: the footer now holds a StreamingBubble + a 64px
+  // 96px tolerance: the footer carries a StreamingBubble + a 64px
   // bottom-spacer, so the "is at bottom?" fold sits well above the scroll
-  // height. Anything less and Virtuoso's followOutput misdetects the
-  // user-is-at-bottom state at stream start and stops auto-scrolling.
+  // height. Anything less and atBottomStateChange misdetects the
+  // user-is-at-bottom state at stream start and the auto-follow stops.
   const BOTTOM_TOLERANCE_PX = 96;
   const pinnedToBottom = useRef(true);
 
@@ -511,6 +511,32 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     // Defer one frame so Virtuoso has the new data.
     requestAnimationFrame(() => scrollToBottom());
   }, [sessionId, scrollToBottom]);
+
+  // Our own auto-follow. Virtuoso's built-in `followOutput: 'auto'` uses
+  // scrollToIndex(LAST, 'end'), which aligns the last virtuoso item's bottom
+  // with the viewport — but the 64px cc-bottom-spacer lives inside the
+  // Footer BELOW the last item, so Virtuoso's auto-follow always lands the
+  // viewport 64px above the actual scroll-height. Combined with the 96px
+  // "at bottom" tolerance, that created a trap: any time the user scrolled
+  // into the final ~96px and a streaming chunk arrived, Virtuoso snapped
+  // them back up to the last-item-end (below their scroll target but above
+  // where they were trying to go), making it feel like the chat was
+  // fighting scroll-down attempts.
+  //
+  // Doing our own follow with raw el.scrollTop = el.scrollHeight respects
+  // the spacer and lands at the true bottom. Keyed on messages.length (new
+  // turn arrived) and streamingText (live token tick) so we catch both.
+  const lastMsgCount = session?.messages.length ?? 0;
+  const streamingText = session?.streamingText ?? "";
+  useEffect(() => {
+    if (!pinnedToBottom.current) return;
+    const el = chatBodyRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [lastMsgCount, streamingText]);
 
   // Auto-close the island picker whenever an overlay takes over the chat
   // body. Without this, islandOpen can survive an overlay round-trip and
@@ -2072,7 +2098,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             computeItemKey={(_idx, row) => row.key}
             itemContent={renderRow}
             scrollerRef={setChatBody}
-            followOutput={(isAtBottom) => (isAtBottom || pinnedToBottom.current ? "auto" : false)}
+            // We implement auto-follow ourselves (see the effect keyed on
+            // messages.length + streamingText) because Virtuoso's built-in
+            // follow lands on the last item's bottom, ignoring the 64px
+            // footer spacer. atBottomStateChange still drives the `pinned`
+            // ref used by that effect.
+            followOutput={false}
             atBottomStateChange={(atBottom) => {
               pinnedToBottom.current = atBottom;
             }}
