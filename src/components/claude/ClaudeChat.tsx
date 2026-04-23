@@ -1938,7 +1938,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             computeItemKey={(_idx, row) => row.key}
             itemContent={renderRow}
             scrollerRef={setChatBody}
-            followOutput={(isAtBottom) => (isAtBottom || pinnedToBottom.current ? "smooth" : false)}
+            followOutput={(isAtBottom) => (isAtBottom || pinnedToBottom.current ? "auto" : false)}
             atBottomStateChange={(atBottom) => {
               pinnedToBottom.current = atBottom;
             }}
