@@ -692,7 +692,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                       <span className="sp-hint-inline">~{m.sizeMB} MB</span>
                     </label>
                     <button
-                      className={`sp-btn sp-btn--small ${downloaded ? "" : ""}`}
+                      className="sp-btn sp-btn--small"
                       disabled={downloading || downloaded}
                       onClick={() => handleDownloadVoiceModel(m.kind)}
                     >

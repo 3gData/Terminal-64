@@ -1,5 +1,5 @@
 import { useCallback, useRef, useEffect, useMemo, useState } from "react";
-import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";
+import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useShallow } from "zustand/react/shallow";
@@ -51,7 +51,6 @@ export default function Canvas() {
   }));
   // Actions are stable refs — no need for shallow comparison
   const pan = useCanvasStore((s) => s.pan);
-  const addTerminal = useCanvasStore((s) => s.addTerminal);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);

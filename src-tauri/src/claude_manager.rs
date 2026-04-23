@@ -384,7 +384,6 @@ pub fn shim_command(bin: &str) -> Command {
 fn build_command(
     session_flag: &str,
     session_value: &str,
-    _prompt: &str,
     permission_mode: &str,
     model: &Option<String>,
     effort: &Option<String>,
@@ -767,7 +766,6 @@ impl ClaudeManager {
         let cmd = build_command(
             "--session-id",
             &resolved_id,
-            &req.prompt,
             &req.permission_mode,
             &req.model,
             &req.effort,
@@ -813,7 +811,6 @@ impl ClaudeManager {
         let cmd = build_command(
             "--resume",
             &req.session_id,
-            &req.prompt,
             &req.permission_mode,
             &req.model,
             &req.effort,

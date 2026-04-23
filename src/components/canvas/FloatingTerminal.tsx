@@ -1,4 +1,4 @@
-import { memo, useCallback, useRef, useState, useEffect, useMemo } from "react";
+import { memo, useCallback, useRef, useState, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";

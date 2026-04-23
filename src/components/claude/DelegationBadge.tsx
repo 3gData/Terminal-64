@@ -10,14 +10,15 @@ interface DelegationBadgeProps {
 
 export default function DelegationBadge({ sessionId }: DelegationBadgeProps) {
   const group = useDelegationStore((s) => s.getGroupForSession(sessionId));
+  const parentSession = useClaudeStore((s) =>
+    group ? s.sessions[group.parentSessionId] : undefined
+  );
 
   if (!group) return null;
 
   const task = group.tasks.find((t) => t.sessionId === sessionId);
   if (!task) return null;
 
-  // Find parent session name
-  const parentSession = useClaudeStore((s) => s.sessions[group.parentSessionId]);
   const parentName = parentSession?.name || "Parent";
 
   const jumpToParent = () => {

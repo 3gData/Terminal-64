@@ -12,7 +12,3 @@ export function executeCommand(id: string, ...args: unknown[]) {
     cmd.execute(...args);
   }
 }
-
-function getAllCommands(): Command[] {
-  return Array.from(commandRegistry.values());
-}

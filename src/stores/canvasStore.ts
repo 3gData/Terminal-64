@@ -109,9 +109,7 @@ interface CanvasState {
   setZoom: (zoom: number) => void;
   zoomAtPoint: (newZoom: number, cx: number, cy: number) => void;
   centerView: (viewportW: number, viewportH: number) => void;
-  getAllTerminalIds: () => string[];
   saveSession: () => void;
-  loadSession: () => boolean;
 }
 
 interface SerializedTerminal {
@@ -485,10 +483,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       set({ panX, panY, zoom });
     },
 
-    getAllTerminalIds: () => {
-      return get().terminals.map((t) => t.terminalId);
-    },
-
     saveSession: () => {
       const s = get();
       const session = {
@@ -516,27 +510,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         localStorage.setItem("terminal64-session", JSON.stringify(session));
       } catch (e) {
         console.warn("[canvasStore] Failed to save session:", e);
-      }
-    },
-
-    loadSession: () => {
-      try {
-        const raw = localStorage.getItem("terminal64-session");
-        if (!raw) return false;
-        const session = JSON.parse(raw);
-        if (!session.terminals?.length) return false;
-        const terminals = deserializeTerminals(session.terminals);
-        set({
-          terminals,
-          panX: session.panX ?? 0,
-          panY: session.panY ?? 0,
-          zoom: session.zoom ?? 1,
-          nextZ: terminals.length + 1,
-          activeTerminalId: terminals[0]?.terminalId ?? null,
-        });
-        return true;
-      } catch {
-        return false;
       }
     },
   };

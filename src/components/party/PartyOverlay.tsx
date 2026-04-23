@@ -3,13 +3,6 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { spectrumRef } from "../../hooks/usePartyMode";
 import "./PartyOverlay.css";
 
-const ATTACK = 0.25;
-const RELEASE = 0.08;
-function smoothStep(current: number, target: number) {
-  const factor = target > current ? ATTACK : RELEASE;
-  return current + (target - current) * factor;
-}
-
 interface Spring {
   pos: number;
   vel: number;

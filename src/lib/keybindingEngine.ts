@@ -1,35 +1,6 @@
 import type { KeyCombo, Keybinding } from "./types";
 import { IS_MAC } from "./platform";
 
-function parseKeyCombo(str: string): KeyCombo {
-  const parts = str.toLowerCase().split("+").map((s) => s.trim());
-  const combo: KeyCombo = { key: "" };
-
-  for (const part of parts) {
-    switch (part) {
-      case "ctrl":
-      case "control":
-        combo.ctrl = true;
-        break;
-      case "shift":
-        combo.shift = true;
-        break;
-      case "alt":
-        combo.alt = true;
-        break;
-      case "meta":
-      case "cmd":
-      case "win":
-        combo.meta = true;
-        break;
-      default:
-        combo.key = part;
-    }
-  }
-
-  return combo;
-}
-
 function matchesKeyCombo(
   event: KeyboardEvent,
   combo: KeyCombo
@@ -46,16 +17,6 @@ function matchesKeyCombo(
   if (!IS_MAC && !!combo.meta !== event.metaKey) return false;
 
   return true;
-}
-
-function formatKeyCombo(combo: KeyCombo): string {
-  const parts: string[] = [];
-  if (combo.ctrl) parts.push("Ctrl");
-  if (combo.shift) parts.push("Shift");
-  if (combo.alt) parts.push("Alt");
-  if (combo.meta) parts.push("Meta");
-  parts.push(combo.key.length === 1 ? combo.key.toUpperCase() : combo.key);
-  return parts.join("+");
 }
 
 export function findMatchingBinding(
