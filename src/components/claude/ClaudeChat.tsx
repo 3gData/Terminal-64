@@ -360,11 +360,32 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const incrementPromptCount = useClaudeStore((s) => s.incrementPromptCount);
   const setDraftPrompt = useClaudeStore((s) => s.setDraftPrompt);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  const scrollCleanupRef = useRef<(() => void) | null>(null);
   const setChatBody = useCallback((el: HTMLElement | Window | null) => {
     // Virtuoso's scrollerRef passes the scroll container. It's always a div
-    // in our configuration (no window-scroller). Narrow here.
-    chatBodyRef.current = el instanceof HTMLDivElement ? el : null;
+    // in our configuration (no window-scroller). Narrow here. We also attach
+    // a passive scroll listener that feeds scrollProgress (for the prompt
+    // island ring) — a native listener on the element itself, not an
+    // observer on its children, so it doesn't fight Virtuoso's measurement
+    // cycle.
+    scrollCleanupRef.current?.();
+    scrollCleanupRef.current = null;
+    const div = el instanceof HTMLDivElement ? el : null;
+    chatBodyRef.current = div;
+    if (!div) return;
+    const onScroll = () => {
+      const maxScroll = div.scrollHeight - div.clientHeight;
+      if (maxScroll <= 1) {
+        setScrollProgress(0);
+        return;
+      }
+      setScrollProgress(Math.max(0, Math.min(1, 1 - div.scrollTop / maxScroll)));
+    };
+    onScroll();
+    div.addEventListener("scroll", onScroll, { passive: true });
+    scrollCleanupRef.current = () => div.removeEventListener("scroll", onScroll);
   }, []);
+  useEffect(() => () => scrollCleanupRef.current?.(), []);
   const containerRef = useRef<HTMLDivElement>(null);
   const loopTimerRef = useRef<number | null>(null);
   // Virtuoso ref — used for programmatic scrolling (scrollToBottom, jumpToPrompt).
@@ -481,32 +502,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // (reveal-gates, jumpToPrompt) can branch on it, and we expose a few
   // imperative helpers that delegate to Virtuoso via `virtuosoRef`.
   //
-  // Tight 24px tolerance. Wider thresholds (we tried 96) make the race
-  // window for "atBottomStateChange flips true while user is dragging up"
-  // wider: during streaming, scrollHeight can grow faster than the user's
-  // upward drag, so we'd keep re-pinning mid-scroll and snap them back.
   const BOTTOM_TOLERANCE_PX = 24;
-  const pinnedToBottom = useRef(true);
-
-  // Set truthy while the user is actively scrolling upward. atBottomStateChange
-  // will refuse to re-pin during that window, even if streaming growth makes
-  // Virtuoso briefly think we're at bottom again. Cleared on a short idle
-  // timer, then the next genuine "at bottom" can re-pin normally.
-  const userScrollingUpRef = useRef(false);
-  const userScrollIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastScrollTopRef = useRef(0);
 
   const scrollToBottom = useCallback(() => {
-    // Go through Virtuoso so it stays in sync with our scroll intent.
-    // StreamingBubble is a real list item now, so 'LAST' includes it. The
-    // 16px .cc-bottom-spacer inside the footer still gets clipped below the
-    // fold, which is fine — it's just breathing room, not content.
+    // Go through Virtuoso so it stays in sync with its internal scroll state.
+    // StreamingBubble is a real list item, so 'LAST' includes it.
     virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
   }, []);
 
   // Session switch → snap to bottom, close island.
   useEffect(() => {
-    pinnedToBottom.current = true;
     setIslandOpen(false);
     // Defer one frame so Virtuoso has the new data.
     requestAnimationFrame(() => scrollToBottom());
@@ -1720,8 +1725,9 @@ Coordinate actively. If another agent is working on a file you need, mention it 
       );
       if (rowIdx < 0) return;
       setIslandOpen(false);
-      // Unpin so Virtuoso's followOutput doesn't fight the jump mid-stream.
-      pinnedToBottom.current = false;
+      // Virtuoso's followOutput="auto" auto-unpins as soon as it sees the
+      // user scrolled away from the bottom (which scrollToIndex effectively
+      // does), so no manual unpin needed.
       virtuosoRef.current?.scrollToIndex({
         index: rowIdx,
         align: "center",
@@ -2087,50 +2093,16 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             computeItemKey={(_idx, row) => row.key}
             itemContent={renderRow}
             scrollerRef={setChatBody}
-            // Virtuoso's built-in follow. StreamingBubble is a real list
-            // item now, so scrollToIndex(LAST) aligns to its bottom — no
-            // Footer-growth anchor shift.
-            followOutput={(isAtBottom) => (isAtBottom || pinnedToBottom.current ? "auto" : false)}
-            atBottomStateChange={(atBottom) => {
-              // User-intent gate: if the user just scrolled upward, do NOT
-              // re-pin on the next atBottom tick. Streaming growth can make
-              // Virtuoso briefly measure "at bottom" even while the user is
-              // visibly dragging up; without this gate, followOutput then
-              // returns auto and the chat snaps them back.
-              if (atBottom && userScrollingUpRef.current) return;
-              pinnedToBottom.current = atBottom;
-              setIsScrolledUp(!atBottom);
-            }}
+            // Virtuoso owns the "is user at bottom" state internally. When
+            // the user scrolls up, followOutput auto-pauses; when they're
+            // at bottom, it follows. We used to duplicate this tracking
+            // with a pinnedToBottom ref and an isScrolling callback, which
+            // fought Virtuoso's own logic and produced the "can't reach the
+            // bottom" jitter. Let Virtuoso handle it.
+            followOutput="auto"
+            atBottomStateChange={(atBottom) => setIsScrolledUp(!atBottom)}
             atBottomThreshold={BOTTOM_TOLERANCE_PX}
             initialTopMostItemIndex={Math.max(0, visualRows.length - 1)}
-            isScrolling={(scrolling) => {
-              if (!scrolling) return;
-              const el = chatBodyRef.current;
-              if (!el) return;
-              const delta = el.scrollTop - lastScrollTopRef.current;
-              lastScrollTopRef.current = el.scrollTop;
-              if (delta < 0) {
-                userScrollingUpRef.current = true;
-                if (userScrollIdleTimer.current) clearTimeout(userScrollIdleTimer.current);
-                userScrollIdleTimer.current = setTimeout(() => {
-                  userScrollingUpRef.current = false;
-                }, 450);
-              }
-              const maxScroll = el.scrollHeight - el.clientHeight;
-              if (maxScroll > 1) {
-                setScrollProgress(Math.max(0, Math.min(1, 1 - el.scrollTop / maxScroll)));
-              }
-            }}
-            rangeChanged={() => {
-              // Keep progress fresh when Virtuoso repositions without a
-              // scroll event (e.g. item measurement changes).
-              const el = chatBodyRef.current;
-              if (!el) return;
-              const maxScroll = el.scrollHeight - el.clientHeight;
-              if (maxScroll > 1) {
-                setScrollProgress(Math.max(0, Math.min(1, 1 - el.scrollTop / maxScroll)));
-              }
-            }}
             components={virtuosoComponents}
           />
           )}
@@ -2151,10 +2123,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
           />
           <button
             className={`cc-jump-bottom${isScrolledUp && userPrompts.length > 0 ? "" : " cc-jump-bottom--hidden"}`}
-            onClick={() => {
-              pinnedToBottom.current = true;
-              scrollToBottom();
-            }}
+            onClick={() => scrollToBottom()}
             aria-label="Scroll to bottom"
             title="Scroll to bottom"
           >
