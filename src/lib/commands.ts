@@ -12,3 +12,7 @@ export function executeCommand(id: string, ...args: unknown[]) {
     cmd.execute(...args);
   }
 }
+
+export function getAllCommands(): Command[] {
+  return Array.from(commandRegistry.values());
+}

@@ -1,37 +1,41 @@
-.command-palette-overlay {
+.qp-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(4px);
-  display: flex;
-  justify-content: center;
-  padding-top: 72px;
   z-index: 200;
-  animation: overlay-in 0.12s ease-out;
+  animation: qp-overlay-in 0.12s ease-out;
 }
 
-@keyframes overlay-in {
+@keyframes qp-overlay-in {
   from { opacity: 0; }
   to { opacity: 1; }
 }
 
-.command-palette {
-  width: clamp(320px, 90vw, 480px);
-  max-height: min(380px, 70vh);
+.qp-dialog {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: clamp(320px, 90vw, 520px);
+  z-index: 201;
+}
+
+.qp-root {
+  display: flex;
+  flex-direction: column;
   background: var(--bg-secondary, #181825);
   border: 1px solid var(--border, #313244);
   border-radius: 10px;
   box-shadow:
     0 16px 48px rgba(0, 0, 0, 0.5),
     0 0 0 1px rgba(255, 255, 255, 0.04);
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
-  height: fit-content;
-  animation: palette-in 0.15s ease-out;
+  max-height: min(480px, 75vh);
+  animation: qp-in 0.15s ease-out;
 }
 
-@keyframes palette-in {
+@keyframes qp-in {
   from {
     opacity: 0;
     transform: translateY(-8px) scale(0.98);
@@ -42,7 +46,7 @@
   }
 }
 
-.command-palette-input {
+.qp-input {
   padding: 14px 18px;
   background: transparent;
   border: none;
@@ -53,60 +57,90 @@
   outline: none;
 }
 
-.command-palette-input::placeholder {
+.qp-input::placeholder {
   color: var(--fg-muted, #6c7086);
 }
 
-.command-palette-results {
+.qp-list {
   overflow-y: auto;
-  max-height: 320px;
+  max-height: 400px;
   padding: 4px;
+  scroll-padding: 4px;
 }
 
-.command-palette-item {
+.qp-group {
+  padding: 4px 0;
+}
+
+.qp-group [cmdk-group-heading] {
+  padding: 6px 10px 4px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted, #6c7086);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  user-select: none;
+}
+
+.qp-item {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
   cursor: pointer;
   border-radius: 6px;
-  transition: background 0.08s;
-}
-
-.command-palette-item.selected {
-  background: var(--accent, #89b4fa);
-}
-
-.command-palette-item.selected .qp-label {
-  color: var(--bg-tertiary, #11111b);
-}
-
-.command-palette-item.selected .qp-command {
-  color: var(--bg-tertiary, #11111b);
-  opacity: 0.6;
-}
-
-.qp-label {
+  transition: background 0.08s, color 0.08s;
+  color: var(--fg-secondary, #bac2de);
   font-size: 12.5px;
   font-family: 'Cascadia Code', Consolas, monospace;
-  color: var(--fg-secondary, #bac2de);
+}
+
+.qp-item[data-selected="true"] {
+  background: var(--ft-border, #cba6f7);
+  color: var(--bg-tertiary, #11111b);
+}
+
+.qp-item[data-selected="true"] .qp-kbd {
+  background: rgba(17, 17, 27, 0.18);
+  border-color: rgba(17, 17, 27, 0.32);
+  color: var(--bg-tertiary, #11111b);
+}
+
+.qp-item[data-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.qp-item-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 
-.qp-command {
-  font-size: 10.5px;
+.qp-kbd {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  font-size: 10px;
   font-family: 'Cascadia Code', Consolas, monospace;
   color: var(--fg-muted, #6c7086);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, #313244);
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
 }
 
-.command-palette-empty {
-  padding: 20px;
+.qp-empty {
+  padding: 24px;
   text-align: center;
   color: var(--fg-muted, #6c7086);
   font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+.qp-list [cmdk-list-sizer] > * + * {
+  margin-top: 0;
 }
