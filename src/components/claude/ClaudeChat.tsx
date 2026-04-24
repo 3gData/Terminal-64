@@ -585,38 +585,42 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     requestAnimationFrame(() => scrollToBottom());
   }, [sessionId, scrollToBottom]);
 
-  // Stick-to-bottom pump only fires for STREAMING TEXT growth. Virtuoso's
-  // built-in followOutput handles new messages / new rows natively (it
-  // measures items synchronously inside its own reflow cycle, so its
-  // follow is always on the fresh scrollHeight). Our manual pump used
-  // to race that measurement cycle and land on stale scrollHeight — the
-  // result was a "can't scroll past last message / finishedTail" trap.
+  // Stick-to-bottom for same-item growth (streaming tokens appended into
+  // an existing row). Ported from vercel/ai-chatbot's hooks/
+  // use-scroll-to-bottom.tsx + use-stick-to-bottom's algorithm:
+  // observe the DOM of the streaming bubble, not the zustand store.
+  // ResizeObserver fires AFTER layout, so scrollHeight is always fresh
+  // when we read it — no more racing Virtuoso's measurement cycle that
+  // made the old zustand-pump land above the real bottom on new rows.
   //
-  // The one case Virtuoso CAN'T handle is same-item growth (streaming
-  // text being appended into the existing streaming row's body). For
-  // that, we pump on streamingText change only, gated by stickyRef.
+  // Re-attaches whenever the streaming bubble appears/disappears (a
+  // brief rAF wait on hasStreamingText=true so Virtuoso has a chance
+  // to mount the .cc-bubble--streaming DOM node).
   useEffect(() => {
-    const initial = useClaudeStore.getState().sessions[sessionId];
-    let lastText = initial?.streamingText ?? "";
-    let scheduled = false;
-    return useClaudeStore.subscribe((state) => {
-      const s = state.sessions[sessionId];
-      if (!s) return;
-      const currText = s.streamingText ?? "";
-      if (currText === lastText) return;
-      lastText = currText;
-      if (!stickyRef.current) return;
-      if (scheduled) return;
-      scheduled = true;
-      requestAnimationFrame(() => {
-        scheduled = false;
+    if (!hasStreamingText) return;
+    const chatBody = chatBodyRef.current;
+    if (!chatBody) return;
+    let ro: ResizeObserver | null = null;
+    let rafId = 0;
+    const attach = () => {
+      const bubble = chatBody.querySelector<HTMLElement>(".cc-bubble--streaming");
+      if (!bubble) {
+        // Virtuoso hasn't mounted it yet — retry next frame.
+        rafId = requestAnimationFrame(attach);
+        return;
+      }
+      ro = new ResizeObserver(() => {
         if (!stickyRef.current) return;
-        const el = chatBodyRef.current;
-        if (!el) return;
-        el.scrollTop = el.scrollHeight;
+        chatBody.scrollTop = chatBody.scrollHeight;
       });
-    });
-  }, [sessionId]);
+      ro.observe(bubble);
+    };
+    rafId = requestAnimationFrame(attach);
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro?.disconnect();
+    };
+  }, [hasStreamingText]);
 
   // Auto-close the island picker whenever an overlay takes over the chat
   // body. Without this, islandOpen can survive an overlay round-trip and
@@ -900,6 +904,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
 
   const handleSend = useCallback(
     async (text: string, permissionOverride?: PermissionMode, fromDiscord = false) => {
+      // Snap-before-append (ported from t3code's ChatView.tsx:2502). Any
+      // path through handleSend eventually appends the user message +
+      // starts a stream, both of which grow scrollHeight. Flipping
+      // stickyRef=true + scrolling NOW guarantees we're at the bottom
+      // before the first new content appears — then the ResizeObserver
+      // on the streaming bubble keeps us there for the rest of the turn.
+      stickyRef.current = true;
+      const sendEl = chatBodyRef.current;
+      if (sendEl) sendEl.scrollTop = sendEl.scrollHeight;
+
       const loopMatch = text.match(/^\/loop\s*(.*)/i);
       if (loopMatch) {
         const args = loopMatch[1]!.trim();
