@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import type { ChatMessage as ChatMessageType, ToolCall } from "../../lib/types";
 import { readFileBase64 } from "../../lib/tauriApi";
+import { Tooltip } from "../ui/Tooltip";
 
 const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
 const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
@@ -604,21 +605,29 @@ function ChatMessageInner({ message, onRewind, onFork, onEditClick }: {
 
   const menuEl = menuOpen && (
     <div className="cc-ctx-menu" onMouseLeave={() => setMenuOpen(false)}>
-      <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onRewind?.(message.id, message.role === "user" ? message.content : ""); }}>
-        <span className="cc-ctx-icon">↩</span> Rewind
-      </button>
-      <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onFork?.(message.id); }}>
-        <span className="cc-ctx-icon">⑂</span> Fork
-      </button>
-      <button className="cc-ctx-item" onClick={handleCopy}>
-        <span className="cc-ctx-icon">{copied ? "✓" : "⎘"}</span> {copied ? "Copied" : "Copy"}
-      </button>
+      <Tooltip content="Rewind session to this point — discards messages after it" side="left">
+        <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onRewind?.(message.id, message.role === "user" ? message.content : ""); }}>
+          <span className="cc-ctx-icon">↩</span> Rewind
+        </button>
+      </Tooltip>
+      <Tooltip content="Fork — branch a new session from this message" side="left">
+        <button className="cc-ctx-item" onClick={() => { setMenuOpen(false); onFork?.(message.id); }}>
+          <span className="cc-ctx-icon">⑂</span> Fork
+        </button>
+      </Tooltip>
+      <Tooltip content="Copy message text to clipboard" side="left">
+        <button className="cc-ctx-item" onClick={handleCopy}>
+          <span className="cc-ctx-icon">{copied ? "✓" : "⎘"}</span> {copied ? "Copied" : "Copy"}
+        </button>
+      </Tooltip>
     </div>
   );
 
   const menuBtn = (
     <div className="cc-msg-actions">
-      <button className="cc-msg-menu-btn" onClick={() => setMenuOpen((v) => !v)} title="Message options">⋯</button>
+      <Tooltip content="Message options" side="left">
+        <button className="cc-msg-menu-btn" onClick={() => setMenuOpen((v) => !v)} aria-label="Message options">⋯</button>
+      </Tooltip>
       {menuEl}
     </div>
   );
