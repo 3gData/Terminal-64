@@ -443,7 +443,13 @@
      the last. */
   padding: 64px 0 48px;
   min-height: 0;
-  overscroll-behavior-y: contain;
+  /* `contain` only blocks scroll-chain to the parent; macOS trackpad
+     momentum still rubber-bands past the edge, which makes the browser
+     keep dispatching scroll-past events on overshoot. Those flicker
+     Virtuoso's atBottomStateChange mid-stream and cause the "jitter
+     when I panned and overshot" behavior. `none` kills the bounce
+     entirely. */
+  overscroll-behavior-y: none;
   scroll-behavior: auto;
   /* Shift the scrollbar inward so it doesn't sit under the FloatingTerminal's
      east resize handle (8px wide at the panel edge). Without this, clicking
