@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Toaster } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import Canvas from "./components/canvas/Canvas";
@@ -22,7 +23,7 @@ import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { closeTerminal, closeClaudeSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
-import { type Toast, subscribeToasts, dismissToast, pushToast } from "./lib/notifications";
+import { pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
 import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
 import { checkForUpdate, type UpdateInfo } from "./lib/updater";
@@ -491,29 +492,23 @@ function App() {
         onClose={() => setSkillDialogOpen(false)}
       />
 
-      {/* In-app toast notifications */}
-      <ToastContainer />
-    </div>
-  );
-}
-
-let toastCache: Toast[] = [];
-function getToasts() { return toastCache; }
-function subToasts(cb: () => void) {
-  return subscribeToasts((t) => { toastCache = t; cb(); });
-}
-
-function ToastContainer() {
-  const toasts = useSyncExternalStore(subToasts, getToasts);
-  if (toasts.length === 0) return null;
-  return (
-    <div className="t64-toasts">
-      {toasts.map((t) => (
-        <div key={t.id} className="t64-toast" onClick={() => dismissToast(t.id)}>
-          <div className="t64-toast-title">{t.title}</div>
-          {t.body && <div className="t64-toast-body">{t.body}</div>}
-        </div>
-      ))}
+      {/* Sonner toast notifications */}
+      <Toaster
+        position="top-right"
+        theme="dark"
+        richColors
+        closeButton
+        expand={false}
+        toastOptions={{
+          style: {
+            background: "var(--bg-secondary, #181825)",
+            border: "1px solid var(--ft-border, #cba6f7)",
+            color: "var(--fg, #cdd6f4)",
+            fontFamily: "'Cascadia Code', Consolas, monospace",
+            fontSize: "12px",
+          },
+        }}
+      />
     </div>
   );
 }
