@@ -434,12 +434,13 @@
      suppressed explicitly — without it, any message with a wide code block
      or table lets the whole list pan sideways. */
   overflow-x: hidden;
-  /* Symmetric 64px top + bottom padding. Safe now that stick-to-bottom
-     is owned entirely by our stickyRef + raw-scrollTop pump — both the
-     "is user near bottom" check and the scroll target measure against
-     scrollHeight, so the padding doesn't create a no-mans-land between
-     Virtuoso's and our idea of "bottom" anymore. */
-  padding: 64px 0 64px;
+  /* Top padding only. Bottom breathing room is supplied by an invisible
+     Virtuoso row (kind: "bottomSpacer") so it's part of the list's scroll
+     content — scrollToIndex(LAST, 'end') or raw scrollTop=scrollHeight
+     both land in the same place, which is what we want. Scroller padding
+     sits BELOW the last item's end, so with Virtuoso's follow it'd cause
+     a 64px snap-up every time a non-streaming row was appended. */
+  padding: 64px 0 0;
   min-height: 0;
   /* `contain` only blocks scroll-chain to the parent; macOS trackpad
      momentum still rubber-bands past the edge. `none` kills the bounce

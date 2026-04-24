@@ -1656,6 +1656,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
     | { kind: "group"; key: string; msgId: string; tcs: ToolCall[] }
     | { kind: "message"; key: string; msg: ChatMessageData }
     | { kind: "streaming"; key: string }
+    | { kind: "bottomSpacer"; key: string }
     | {
         kind: "compact";
         key: string;
@@ -1755,6 +1756,11 @@ Coordinate actively. If another agent is working on a file you need, mention it 
     if (hasStreamingText) {
       rows.push({ kind: "streaming", key: "__streaming__" });
     }
+    // Invisible 50px tail so the last message doesn't hug the viewport
+    // bottom. Lives inside Virtuoso's list (not as scroller padding) so
+    // scrollToIndex(LAST)/raw scrollTop both land at the same place —
+    // scroller padding below the last item caused snap-up on new rows.
+    rows.push({ kind: "bottomSpacer", key: "__bottom_spacer__" });
     return rows;
   }, [
     session?.messages,
@@ -1805,6 +1811,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
           // .cc-row class; returning early skips the wrapper so the margin
           // growth isn't part of the virtuoso size measurement each tick.
           return <StreamingBubbleBody sessionId={sessionId} />;
+        case "bottomSpacer":
+          // Invisible 50px sentinel so the last real row gets breathing
+          // room above the viewport bottom when the user is stuck to
+          // bottom. Returning raw (not wrapped in .cc-row) skips the
+          // gutter + margin-bottom so it's exactly 50px tall.
+          return <div style={{ height: 50 }} aria-hidden="true" />;
       }
       // Virtuoso strips our old flex gap; wrap each row so the 10px rhythm
       // can live on `.cc-row + .cc-row`.
