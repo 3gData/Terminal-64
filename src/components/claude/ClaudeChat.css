@@ -434,9 +434,11 @@
      suppressed explicitly — without it, any message with a wide code block
      or table lets the whole list pan sideways. */
   overflow-x: hidden;
-  /* Top/bottom padding lives on the scroller; left/right padding moves to
-     `.cc-row` so every virtuoso item carries its own gutter. */
-  padding: 64px 0 48px;
+  /* Top padding only — bottom breathing room was creating a 64px zone
+     below the last item where Virtuoso's at-bottom math and our pump
+     measured different things and fought each other. The last row's
+     margin-bottom (10px) provides enough gap on its own. */
+  padding: 64px 0 0;
   min-height: 0;
   /* `contain` only blocks scroll-chain to the parent; macOS trackpad
      momentum still rubber-bands past the edge. `none` kills the bounce
@@ -482,12 +484,12 @@
   margin-bottom: 10px;
 }
 
-/* Sentinel appended inside virtuoso's Footer so the last message doesn't
-   hug the viewport bottom. Keep smaller than BOTTOM_TOLERANCE_PX in
-   ClaudeChat.tsx — otherwise a scroll into "last-item-end" registers as
-   >tolerance-from-bottom and followOutput misdetects state. */
+/* Zero height — any space below the last item confuses Virtuoso's
+   at-bottom measurement vs our raw-scroll pump, and the user sees the
+   chat refusing to scroll the last 60-100px. Breathing room below the
+   last message comes from that row's own margin. */
 .cc-bottom-spacer {
-  height: 16px;
+  height: 0;
 }
 
 .cc-messages::-webkit-scrollbar {

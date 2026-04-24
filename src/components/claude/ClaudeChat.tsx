@@ -527,10 +527,10 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // (reveal-gates, jumpToPrompt) can branch on it, and we expose a few
   // imperative helpers that delegate to Virtuoso via `virtuosoRef`.
   //
-  // 80px tolerance — use-stick-to-bottom uses 100, vercel/ai-chatbot
-  // uses 70, Virtuoso's message-list example uses 96. 24 was too tight
-  // and made the final pixels feel unreachable during streaming.
-  const BOTTOM_TOLERANCE_PX = 80;
+  // 40px tolerance. With zero bottom padding/spacer the last item
+  // reaches the real scroll bottom; we only need enough slack to
+  // forgive sub-pixel rounding + the last row's 10px margin-bottom.
+  const BOTTOM_TOLERANCE_PX = 40;
   // Mirror of !isScrolledUp read by the streaming-subscribe effect below
   // without causing re-renders when it flips.
   const atBottomRef = useRef(true);
@@ -566,15 +566,22 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     const initial = useClaudeStore.getState().sessions[sessionId];
     let lastText = initial?.streamingText ?? "";
     let lastLen = initial?.messages.length ?? 0;
+    let lastStreaming = initial?.isStreaming ?? false;
     let scheduled = false;
     return useClaudeStore.subscribe((state) => {
       const s = state.sessions[sessionId];
       if (!s) return;
       const currText = s.streamingText ?? "";
       const currLen = s.messages.length;
-      if (currText === lastText && currLen === lastLen) return;
+      const currStreaming = s.isStreaming;
+      // Pump on ANY of these: token appended, new message, stream start/
+      // end (the last one matters because ending a stream appends the
+      // "Finished after Xs" divider, which grows scrollHeight — without
+      // firing the pump the user would get stuck 30px above new bottom).
+      if (currText === lastText && currLen === lastLen && currStreaming === lastStreaming) return;
       lastText = currText;
       lastLen = currLen;
+      lastStreaming = currStreaming;
       if (!atBottomRef.current) return;
       if (scheduled) return;
       scheduled = true;
@@ -583,7 +590,15 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         if (!atBottomRef.current) return;
         const el = chatBodyRef.current;
         if (!el) return;
-        el.scrollTop = el.scrollHeight;
+        // Two-frame wait: Virtuoso may need a frame to measure the newly
+        // appended row before scrollHeight reflects the growth. Without
+        // this, we scroll to an outdated scrollHeight and land above
+        // the real bottom.
+        requestAnimationFrame(() => {
+          if (!atBottomRef.current) return;
+          const el2 = chatBodyRef.current;
+          if (el2) el2.scrollTop = el2.scrollHeight;
+        });
       });
     });
   }, [sessionId]);
