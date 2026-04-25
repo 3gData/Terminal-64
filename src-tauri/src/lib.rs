@@ -28,6 +28,7 @@ mod mic_manager;
 mod permission_mcp;
 mod permission_server;
 mod plugin_manifest_store;
+mod providers;
 mod pty_manager;
 mod types;
 mod voice;
@@ -91,11 +92,11 @@ fn validate_shell_command(command: &str) -> Result<(), String> {
 
 use audio_manager::AudioManager;
 use browser_manager::BrowserManager;
-use claude_manager::ClaudeManager;
 use discord_bot::DiscordBot;
 use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
+use providers::{ClaudeAdapter, ProviderKind, ProviderRegistry};
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -204,7 +205,16 @@ fn check_rewrite_size_limit(path: &std::path::Path) -> Result<Option<u64>, Strin
 
 struct AppState {
     pty_manager: PtyManager,
-    claude_manager: Arc<ClaudeManager>,
+    // Provider registry holds every CLI adapter (Claude today, Codex/Cursor
+    // later) behind `Arc<dyn ProviderAdapter>`. Tauri commands that need
+    // Claude-specific helpers (`create_session`, `send_prompt`, `cancel`,
+    // `close`) reach for the typed `claude` handle below; the registry
+    // exists for future provider-agnostic dispatch.
+    // Held to keep the trait-object map alive for future Codex/Cursor
+    // dispatch; Tauri commands today reach for the typed `claude` handle.
+    #[allow(dead_code)]
+    providers: Arc<ProviderRegistry>,
+    claude: Arc<ClaudeAdapter>,
     discord_bot: Mutex<DiscordBot>,
     permission_server: Arc<PermissionServer>,
     audio_manager: Arc<AudioManager>,
@@ -325,7 +335,7 @@ fn create_claude_session(
     // backend-generated id (when it sent an empty one) without waiting for
     // the first `system/init` stream event.
     state
-        .claude_manager
+        .claude
         .create_session(&app_handle, req, settings_path, approver_path, channel)
 }
 
@@ -358,13 +368,13 @@ fn send_claude_prompt(
     );
     let channel = req.channel_server.clone();
     state
-        .claude_manager
+        .claude
         .send_prompt(&app_handle, req, settings_path, approver_path, channel)
 }
 
 #[tauri::command]
 fn cancel_claude(state: tauri::State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.claude_manager.cancel(&session_id)
+    state.claude.cancel(&session_id)
 }
 
 #[tauri::command]
@@ -387,7 +397,7 @@ fn close_claude_session(
     for token in tokens_to_remove {
         state.permission_server.unregister_session(&token);
     }
-    state.claude_manager.close(&session_id)
+    state.claude.close(&session_id)
 }
 
 #[tauri::command]
@@ -4906,9 +4916,19 @@ pub fn run() {
             })?;
             let mic_mgr = MicManager::new();
             let voice_mgr = VoiceManager::new(Arc::clone(&mic_mgr));
+            // The Claude adapter is held both as a typed `Arc<ClaudeAdapter>`
+            // (for inherent IPC-shaped methods) and as `Arc<dyn ProviderAdapter>`
+            // inside the registry. Same instance, two views.
+            let claude_adapter = Arc::new(ClaudeAdapter::new());
+            let mut registry = ProviderRegistry::new();
+            registry.register(
+                ProviderKind::ClaudeAgent,
+                claude_adapter.clone() as Arc<dyn providers::ProviderAdapter>,
+            );
             app.manage(AppState {
                 pty_manager: PtyManager::new(),
-                claude_manager: Arc::new(ClaudeManager::new()),
+                providers: Arc::new(registry),
+                claude: claude_adapter,
                 discord_bot: Mutex::new(DiscordBot::new()),
                 permission_server: Arc::new(perm_server),
                 audio_manager: Arc::new(AudioManager::new()),
