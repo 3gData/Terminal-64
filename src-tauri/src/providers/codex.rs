@@ -455,6 +455,23 @@ fn app_server_notification_to_exec_event(method: &str, params: &JsonValue) -> Op
             }
             Some(out)
         }
+        "thread/tokenUsage/updated" => {
+            let usage = params.get("tokenUsage")?;
+            let last = usage.get("last")?;
+            Some(json!({
+                "type": "token_usage.updated",
+                "thread_id": params.get("threadId").cloned().unwrap_or_else(|| json!(null)),
+                "turn_id": params.get("turnId").cloned().unwrap_or_else(|| json!(null)),
+                "context_window": usage.get("modelContextWindow").cloned().unwrap_or_else(|| json!(null)),
+                "usage": {
+                    "input_tokens": last.get("inputTokens").cloned().unwrap_or_else(|| json!(0)),
+                    "cached_input_tokens": last.get("cachedInputTokens").cloned().unwrap_or_else(|| json!(0)),
+                    "output_tokens": last.get("outputTokens").cloned().unwrap_or_else(|| json!(0)),
+                    "reasoning_output_tokens": last.get("reasoningOutputTokens").cloned().unwrap_or_else(|| json!(0)),
+                    "total_tokens": last.get("totalTokens").cloned().unwrap_or_else(|| json!(0)),
+                },
+            }))
+        }
         "error" => {
             let message = get_json_str(params, &["error", "message"])
                 .or_else(|| get_json_str(params, &["message"]))
@@ -488,12 +505,280 @@ fn app_server_notification_to_exec_event(method: &str, params: &JsonValue) -> Op
                 },
             }))
         }
+        "item/fileChange/patchUpdated" => {
+            let item_id = params.get("itemId").and_then(|v| v.as_str()).unwrap_or("");
+            Some(json!({
+                "type": "item.updated",
+                "item": {
+                    "id": item_id,
+                    "type": "file_change",
+                    "changes": params.get("changes").cloned().unwrap_or_else(|| json!([])),
+                    "status": "in_progress",
+                },
+            }))
+        }
+        "item/fileChange/outputDelta" => {
+            let item_id = params.get("itemId").and_then(|v| v.as_str()).unwrap_or("");
+            let delta = params.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+            Some(json!({
+                "type": "item.updated",
+                "delta": delta,
+                "item": {
+                    "id": item_id,
+                    "type": "file_change",
+                    "output": delta,
+                    "status": "in_progress",
+                },
+            }))
+        }
+        "item/commandExecution/outputDelta" => {
+            let item_id = params.get("itemId").and_then(|v| v.as_str()).unwrap_or("");
+            let delta = params.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+            Some(json!({
+                "type": "item.updated",
+                "delta": delta,
+                "item": {
+                    "id": item_id,
+                    "type": "command_execution",
+                    "output": delta,
+                    "status": "in_progress",
+                },
+            }))
+        }
         _ => None,
     }
 }
 
 fn app_server_thread_id_from_response(value: &JsonValue) -> Option<String> {
     get_json_str(value, &["result", "thread", "id"]).map(|s| s.to_string())
+}
+
+fn codex_content_text(payload: &JsonValue) -> String {
+    let mut text = String::new();
+    if let Some(arr) = payload.get("content").and_then(|v| v.as_array()) {
+        for block in arr {
+            if let Some(s) = block.get("text").and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(s);
+            }
+        }
+    }
+    text
+}
+
+fn codex_function_input(payload: &JsonValue, ptype: &str) -> JsonValue {
+    if let Some(args_str) = payload.get("arguments").and_then(|v| v.as_str()) {
+        serde_json::from_str::<JsonValue>(args_str).unwrap_or_else(|_| json!({ "_raw": args_str }))
+    } else if let Some(action) = payload.get("action") {
+        action.clone()
+    } else if ptype == "local_shell_call" {
+        payload.get("command").cloned().unwrap_or_else(|| json!({}))
+    } else {
+        JsonValue::Null
+    }
+}
+
+fn codex_exec_envelope_to_frontend_events(envelope: &JsonValue) -> Vec<JsonValue> {
+    let etype = envelope.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let payload = envelope.get("payload").unwrap_or(envelope);
+    match etype {
+        "session_meta" => {
+            if let Some(thread_id) = get_json_str(payload, &["id"]) {
+                return vec![json!({
+                    "type": "thread.started",
+                    "thread_id": thread_id,
+                    "threadId": thread_id,
+                })];
+            }
+        }
+        "event_msg" => {
+            let ptype = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            return match ptype {
+                "task_started" => vec![json!({ "type": "turn.started" })],
+                "task_complete" => vec![json!({ "type": "turn.completed" })],
+                "token_count" => {
+                    let Some(info) = payload.get("info") else {
+                        return Vec::new();
+                    };
+                    let Some(usage) = info.get("total_token_usage") else {
+                        return Vec::new();
+                    };
+                    vec![json!({
+                        "type": "token_usage.updated",
+                        "context_window": info.get("model_context_window").cloned().unwrap_or_else(|| json!(null)),
+                        "usage": usage,
+                    })]
+                }
+                "stream_error" => {
+                    let message = get_json_str(payload, &["message"])
+                        .or_else(|| get_json_str(payload, &["error", "message"]))
+                        .unwrap_or("Codex reported an error");
+                    vec![json!({ "type": "error", "message": message })]
+                }
+                // `event_msg.agent_message` duplicates the persisted
+                // response_item message in exec JSON; the response_item path
+                // gives us stable ids and avoids double-rendering commentary.
+                _ => Vec::new(),
+            };
+        }
+        "response_item" => {
+            let ptype = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match ptype {
+                "message" => {
+                    if payload.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                        return Vec::new();
+                    }
+                    let text = codex_content_text(payload);
+                    if text.trim().is_empty() {
+                        return Vec::new();
+                    }
+                    let id = get_json_str(payload, &["id"])
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    return vec![json!({
+                        "type": "item.completed",
+                        "item": {
+                            "id": id,
+                            "type": "agent_message",
+                            "text": text,
+                        },
+                    })];
+                }
+                "function_call" | "local_shell_call" => {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if call_id.is_empty() {
+                        return Vec::new();
+                    }
+                    let tool_type = if ptype == "local_shell_call" {
+                        "local_shell_call"
+                    } else {
+                        "dynamic_tool_call"
+                    };
+                    let name = payload.get("name").cloned().unwrap_or_else(|| {
+                        if ptype == "local_shell_call" {
+                            json!("local_shell")
+                        } else {
+                            json!("function")
+                        }
+                    });
+                    return vec![json!({
+                        "type": "item.started",
+                        "item": {
+                            "id": call_id,
+                            "type": tool_type,
+                            "name": name,
+                            "arguments": codex_function_input(payload, ptype),
+                            "action": payload.get("action").cloned().unwrap_or_else(|| json!(null)),
+                        },
+                    })];
+                }
+                "custom_tool_call" => {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if call_id.is_empty() {
+                        return Vec::new();
+                    }
+                    let raw_name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("custom_tool");
+                    let raw_input = payload
+                        .get("input")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload.get("arguments").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    if raw_name == "apply_patch" {
+                        let mut item = codex_apply_patch_input(raw_input)
+                            .unwrap_or_else(|| json!({ "input": raw_input }));
+                        item["id"] = json!(call_id);
+                        item["type"] = json!("file_change");
+                        return vec![json!({ "type": "item.started", "item": item })];
+                    }
+                    let input = serde_json::from_str::<JsonValue>(raw_input)
+                        .unwrap_or_else(|_| json!({ "input": raw_input }));
+                    return vec![json!({
+                        "type": "item.started",
+                        "item": {
+                            "id": call_id,
+                            "type": "dynamic_tool_call",
+                            "name": raw_name,
+                            "arguments": input,
+                        },
+                    })];
+                }
+                "function_call_output" | "local_shell_call_output" | "custom_tool_call_output" => {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if call_id.is_empty() {
+                        return Vec::new();
+                    }
+                    let (output, is_error) = codex_tool_output(payload);
+                    let tool_type = match ptype {
+                        "local_shell_call_output" => "local_shell_call",
+                        "custom_tool_call_output" => "file_change",
+                        _ => "dynamic_tool_call",
+                    };
+                    return vec![json!({
+                        "type": "item.completed",
+                        "item": {
+                            "id": call_id,
+                            "type": tool_type,
+                            "output": output,
+                            "status": if is_error { "failed" } else { "completed" },
+                        },
+                    })];
+                }
+                "web_search_call" => {
+                    let id = get_json_str(payload, &["id"])
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    return vec![json!({
+                        "type": "item.completed",
+                        "item": {
+                            "id": id,
+                            "type": "web_search_call",
+                            "action": payload.get("action").cloned().unwrap_or_else(|| json!({})),
+                            "status": payload.get("status").cloned().unwrap_or_else(|| json!("completed")),
+                        },
+                    })];
+                }
+                "mcp_tool_call" => {
+                    let mut item = normalize_codex_item(payload);
+                    if item.get("id").is_none() {
+                        let id = get_json_str(payload, &["call_id"])
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        item["id"] = json!(id);
+                    }
+                    return vec![json!({ "type": "item.completed", "item": item })];
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn codex_exec_line_to_frontend_lines(line: &str) -> Vec<String> {
+    let Ok(envelope) = serde_json::from_str::<JsonValue>(line) else {
+        return vec![line.to_string()];
+    };
+    let events = codex_exec_envelope_to_frontend_events(&envelope);
+    if events.is_empty() {
+        Vec::new()
+    } else {
+        events.into_iter().map(|event| event.to_string()).collect()
+    }
 }
 
 fn run_app_server_request(cwd: &str, method: &str, params: JsonValue) -> Result<JsonValue, String> {
@@ -650,15 +935,17 @@ fn spawn_and_stream(
                 Ok(line) if line.trim().is_empty() => continue,
                 Ok(line) => {
                     had_output = true;
-                    let data = cap_event_size(line);
-                    if let Err(e) = handle.emit(
-                        "codex-event",
-                        CodexEvent {
-                            session_id: sid.clone(),
-                            data,
-                        },
-                    ) {
-                        safe_eprintln!("[codex] Failed to emit codex-event for {}: {}", sid, e);
+                    for event_line in codex_exec_line_to_frontend_lines(&line) {
+                        let data = cap_event_size(event_line);
+                        if let Err(e) = handle.emit(
+                            "codex-event",
+                            CodexEvent {
+                                session_id: sid.clone(),
+                                data,
+                            },
+                        ) {
+                            safe_eprintln!("[codex] Failed to emit codex-event for {}: {}", sid, e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -1592,13 +1879,203 @@ fn attach_codex_tool_call(
     pending.insert(pending_key.to_string(), (target_idx, ti));
 }
 
+fn find_u32_field(value: &JsonValue, names: &[&str]) -> Option<u32> {
+    match value {
+        JsonValue::Object(map) => {
+            for name in names {
+                if let Some(raw) = map.get(*name) {
+                    if let Some(n) = raw.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                        return Some(n);
+                    }
+                    if let Some(n) = raw
+                        .as_str()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .and_then(|n| u32::try_from(n).ok())
+                    {
+                        return Some(n);
+                    }
+                }
+            }
+            map.values().find_map(|v| find_u32_field(v, names))
+        }
+        JsonValue::Array(items) => items.iter().find_map(|v| find_u32_field(v, names)),
+        _ => None,
+    }
+}
+
+fn codex_rollback_turns(envelope: &JsonValue) -> Option<u32> {
+    let etype = envelope.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let payload = envelope.get("payload").unwrap_or(envelope);
+    let ptype = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let is_rollback = etype.eq_ignore_ascii_case("thread_rolled_back")
+        || ptype.eq_ignore_ascii_case("thread_rolled_back")
+        || etype.eq_ignore_ascii_case("thread_rollback")
+        || ptype.eq_ignore_ascii_case("thread_rollback");
+    if !is_rollback {
+        return None;
+    }
+    find_u32_field(
+        payload,
+        &[
+            "num_turns",
+            "numTurns",
+            "dropped_turns",
+            "droppedTurns",
+            "num_dropped_turns",
+            "numDroppedTurns",
+        ],
+    )
+}
+
+fn drop_last_codex_history_turns(out: &mut Vec<HistoryMessage>, num_turns: u32) {
+    for _ in 0..num_turns {
+        let Some(user_idx) = out.iter().rposition(|m| m.role == "user") else {
+            out.clear();
+            return;
+        };
+        out.truncate(user_idx);
+    }
+}
+
+fn flush_codex_apply_patch_change(
+    changes: &mut Vec<JsonValue>,
+    path: &mut Option<String>,
+    kind: &mut &'static str,
+    move_path: &mut Option<String>,
+    diff_lines: &mut Vec<String>,
+) {
+    let Some(p) = path.take() else {
+        return;
+    };
+    let diff = diff_lines.join("\n");
+    let mut change = json!({
+        "path": p,
+        "kind": *kind,
+        "diff": diff,
+    });
+    if let Some(move_to) = move_path.take() {
+        change["move_path"] = json!(move_to);
+    }
+    changes.push(change);
+    *kind = "update";
+    diff_lines.clear();
+}
+
+fn codex_apply_patch_input(raw: &str) -> Option<JsonValue> {
+    let mut changes: Vec<JsonValue> = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_kind: &'static str = "update";
+    let mut current_move_path: Option<String> = None;
+    let mut current_diff: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            flush_codex_apply_patch_change(
+                &mut changes,
+                &mut current_path,
+                &mut current_kind,
+                &mut current_move_path,
+                &mut current_diff,
+            );
+            current_path = Some(path.trim().to_string());
+            current_kind = "update";
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            flush_codex_apply_patch_change(
+                &mut changes,
+                &mut current_path,
+                &mut current_kind,
+                &mut current_move_path,
+                &mut current_diff,
+            );
+            current_path = Some(path.trim().to_string());
+            current_kind = "create";
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            flush_codex_apply_patch_change(
+                &mut changes,
+                &mut current_path,
+                &mut current_kind,
+                &mut current_move_path,
+                &mut current_diff,
+            );
+            current_path = Some(path.trim().to_string());
+            current_kind = "delete";
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Move to: ") {
+            current_move_path = Some(path.trim().to_string());
+            continue;
+        }
+        if line == "*** Begin Patch" || line == "*** End Patch" {
+            continue;
+        }
+        if current_path.is_some() {
+            current_diff.push(line.to_string());
+        }
+    }
+    flush_codex_apply_patch_change(
+        &mut changes,
+        &mut current_path,
+        &mut current_kind,
+        &mut current_move_path,
+        &mut current_diff,
+    );
+
+    if changes.is_empty() {
+        return None;
+    }
+    let paths = changes
+        .iter()
+        .filter_map(|change| change.get("path").and_then(|v| v.as_str()))
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>();
+    let primary = paths.first().cloned().unwrap_or_default();
+    Some(json!({
+        "file_path": primary,
+        "path": primary,
+        "paths": paths,
+        "changes": changes,
+    }))
+}
+
+fn codex_tool_output(payload: &JsonValue) -> (String, bool) {
+    let raw = match payload.get("output") {
+        Some(JsonValue::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    if let Ok(value) = serde_json::from_str::<JsonValue>(&raw) {
+        let output = value
+            .get("output")
+            .map(|v| match v {
+                JsonValue::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_else(|| raw.clone());
+        let exit_error = value
+            .get("metadata")
+            .and_then(|m| m.get("exit_code"))
+            .and_then(|v| v.as_i64())
+            .map(|code| code != 0)
+            .unwrap_or(false);
+        let is_error = exit_error || detect_codex_tool_error(&output);
+        return (output, is_error);
+    }
+    let is_error = detect_codex_tool_error(&raw);
+    (raw, is_error)
+}
+
 /// Parse a Codex rollout JSONL into the same HistoryMessage shape Claude uses,
 /// with tool calls (function/local-shell, web_search, mcp) attached to the
 /// preceding assistant turn. Single pass over the file; `pending_tools` keys
 /// each in-flight `function_call` / `local_shell_call` by `call_id` so the
 /// matching `*_output` envelope can patch the result back in. Web-search and
 /// MCP tool calls are single-shot — we materialise them with the embedded
-/// status/result on the spot.
+/// status/result on the spot. App-server rollback markers are replayed too so
+/// refreshed UI history matches the model-visible thread context.
 pub fn load_codex_history_by_thread(thread_id: &str) -> Vec<HistoryMessage> {
     let Some(path) = find_codex_rollout(thread_id) else {
         return Vec::new();
@@ -1617,6 +2094,11 @@ pub fn load_codex_history_by_thread(thread_id: &str) -> Vec<HistoryMessage> {
         let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if let Some(num_turns) = codex_rollback_turns(&envelope) {
+            drop_last_codex_history_turns(&mut out, num_turns);
+            pending_tools.clear();
+            continue;
+        }
         if envelope.get("type").and_then(|v| v.as_str()) != Some("response_item") {
             continue;
         }
@@ -1716,7 +2198,7 @@ pub fn load_codex_history_by_thread(thread_id: &str) -> Vec<HistoryMessage> {
                 };
                 attach_codex_tool_call(&mut out, &mut pending_tools, tc, &call_id, ts_ms);
             }
-            "function_call_output" | "local_shell_call_output" => {
+            "custom_tool_call" => {
                 let call_id = payload
                     .get("call_id")
                     .and_then(|v| v.as_str())
@@ -1725,12 +2207,53 @@ pub fn load_codex_history_by_thread(thread_id: &str) -> Vec<HistoryMessage> {
                 if call_id.is_empty() {
                     continue;
                 }
-                let output = match payload.get("output") {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(other) => other.to_string(),
-                    None => String::new(),
+                let raw_name = payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("custom_tool");
+                let raw_input = payload
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| payload.get("arguments").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let (name, input) = if raw_name == "apply_patch" {
+                    let parsed = codex_apply_patch_input(raw_input)
+                        .unwrap_or_else(|| json!({ "input": raw_input }));
+                    let change_count = parsed
+                        .get("changes")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(1);
+                    let display = if change_count > 1 {
+                        "MultiEdit"
+                    } else {
+                        "Edit"
+                    };
+                    (display.to_string(), parsed)
+                } else if let Ok(parsed) = serde_json::from_str::<JsonValue>(raw_input) {
+                    (raw_name.to_string(), parsed)
+                } else {
+                    (raw_name.to_string(), json!({ "input": raw_input }))
                 };
-                let is_error = detect_codex_tool_error(&output);
+                let tc = HistoryToolCall {
+                    id: call_id.clone(),
+                    name,
+                    input,
+                    result: None,
+                    is_error: false,
+                };
+                attach_codex_tool_call(&mut out, &mut pending_tools, tc, &call_id, ts_ms);
+            }
+            "function_call_output" | "local_shell_call_output" | "custom_tool_call_output" => {
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if call_id.is_empty() {
+                    continue;
+                }
+                let (output, is_error) = codex_tool_output(payload);
                 if let Some(&(mi, ti)) = pending_tools.get(&call_id) {
                     if let Some(msg) = out.get_mut(mi) {
                         if let Some(tcs) = msg.tool_calls.as_mut() {

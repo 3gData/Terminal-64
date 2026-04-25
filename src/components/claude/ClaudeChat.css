@@ -2859,6 +2859,14 @@
   align-self: center;
 }
 
+.cc-island-more {
+  padding: 10px 12px 12px;
+  font-size: 10px;
+  color: var(--fg-muted, #6c7086);
+  text-align: center;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
 .cc-island-empty {
   flex: 1;
   display: flex;

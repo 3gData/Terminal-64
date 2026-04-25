@@ -420,6 +420,100 @@
       "related_bugs": ["bug-020"],
       "occurrences": 1,
       "last_seen": "2026-04-22"
+    },
+    {
+      "id": "bug-022",
+      "timestamp": "2026-04-26",
+      "error_message": "After rewinding a Codex session, refreshing from JSONL brings the rewound messages back in the frontend even though Codex no longer sees them in its model context.",
+      "file": "src-tauri/src/providers/codex.rs",
+      "root_cause": "Codex app-server rollback prunes the thread context and can persist a thread_rolled_back event, but Terminal 64's load_codex_history_by_thread hydrator only replayed response_item envelopes. It ignored rollback markers, so refresh-from-jsonl reconstructed stale pre-rollback messages that were no longer model-visible.",
+      "fix": "Added rollback-aware replay to the Codex JSONL loader. It detects thread_rolled_back/thread_rollback envelopes, drops the requested number of trailing user turns from the hydrated HistoryMessage list, and clears pending tool-call pairing state before continuing through later rollout lines.",
+      "tags": [
+        "codex",
+        "rewind",
+        "rollback",
+        "jsonl",
+        "history-refresh",
+        "app-server"
+      ],
+      "related_bugs": ["bug-019"],
+      "occurrences": 1,
+      "last_seen": "2026-04-26"
+    },
+    {
+      "id": "bug-023",
+      "timestamp": "2026-04-26",
+      "error_message": "Codex JSONL refresh can omit edit tool cards for apply_patch edits, so refreshed Codex chats don't match Claude's clickable Edit/MultiEdit rendering.",
+      "file": "src-tauri/src/providers/codex.rs",
+      "root_cause": "Codex rollouts persist apply_patch edits as response_item payloads with type custom_tool_call/custom_tool_call_output. load_codex_history_by_thread only materialized function_call/local_shell_call/web_search/mcp_tool_call, so apply_patch history was silently dropped on refresh.",
+      "fix": "Added custom_tool_call hydration. apply_patch input is parsed into Edit/MultiEdit-shaped file change metadata with paths and diff snippets, and custom_tool_call_output is paired back to the pending tool call with JSON output unwrapped and exit status respected. The edit preview click path now resolves relative tool paths against the session cwd before reading the file.",
+      "tags": [
+        "codex",
+        "jsonl",
+        "tool-calls",
+        "apply-patch",
+        "edit-ui",
+        "history-refresh"
+      ],
+      "related_bugs": ["bug-022"],
+      "occurrences": 1,
+      "last_seen": "2026-04-26"
+    },
+    {
+      "id": "bug-024",
+      "timestamp": "2026-04-26",
+      "error_message": "Codex file-change cards can lose clickable paths/diffs when app-server sends filePath or unified_diff fields, and Codex turn.completed errors may finish silently.",
+      "file": "src/lib/codexEventDecoder.ts, src/hooks/useClaudeEvents.ts",
+      "root_cause": "The frontend decoder only accepted path/diff on file_change records, while Codex/app-server variants may use file_path, filePath, unified_diff, or unifiedDiff. Separately, the Codex turn.completed handler ignored parsed.error even though the Rust app-server bridge can attach an error to completed turns.",
+      "fix": "Normalized file-change path/diff variants into the provider-neutral tool-call input shape, recorded modified files from all supported path keys, and surfaced completion errors through setError while still running normal turn cleanup.",
+      "tags": [
+        "codex",
+        "app-server",
+        "file-change",
+        "tool-calls",
+        "error-handling",
+        "frontend"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-26"
+    },
+    {
+      "id": "bug-025",
+      "timestamp": "2026-04-26",
+      "error_message": "Legacy T64_CODEX_TRANSPORT=exec emits raw rollout-style Codex JSON that the app-server-oriented frontend mostly ignores, so fallback Codex sessions can miss thread IDs, tool cards, context usage, and completion cleanup.",
+      "file": "src-tauri/src/providers/codex.rs, src/hooks/useClaudeEvents.ts",
+      "root_cause": "After moving the main Codex path to app-server, the old exec reader still forwarded raw session_meta/event_msg/response_item lines directly. useClaudeEvents expects provider-neutral thread.started/item.started/item.completed/turn.completed shapes, so raw exec events had much lower parity than app-server and Claude.",
+      "fix": "Added a Rust-side exec stream translator that converts session_meta to thread.started, token_count to token_usage.updated, task lifecycle events to turn events, and response_item messages/tools to item.completed/item.started pairs. The frontend now preserves tracked tool names and inputs when sparse completed events arrive.",
+      "tags": [
+        "codex",
+        "exec-transport",
+        "fallback",
+        "event-decoder",
+        "tool-calls",
+        "parity"
+      ],
+      "related_bugs": ["bug-023", "bug-024"],
+      "occurrences": 1,
+      "last_seen": "2026-04-26"
+    },
+    {
+      "id": "bug-026",
+      "timestamp": "2026-04-26",
+      "error_message": "Opening the prompt island can lag when a chat has a huge prompt history.",
+      "file": "src/components/claude/PromptIsland.tsx, src/components/claude/ClaudeChat.css",
+      "root_cause": "PromptIsland rendered every prompt row on open, reversed the full prompts array, normalized whitespace for every prompt, and formatted every timestamp in one render.",
+      "fix": "Bounded initial render cost by showing the latest 120 prompts first, memoizing only the visible slice, and appending older prompts in 120-row batches as the island list is scrolled near the bottom. Added a small older-prompts sentinel row.",
+      "tags": [
+        "frontend",
+        "performance",
+        "prompt-island",
+        "large-history",
+        "rendering"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-26"
     }
   ]
 }

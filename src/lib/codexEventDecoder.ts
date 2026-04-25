@@ -7,10 +7,16 @@ export interface CodexItem {
   args?: string[];
   exit_code?: number;
   path?: string;
+  file_path?: string;
+  filePath?: string;
   change?: string;
   changes?: Array<{
     path?: string;
+    file_path?: string;
+    filePath?: string;
     diff?: string;
+    unified_diff?: string;
+    unifiedDiff?: string;
     kind?: string | { type?: string; move_path?: string | null };
   }>;
   tool_name?: string;
@@ -28,6 +34,8 @@ export interface CodexUsage {
   input_tokens?: number;
   cached_input_tokens?: number;
   output_tokens?: number;
+  reasoning_output_tokens?: number;
+  total_tokens?: number;
 }
 
 export interface CodexNdjsonEvent {
@@ -45,6 +53,7 @@ export interface CodexNdjsonEvent {
   result?: unknown;
   usage?: CodexUsage;
   payload?: { usage?: CodexUsage };
+  context_window?: number | null;
 }
 
 export interface CodexPendingItem {
@@ -59,7 +68,19 @@ export function classifyCodexItem(itemType: string | undefined): CodexPendingIte
   if (!itemType) return "other";
   if (itemType === "agent_message" || itemType === "assistant_message") return "agent_message";
   if (itemType === "reasoning" || itemType === "agent_reasoning") return "reasoning";
-  return "tool";
+  if (
+    itemType === "command_execution" ||
+    itemType === "local_shell_call" ||
+    itemType === "file_change" ||
+    itemType === "mcp_tool_call" ||
+    itemType === "collab_tool_call" ||
+    itemType === "web_search" ||
+    itemType === "web_search_call" ||
+    itemType === "dynamic_tool_call"
+  ) {
+    return "tool";
+  }
+  return "other";
 }
 
 function codexCommandString(item: CodexItem): string {
@@ -74,12 +95,21 @@ function codexBasename(p: string): string {
   return m.length > 0 ? m[m.length - 1]! : p;
 }
 
+function codexChangePath(change: NonNullable<CodexItem["changes"]>[number]): string | undefined {
+  return change.path || change.file_path || change.filePath;
+}
+
+function codexChangeDiff(change: NonNullable<CodexItem["changes"]>[number]): string | undefined {
+  return change.diff || change.unified_diff || change.unifiedDiff;
+}
+
 export function codexItemDisplayName(item: CodexItem): string {
   const kind = item.item_type ?? item.type ?? "";
   if (kind === "command_execution" || kind === "local_shell_call") {
     return "Bash";
   }
   if (kind === "file_change") {
+    if (Array.isArray(item.changes) && item.changes.length > 1) return "MultiEdit";
     return "Edit";
   }
   if (kind === "mcp_tool_call") {
@@ -101,8 +131,8 @@ export function codexItemInput(item: CodexItem): Record<string, unknown> {
     if (cmd) out.command = cmd;
   } else if (kind === "file_change") {
     const changes = Array.isArray(item.changes) ? item.changes : [];
-    const paths = changes.map((change) => change.path).filter((path): path is string => Boolean(path));
-    const primaryPath = item.path || paths[0];
+    const paths = changes.map(codexChangePath).filter((path): path is string => Boolean(path));
+    const primaryPath = item.path || item.file_path || item.filePath || paths[0];
     if (primaryPath) {
       out.file_path = primaryPath;
       out.path = primaryPath;
@@ -114,9 +144,10 @@ export function codexItemInput(item: CodexItem): Record<string, unknown> {
     if (changes.length > 0) {
       out.changes = changes.map((change) => ({
         path: change.path,
+        file_path: codexChangePath(change),
         kind: typeof change.kind === "string" ? change.kind : change.kind?.type,
         move_path: typeof change.kind === "object" ? change.kind.move_path : undefined,
-        diff: change.diff,
+        diff: codexChangeDiff(change),
       }));
     }
     if (item.change) out.change = item.change;

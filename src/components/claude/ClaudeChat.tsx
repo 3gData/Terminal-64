@@ -29,7 +29,7 @@ import { useDelegationSpawn } from "../../hooks/useDelegationSpawn";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { v4 as uuidv4 } from "uuid";
 import { formatDuration } from "../../lib/constants";
-import { baseName, dirName } from "../../lib/platform";
+import { baseName, dirName, isAbsolutePath, joinPath } from "../../lib/platform";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -611,6 +611,12 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // wheel-up / touch-drag-up, and back to true when the user brings
   // themselves back near the bottom.
   const stickyRef = useRef(true);
+  const isRawNearBottom = useCallback(() => {
+    const el = getScrollEl();
+    if (!el) return true;
+    const remaining = el.scrollHeight - el.clientHeight - el.scrollTop;
+    return remaining <= 24;
+  }, [getScrollEl]);
 
   const scrollToBottom = useCallback(() => {
     // LegendList's `maintainScrollAtEnd` re-engages once we mark sticky
@@ -619,8 +625,17 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     // library's anchor logic to know we want to be at end so it stays
     // there as new content arrives.
     stickyRef.current = true;
+    setIsScrolledUp(false);
+    setScrollProgress(0);
     virtuosoRef.current?.scrollToEnd?.({ animated: false });
-  }, []);
+    requestAnimationFrame(() => {
+      if (isRawNearBottom()) {
+        stickyRef.current = true;
+        setIsScrolledUp(false);
+        setScrollProgress(0);
+      }
+    });
+  }, [isRawNearBottom]);
 
   // Session switch → snap to bottom, close island.
   useEffect(() => {
@@ -1330,6 +1345,9 @@ Rules:
   const handleFork = useChatFork({ sessionId, effectiveCwd });
 
   const handleEditClick = useCallback(async (tcId: string, filePath: string, _oldStr: string, newStr: string) => {
+    const resolvedFilePath = filePath && !isAbsolutePath(filePath) && effectiveCwd
+      ? joinPath(effectiveCwd, filePath)
+      : filePath;
     // Save scroll position before opening overlay
     const el = getScrollEl();
     if (el) savedScrollTop.current = el.scrollTop;
@@ -1343,12 +1361,12 @@ Rules:
         const numLines = newStr.split("\n").length;
         for (let i = 0; i < numLines; i++) changed.add(startLine + i);
       }
-      setEditOverlay({ tcId, filePath, fullContent: cached, changedLines: changed });
+      setEditOverlay({ tcId, filePath: resolvedFilePath, fullContent: cached, changedLines: changed });
       return;
     }
     // Read full file from disk
     try {
-      const content = await readFile(filePath);
+      const content = await readFile(resolvedFilePath);
       const idx = content.indexOf(newStr);
       const changed = new Set<number>();
       if (idx >= 0) {
@@ -1356,14 +1374,14 @@ Rules:
         const numLines = newStr.split("\n").length;
         for (let i = 0; i < numLines; i++) changed.add(startLine + i);
       }
-      setEditOverlay({ tcId, filePath, fullContent: content, changedLines: changed });
+      setEditOverlay({ tcId, filePath: resolvedFilePath, fullContent: content, changedLines: changed });
     } catch {
       // Fallback: show just the new string with all lines marked changed
       const lines = newStr.split("\n");
       const changed = new Set(lines.map((_, i) => i + 1));
-      setEditOverlay({ tcId, filePath, fullContent: newStr, changedLines: changed });
+      setEditOverlay({ tcId, filePath: resolvedFilePath, fullContent: newStr, changedLines: changed });
     }
-  }, []);
+  }, [effectiveCwd, getScrollEl]);
 
   const handleFileTreeOpen = useCallback(async (filePath: string) => {
     const el = getScrollEl();
@@ -1641,8 +1659,9 @@ Rules:
   // react correctly.
   const onLegendScroll = useCallback(() => {
     const state = virtuosoRef.current?.getState?.();
+    const rawAtEnd = isRawNearBottom();
     if (state) {
-      const atEnd = !!state.isAtEnd;
+      const atEnd = !!state.isAtEnd || rawAtEnd;
       stickyRef.current = atEnd;
       setIsScrolledUp(!atEnd);
     }
@@ -1650,8 +1669,8 @@ Rules:
     if (!el) return;
     const maxScroll = el.scrollHeight - el.clientHeight;
     const progress = maxScroll > 1 ? Math.max(0, Math.min(1, 1 - el.scrollTop / maxScroll)) : 0;
-    setScrollProgress(progress);
-  }, [getScrollEl]);
+    setScrollProgress(rawAtEnd ? 0 : progress);
+  }, [getScrollEl, isRawNearBottom]);
 
   // After mount / session swap, LegendList does its initialScrollAtEnd pass
   // but never fires onScroll for the resting-at-bottom state, so isScrolledUp
@@ -1662,14 +1681,15 @@ Rules:
     let cancelled = false;
     const sync = () => {
       if (cancelled) return;
-      const atEnd = !!virtuosoRef.current?.getState?.()?.isAtEnd;
+      const atEnd = !!virtuosoRef.current?.getState?.()?.isAtEnd || isRawNearBottom();
       stickyRef.current = atEnd;
       setIsScrolledUp(!atEnd);
+      if (atEnd) setScrollProgress(0);
     };
     const r1 = requestAnimationFrame(() => requestAnimationFrame(sync));
     const t = setTimeout(sync, 120);
     return () => { cancelled = true; cancelAnimationFrame(r1); clearTimeout(t); };
-  }, [sessionId]);
+  }, [sessionId, visualRows.length, isRawNearBottom]);
   const legendFooter = useMemo(
     () => (
       <>

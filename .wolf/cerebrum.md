@@ -61,6 +61,7 @@
 
 ### UI rendering / WebKit (2026-04-18)
 - `overflow: hidden` + `border-radius` on a child of a `transform: scale(z)` parent flickers on WebKit at fractional pixel positions — rounded-corner clip repaints non-atomically, invalidating the background paint. Fix by promoting to own compositor layer: `will-change: transform; transform: translateZ(0); backface-visibility: hidden; contain: layout paint; isolation: isolate`.
+- Prompt island can lag with huge histories if it reverses/maps/formats every prompt on open. Render the newest bounded slice first and append older rows in scroll batches.
 
 ### Voice pipeline (2026-04-18)
 - VAD with a single hard threshold + 1-frame hangover finalizes whisper early on breaths/soft consonants mid-utterance. Use Silero VADIterator-style hysteresis: activate 0.5, deactivate 0.35, `min_speech_duration_ms=250`, `min_silence_duration_ms=500`, `speech_pad_ms=300`. Tune orchestrator silence-frame counters to match (e.g. dictation `SILENCE_FRAMES_TO_FINALIZE` 25→9).
@@ -76,6 +77,11 @@
 ### Rewind + fork JSONL persistence (2026-04-22)
 - `load_session_history` reads every line in the JSONL sequentially — it does NOT walk the parentUuid chain and does NOT respect rewind markers. Rewind must physically truncate the file (`truncate_session_jsonl_by_messages`) in addition to storing `resumeAtUuid` for `--resume-session-at`; otherwise a refresh reloads the "deleted" messages.
 - `fork_session_jsonl` copies the full parent JSONL (needed so chain-walking can resolve the fork UUID) but MUST then truncate the destination to `keep_messages`. Without truncation the fork reloads with the entire parent history until the first `--resume-session-at` send.
+- Codex app-server rewind differs from Claude: it may preserve older rollout items and append a `thread_rolled_back`/`thread_rollback` marker with `num_turns`/`numTurns`. Codex history hydration must replay that marker by dropping trailing user turns; otherwise refresh-from-jsonl shows messages the model context no longer contains.
+- Codex rollouts can store edits as `custom_tool_call` named `apply_patch`; hydrate these into `Edit`/`MultiEdit` tool calls so refreshed chats preserve Claude-style clickable edit cards.
+- Codex file-change shapes are not stable across live app-server events and rollout/history data: accept `path`, `file_path`, `filePath`, `diff`, `unified_diff`, and `unifiedDiff` when building UI tool-call inputs.
+- Tool edit preview paths can be relative for Codex `apply_patch` history; resolve them against the session cwd before `readFile` so Monaco opens the real file.
+- Legacy `T64_CODEX_TRANSPORT=exec` emits rollout-style `session_meta`/`event_msg`/`response_item` JSON. Translate it in Rust to the same provider-neutral event shapes as app-server before emitting to the frontend.
 
 ### Permission server bypass + unknown-session race (2026-04-22)
 - `permission_server::handle_connection` must parse `permission_mode` from the hook payload BEFORE the session_map lookup. The request's `secret` in the URL has already proven authenticity, so an unknown `run_token` is just "session unregistered" (rewind cancel+close race, spawned-session timing, or server-restart leftover). On bypassPermissions, always return `permissionDecision: "allow"` even with empty session_id — otherwise the user gets silent `permissionDecision: "deny"` with reason "Unknown session — denied for safety" on skill/widget/MCP/MD edits.

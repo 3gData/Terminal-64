@@ -425,6 +425,18 @@ function summarizeFallback(input: Record<string, unknown>): string {
   return typeof first === "string" ? first.slice(0, 50) : "";
 }
 
+function diffLines(diff: unknown): { text: string; kind: "add" | "del" }[] {
+  if (typeof diff !== "string" || !diff.trim()) return [];
+  return diff
+    .split("\n")
+    .filter((line) => (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")))
+    .slice(0, 16)
+    .map((line) => ({
+      text: line.slice(1),
+      kind: line.startsWith("+") ? "add" : "del",
+    }));
+}
+
 function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: string, filePath: string, oldStr: string, newStr: string) => void }) {
   const i = tc.input;
   const result = tc.result;
@@ -448,24 +460,77 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     const paths = Array.isArray(i.paths)
       ? i.paths.filter((path): path is string => typeof path === "string" && path.length > 0)
       : [];
-    const changes = Array.isArray(i.changes)
-      ? i.changes
-          .filter((change): change is Record<string, unknown> => Boolean(change) && typeof change === "object")
-          .map((change) => {
-            const path = typeof change.path === "string" ? shortPath(change.path) : "";
-            const kind = typeof change.kind === "string" ? change.kind : "update";
-            return path ? `${kind}: ${path}` : kind;
-          })
+    const rawChanges = Array.isArray(i.changes)
+      ? i.changes.filter((change): change is Record<string, unknown> => Boolean(change) && typeof change === "object")
       : [];
-    const path = shortPath(i.file_path || i.path || paths[0]);
+    const changes = rawChanges
+      .map((change) => {
+        const path = typeof change.path === "string" ? shortPath(change.path) : "";
+        const kind = typeof change.kind === "string" ? change.kind : "update";
+        return path ? `${kind}: ${path}` : kind;
+      });
+    const path = String(i.file_path || i.path || paths[0] || rawChanges[0]?.path || "");
+    const short = shortPath(path);
     const change = i.change ? String(i.change) : "";
-    const summary = changes.length > 0 ? changes.join("\n") : path ? `File: ${path}` : "File changed";
+    const summary = changes.length > 0 ? changes.join("\n") : short ? `File: ${short}` : "File changed";
+    const previewDiff = rawChanges.find((entry) => typeof entry.diff === "string" && entry.diff.trim())?.diff;
+    const previewLines = diffLines(previewDiff);
     return (
       <div className="cc-tc-body">
-        <pre className="cc-tc-output">
-          {summary}
-          {change ? `\nChange: ${change}` : ""}
-        </pre>
+        {previewLines.length > 0 ? (
+          <div
+            className="cc-tc-diff"
+            onClick={() => path && onEditClick?.(tc.id, path, "", String(previewDiff || ""))}
+            style={{ cursor: onEditClick && path ? "pointer" : undefined }}
+          >
+            {previewLines.map((line, idx) => (
+              <div key={idx} className={line.kind === "add" ? "cc-tc-diff-add" : "cc-tc-diff-del"}>
+                {line.text}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div
+            className="cc-tc-diff"
+            onClick={() => path && onEditClick?.(tc.id, path, "", change || summary)}
+            style={{ cursor: onEditClick && path ? "pointer" : undefined }}
+          >
+            <div className="cc-tc-diff-add">
+              {summary}
+              {change ? `\n${change}` : ""}
+            </div>
+          </div>
+        )}
+        {result && <pre className="cc-tc-result-text">{result}</pre>}
+      </div>
+    );
+  }
+
+  // MultiEdit-style Codex file_change with multiple paths but no primary path.
+  if (tc.name === "MultiEdit" && Array.isArray(i.changes)) {
+    const rawChanges = i.changes.filter((change): change is Record<string, unknown> => Boolean(change) && typeof change === "object");
+    return (
+      <div className="cc-tc-body">
+        {rawChanges.map((change, idx) => {
+          const path = typeof change.path === "string" ? change.path : "";
+          const lines = diffLines(change.diff);
+          return (
+            <div
+              key={`${path}-${idx}`}
+              className="cc-tc-diff"
+              onClick={() => path && onEditClick?.(`${tc.id}:${idx}`, path, "", String(change.diff || ""))}
+              style={{ cursor: onEditClick && path ? "pointer" : undefined }}
+            >
+              {lines.length > 0 ? lines.map((line, lineIdx) => (
+                <div key={lineIdx} className={line.kind === "add" ? "cc-tc-diff-add" : "cc-tc-diff-del"}>
+                  {line.text}
+                </div>
+              )) : (
+                <div className="cc-tc-diff-add">{path ? shortPath(path) : "File changed"}</div>
+              )}
+            </div>
+          );
+        })}
         {result && <pre className="cc-tc-result-text">{result}</pre>}
       </div>
     );

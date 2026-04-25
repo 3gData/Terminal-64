@@ -693,6 +693,20 @@ export function useClaudeEvents() {
           return;
         }
 
+        if (type === "token_usage.updated") {
+          const sess = store.sessions[session_id];
+          const usage = parsed.usage ?? parsed.payload?.usage;
+          const inputUsed = usage?.input_tokens;
+          if (typeof inputUsed === "number") {
+            const reportedWindow = typeof parsed.context_window === "number" && parsed.context_window > 0
+              ? parsed.context_window
+              : null;
+            const ctxMax = reportedWindow ?? getCodexContextWindow(sess?.selectedModel ?? sess?.model ?? null);
+            store.setContextUsage(session_id, Math.min(inputUsed, ctxMax), ctxMax);
+          }
+          return;
+        }
+
         // 2) item.started — note the in-flight item. Tool items get pushed
         //    onto a fresh assistant message immediately so the UI can render
         //    "running" status.
@@ -730,11 +744,11 @@ export function useClaudeEvents() {
             (typeof parsed.delta === "string" ? parsed.delta : "") ||
             (typeof parsed.text === "string" ? parsed.text : "") ||
             (item && typeof item.text === "string" ? item.text : "");
-          if (!deltaText) return;
           if (item?.id) {
             const itemMap = getCodexItemMap(session_id);
             const tracked = itemMap.get(item.id);
             if (tracked && tracked.kind === "agent_message") {
+              if (!deltaText) return;
               const next = tracked.text + deltaText;
               tracked.text = next;
               // Stream into the same buffer Claude uses; flushPendingText
@@ -742,6 +756,14 @@ export function useClaudeEvents() {
               const existing = pendingText.get(session_id) || "";
               pendingText.set(session_id, existing + deltaText);
               scheduleFlush();
+            } else if (tracked && tracked.kind === "tool") {
+              const input = codexItemInput(item);
+              tracked.inputArgs = { ...tracked.inputArgs, ...input };
+              const result = codexItemResultText(item);
+              store.updateToolResult(session_id, item.id, result, codexItemIsError(item), {
+                name: codexItemDisplayName(item),
+                input,
+              });
             }
           }
           return;
@@ -793,24 +815,31 @@ export function useClaudeEvents() {
           } else if (kind === "tool") {
             const result = codexItemResultText(item);
             const isError = codexItemIsError(item);
+            const completedInput = codexItemInput(item);
+            const patchedInput = tracked
+              ? { ...tracked.inputArgs, ...completedInput }
+              : completedInput;
+            const patchedName = tracked?.toolName ?? codexItemDisplayName(item);
             if (!tracked) {
               store.finalizeAssistantMessage(session_id, "", [{
                 id: item.id,
-                name: codexItemDisplayName(item),
-                input: codexItemInput(item),
+                name: patchedName,
+                input: patchedInput,
               }]);
               codexAssistantFinalized.add(session_id);
             }
             store.updateToolResult(session_id, item.id, result, isError, {
-              name: codexItemDisplayName(item),
-              input: codexItemInput(item),
+              name: patchedName,
+              input: patchedInput,
             });
             const itemType = item.item_type ?? item.type;
             if (itemType === "file_change") {
               const changedPaths = [
                 item.path,
+                item.file_path,
+                item.filePath,
                 ...(Array.isArray(item.changes)
-                  ? item.changes.map((change) => change?.path)
+                  ? item.changes.map((change) => change?.path || change?.file_path || change?.filePath)
                   : []),
               ].filter((path): path is string => typeof path === "string" && path.length > 0);
               if (changedPaths.length > 0) {
@@ -882,6 +911,13 @@ export function useClaudeEvents() {
             const ctxMax =
               getCodexContextWindow(sess?.selectedModel ?? sess?.model ?? null);
             store.setContextUsage(session_id, Math.min(inputUsed, ctxMax), ctxMax);
+          }
+          const completionError =
+            (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
+            parsed.message ||
+            "";
+          if (completionError) {
+            store.setError(session_id, completionError);
           }
           store.setStreaming(session_id, false);
           store.clearStreamingText(session_id);

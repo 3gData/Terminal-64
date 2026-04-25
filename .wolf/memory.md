@@ -93,3 +93,7 @@
 | 22:40 | sensitive-file approval flow | ClaudeChat.tsx, useClaudeEvents.ts, claudeStore.ts | detect CLI classifier reject, show approval card, apply edit locally | ~2500 |
 | 01:24 | verification pass | .wolf/jsonl-refactor/verification.md | PASS — tsc/cargo/clippy clean, 6 scenarios verified | ~4k |
 | 03:13 | research codex CLI | external | findings reported | ~12k |
+| 00:59 | fix Codex refresh-after-rewind history replay | src-tauri/src/providers/codex.rs, .wolf/buglog.json, .wolf/cerebrum.md | loader now replays thread rollback markers | ~1.2k |
+| 01:17 | audit Codex parity bugs | src-tauri/src/providers/codex.rs, src/lib/codexEventDecoder.ts, src/hooks/useClaudeEvents.ts, src/components/claude/ClaudeChat.tsx, .wolf/buglog.json, .wolf/cerebrum.md | fixed apply_patch history hydration, file-change shape normalization, relative edit preview paths, and turn completion errors | ~2.4k |
+| 01:22 | normalize legacy Codex exec transport | src-tauri/src/providers/codex.rs, src/hooks/useClaudeEvents.ts, .wolf/buglog.json, .wolf/cerebrum.md | exec JSON now translates to app-server-style frontend events | ~1.5k |
+| 01:26 | optimize prompt island open path | src/components/claude/PromptIsland.tsx, src/components/claude/ClaudeChat.css, .wolf/buglog.json, .wolf/cerebrum.md | island renders latest 120 prompts first and appends older rows on scroll | ~700 |
