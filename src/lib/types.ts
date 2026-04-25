@@ -136,6 +136,43 @@ export interface ClaudeDone {
   session_id: string;
 }
 
+// ── Codex (OpenAI Codex CLI) ──────────────────────────────
+
+export interface CreateCodexRequest {
+  session_id: string;
+  cwd: string;
+  prompt: string;
+  sandbox_mode?: string;
+  approval_policy?: string;
+  model?: string;
+  effort?: string;
+  full_auto?: boolean;
+  yolo?: boolean;
+  skip_git_repo_check?: boolean;
+}
+
+export interface SendCodexPromptRequest {
+  session_id: string;
+  cwd: string;
+  prompt: string;
+  sandbox_mode?: string;
+  approval_policy?: string;
+  model?: string;
+  effort?: string;
+  full_auto?: boolean;
+  yolo?: boolean;
+  skip_git_repo_check?: boolean;
+}
+
+export interface CodexEvent {
+  session_id: string;
+  data: string;
+}
+
+export interface CodexDone {
+  session_id: string;
+}
+
 export interface SlashCommand {
   name: string;
   description: string;

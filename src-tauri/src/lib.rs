@@ -96,7 +96,7 @@ use discord_bot::DiscordBot;
 use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
-use providers::{ClaudeAdapter, ProviderKind, ProviderRegistry};
+use providers::{ClaudeAdapter, CodexAdapter, ProviderKind, ProviderRegistry};
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -215,6 +215,7 @@ struct AppState {
     #[allow(dead_code)]
     providers: Arc<ProviderRegistry>,
     claude: Arc<ClaudeAdapter>,
+    codex: Arc<CodexAdapter>,
     discord_bot: Mutex<DiscordBot>,
     permission_server: Arc<PermissionServer>,
     audio_manager: Arc<AudioManager>,
@@ -398,6 +399,45 @@ fn close_claude_session(
         state.permission_server.unregister_session(&token);
     }
     state.claude.close(&session_id)
+}
+
+// ── Codex (OpenAI Codex CLI) ────────────────────────────────
+//
+// Mirrors the four Claude commands above. Codex sessions don't go through
+// the MCP permission shim — `codex exec --json` runs non-interactively and
+// approval policy is set up-front via `req.approval_policy`. The frontend
+// listens to `codex-event` / `codex-done` (parallel to `claude-event` /
+// `claude-done`) and parses Codex's NDJSON stream.
+
+#[tauri::command]
+fn create_codex_session(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    req: CreateCodexRequest,
+) -> Result<String, String> {
+    state.codex.create_session(&app_handle, req)
+}
+
+#[tauri::command]
+fn send_codex_prompt(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    req: SendCodexPromptRequest,
+) -> Result<(), String> {
+    state.codex.send_prompt(&app_handle, req)
+}
+
+#[tauri::command]
+fn cancel_codex(state: tauri::State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.codex.cancel(&session_id)
+}
+
+#[tauri::command]
+fn close_codex_session(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state.codex.close(&session_id)
 }
 
 #[tauri::command]
@@ -4920,15 +4960,21 @@ pub fn run() {
             // (for inherent IPC-shaped methods) and as `Arc<dyn ProviderAdapter>`
             // inside the registry. Same instance, two views.
             let claude_adapter = Arc::new(ClaudeAdapter::new());
+            let codex_adapter = Arc::new(CodexAdapter::new());
             let mut registry = ProviderRegistry::new();
             registry.register(
                 ProviderKind::ClaudeAgent,
                 claude_adapter.clone() as Arc<dyn providers::ProviderAdapter>,
             );
+            registry.register(
+                ProviderKind::Codex,
+                codex_adapter.clone() as Arc<dyn providers::ProviderAdapter>,
+            );
             app.manage(AppState {
                 pty_manager: PtyManager::new(),
                 providers: Arc::new(registry),
                 claude: claude_adapter,
+                codex: codex_adapter,
                 discord_bot: Mutex::new(DiscordBot::new()),
                 permission_server: Arc::new(perm_server),
                 audio_manager: Arc::new(AudioManager::new()),
@@ -4996,6 +5042,10 @@ pub fn run() {
             send_claude_prompt,
             cancel_claude,
             close_claude_session,
+            create_codex_session,
+            send_codex_prompt,
+            cancel_codex,
+            close_codex_session,
             list_slash_commands,
             start_discord_bot,
             stop_discord_bot,

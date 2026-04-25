@@ -308,32 +308,20 @@ function guessLanguage(filePath: string): string {
   return map[ext] || "plaintext";
 }
 
-const MODELS = [
-  { id: "sonnet", label: "Sonnet" },
-  { id: "opus", label: "Opus" },
-  { id: "haiku", label: "Haiku" },
-  { id: "opusplan", label: "Opus Plan" },
-  { id: "claude-opus-4-7", label: "Opus 4.7" },
-  { id: "sonnet[1m]", label: "Sonnet 1M" },
-  { id: "opus[1m]", label: "Opus 1M" },
-  { id: "claude-opus-4-7[1m]", label: "Opus 4.7 1M" },
-];
+// MODELS / EFFORTS / PERMISSION_MODES are the Anthropic-provider defaults.
+// When the user picks OpenAI in the provider dropdown, we swap to
+// PROVIDER_CONFIG.openai's lists at render time.
+import { PROVIDER_CONFIG } from "../../lib/providers";
 
-const EFFORTS = [
-  { id: "low", label: "Low" },
-  { id: "medium", label: "Med" },
-  { id: "high", label: "High" },
-  { id: "max", label: "Max" },
-  { id: "xhigh", label: "X-High" },
-];
-
-const PERMISSION_MODES: { id: PermissionMode; label: string; color: string; desc: string }[] = [
-  { id: "default", label: "Default", color: "#89b4fa", desc: "Ask before every tool" },
-  { id: "plan", label: "Plan", color: "#94e2d5", desc: "Read-only, no edits" },
-  { id: "auto", label: "Auto", color: "#a6e3a1", desc: "Auto-approve safe ops" },
-  { id: "accept_edits", label: "Edits", color: "#cba6f7", desc: "Auto-approve all edits" },
-  { id: "bypass_all", label: "YOLO", color: "#f38ba8", desc: "Skip ALL permissions" },
-];
+const MODELS = PROVIDER_CONFIG.anthropic.models;
+const EFFORTS = PROVIDER_CONFIG.anthropic.efforts;
+const PERMISSION_MODES: { id: PermissionMode; label: string; color: string; desc: string }[] =
+  PROVIDER_CONFIG.anthropic.permissions.map((p) => ({
+    id: p.id as PermissionMode,
+    label: p.label,
+    color: p.color,
+    desc: p.desc,
+  }));
 
 interface ClaudeChatProps {
   sessionId: string;
@@ -1852,8 +1840,17 @@ Coordinate actively. If another agent is working on a file you need, mention it 
   if (!session) return <div className="cc-container cc-loading">Initializing...</div>;
 
   const hasMessages = session.messages.length > 0 || hasStreamingText;
-  const currentModel = MODELS.find((m) => m.id === selectedModel) || MODELS[0]!;
-  const currentEffort = EFFORTS.find((e) => e.id === selectedEffort) || EFFORTS[2]!;
+  // Provider-aware model/effort lists. When the provider dropdown switches
+  // (e.g. anthropic → openai) the topbar swaps in OpenAI's models/efforts
+  // and falls back to that provider's first option if the previously-selected
+  // id doesn't exist in the new list.
+  const providerCfg = PROVIDER_CONFIG[selectedProvider];
+  const activeModels = providerCfg.models;
+  const activeEfforts = providerCfg.efforts;
+  const currentModel =
+    activeModels.find((m) => m.id === selectedModel) || activeModels[0]!;
+  const currentEffort =
+    activeEfforts.find((e) => e.id === selectedEffort) || activeEfforts[2] || activeEfforts[0]!;
 
   return (
     <div
@@ -1883,7 +1880,15 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               <DropdownMenuLabel>Provider</DropdownMenuLabel>
               <DropdownMenuItem
                 active={selectedProvider === "anthropic"}
-                onSelect={() => setSelectedProvider("anthropic")}
+                onSelect={() => {
+                  setSelectedProvider("anthropic");
+                  // Snap model/effort to this provider's defaults so the
+                  // dropdown labels don't fall back to "first option" silently
+                  // when the previously-selected id doesn't exist here.
+                  const cfg = PROVIDER_CONFIG.anthropic;
+                  setSelectedModel(cfg.defaultModel);
+                  setSelectedEffort(cfg.defaultEffort);
+                }}
               >
                 <span className="shadcn-menu-icon"><AnthropicLogo size={14} /></span>
                 <span className="shadcn-menu-text">Anthropic</span>
@@ -1891,7 +1896,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               </DropdownMenuItem>
               <DropdownMenuItem
                 active={selectedProvider === "openai"}
-                onSelect={() => setSelectedProvider("openai")}
+                onSelect={() => {
+                  setSelectedProvider("openai");
+                  const cfg = PROVIDER_CONFIG.openai;
+                  setSelectedModel(cfg.defaultModel);
+                  setSelectedEffort(cfg.defaultEffort);
+                }}
               >
                 <span className="shadcn-menu-icon"><OpenAILogo size={14} /></span>
                 <span className="shadcn-menu-text">OpenAI</span>
@@ -1899,7 +1909,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel style={{ fontSize: 9, textTransform: "none", letterSpacing: 0, color: "var(--fg-muted, #6c7086)" }}>
-                wip · backend not wired
+                wip · session routing tbd
               </DropdownMenuLabel>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -1976,7 +1986,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuLabel>Model</DropdownMenuLabel>
-              {MODELS.map((m) => (
+              {activeModels.map((m) => (
                 <DropdownMenuItem
                   key={m.id}
                   active={m.id === selectedModel}
@@ -2002,7 +2012,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuLabel>Effort</DropdownMenuLabel>
-              {EFFORTS.map((e) => (
+              {activeEfforts.map((e) => (
                 <DropdownMenuItem
                   key={e.id}
                   active={e.id === selectedEffort}

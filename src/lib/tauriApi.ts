@@ -8,6 +8,10 @@ import type {
   SendClaudePromptRequest,
   ClaudeEvent,
   ClaudeDone,
+  CreateCodexRequest,
+  SendCodexPromptRequest,
+  CodexEvent,
+  CodexDone,
   SlashCommand,
   DirEntry,
   McpServer,
@@ -115,6 +119,32 @@ export function onClaudeEvent(callback: (payload: ClaudeEvent) => void): Promise
 
 export function onClaudeDone(callback: (payload: ClaudeDone) => void): Promise<UnlistenFn> {
   return listen<ClaudeDone>("claude-done", (event) => callback(event.payload));
+}
+
+// ── Codex (OpenAI Codex CLI) ──────────────────────────────
+
+export async function createCodexSession(req: CreateCodexRequest): Promise<string> {
+  return invoke<string>("create_codex_session", { req });
+}
+
+export async function sendCodexPrompt(req: SendCodexPromptRequest): Promise<void> {
+  return invoke("send_codex_prompt", { req });
+}
+
+export async function cancelCodex(sessionId: string): Promise<void> {
+  return invoke("cancel_codex", { sessionId });
+}
+
+export async function closeCodexSession(sessionId: string): Promise<void> {
+  return invoke("close_codex_session", { sessionId });
+}
+
+export function onCodexEvent(callback: (payload: CodexEvent) => void): Promise<UnlistenFn> {
+  return listen<CodexEvent>("codex-event", (event) => callback(event.payload));
+}
+
+export function onCodexDone(callback: (payload: CodexDone) => void): Promise<UnlistenFn> {
+  return listen<CodexDone>("codex-done", (event) => callback(event.payload));
 }
 
 export async function listSlashCommands(): Promise<SlashCommand[]> {

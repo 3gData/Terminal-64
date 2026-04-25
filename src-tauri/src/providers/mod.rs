@@ -12,12 +12,14 @@
 #![allow(unused_imports)]
 
 pub mod claude;
+pub mod codex;
 pub mod events;
 pub mod registry;
 pub mod traits;
 pub mod util;
 
 pub use claude::ClaudeAdapter;
+pub use codex::CodexAdapter;
 pub use events::{ProviderEvent, ProviderEventBase};
 pub use registry::ProviderRegistry;
 pub use traits::{

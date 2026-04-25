@@ -67,6 +67,54 @@ pub struct ClaudeDone {
     pub session_id: String,
 }
 
+// Codex session types
+//
+// `sandbox_mode` is the OpenAI Codex CLI's `-s/--sandbox` enum:
+//   "read-only" | "workspace-write" | "danger-full-access"
+// `approval_policy` is set via `-c approval_policy=...`:
+//   "untrusted" | "on-request" | "never"
+// `effort` is set via `-c model_reasoning_effort=...`:
+//   "minimal" | "low" | "medium" | "high" | "xhigh"
+// `model` is a free-form string passed to `-m/--model`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCodexRequest {
+    pub session_id: String,
+    pub cwd: String,
+    pub prompt: String,
+    pub sandbox_mode: Option<String>,
+    pub approval_policy: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub full_auto: Option<bool>,
+    pub yolo: Option<bool>,
+    pub skip_git_repo_check: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendCodexPromptRequest {
+    pub session_id: String,
+    pub cwd: String,
+    pub prompt: String,
+    pub sandbox_mode: Option<String>,
+    pub approval_policy: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub full_auto: Option<bool>,
+    pub yolo: Option<bool>,
+    pub skip_git_repo_check: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexEvent {
+    pub session_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexDone {
+    pub session_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommand {
     pub name: String,
