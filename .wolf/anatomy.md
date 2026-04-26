@@ -32,6 +32,8 @@
 - `mcp/delegation-server.mjs` — Standalone delegation MCP stdio server for team chat/report_done over permission-server HTTP endpoints. (~1500 tok)
 - `src-tauri/src/permission_server.rs` — Permission HTTP server and delegation message endpoints backing MCP team chat. (~10500 tok)
 - `src-tauri/src/discord_bot.rs` — Discord bot gateway/API sync for named sessions and frontend-routed Discord prompts. (~31000 tok)
+- `src-tauri/src/providers/codex.rs` — Codex provider runtime: app-server/exec transport, event normalization, rollout JSONL history hydration, rewind/fork helpers, and disk session discovery. (~65000 tok)
+- `src-tauri/src/providers/util.rs` — Shared provider stream utilities including live event size caps and recursive JSON string truncation for renderer-safe events. (~1200 tok)
 
 ## src/components/claude/
 

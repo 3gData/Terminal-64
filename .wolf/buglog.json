@@ -777,6 +777,26 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-04-26"
+    },
+    {
+      "id": "bug-040",
+      "timestamp": "2026-04-26",
+      "error_message": "CI Rust jobs on macos-latest, ubuntu-latest, and windows-latest failed at `cargo clippy --all-targets -- -D warnings` on Rust 1.95.0.",
+      "file": "src-tauri/src/providers/codex.rs, src-tauri/src/providers/util.rs",
+      "root_cause": "GitHub Actions installed stable Rust 1.95.0, which promoted stricter Clippy warnings than the local 1.94.1 toolchain: `unnecessary_sort_by` for descending modified-time sorting and `collapsible_match` for a nested string-length check in the JSON truncation helper.",
+      "fix": "Changed the disk session sort to `sort_by_key(|s| std::cmp::Reverse(s.modified))` and collapsed the JSON string branch into a match guard. Verified with `cargo +stable fmt --check`, `cargo +stable clippy --all-targets -- -D warnings`, and `cargo +stable check --all-targets` on Rust 1.95.0.",
+      "tags": [
+        "ci",
+        "rust",
+        "clippy",
+        "rust-1.95",
+        "codex"
+      ],
+      "related_bugs": [
+        "bug-027"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-26"
     }
   ]
 }

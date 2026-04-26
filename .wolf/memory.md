@@ -113,3 +113,9 @@
 | 02:41 | Implemented terminal event dispatch, canvas frame batching, browser sync, and hydration cache cap; production frontend build passed | src/lib/tauriApi.ts, src/components/terminal/XTerminal.tsx, src/stores/canvasStore.ts, src/components/canvas/FloatingTerminal.tsx, src/components/widget/BrowserPanel.tsx, src/stores/claudeStore.ts | Build OK with existing Vite chunk warnings | ~5200 |
 | 02:41 | Frontend typecheck passed after performance optimizations | package.json scripts, npm run typecheck | TypeScript OK | ~100 |
 | 02:41 | Updated OpenWolf cerebrum and buglog for big-workflow performance fix | .wolf/cerebrum.md, .wolf/buglog.json | Records appended | ~900 |
+| 04:32 | Checked local git state for failing CI report | git status, git log, GitHub status target e4bd989d | Worktree clean, HEAD matches origin/master | ~1300 |
+| 04:32 | Reproduced Rust CI command set locally | src-tauri | cargo fmt, clippy, and check pass locally | ~100 |
+| 04:33 | Ran exact Rust CI steps locally after CI failure report | src-tauri | fmt, clippy --all-targets, check --all-targets all pass locally | ~300 |
+| 04:35 | Pulled GitHub Actions logs and fixed Rust 1.95 clippy failures | src-tauri/src/providers/codex.rs, src-tauri/src/providers/util.rs, .wolf/anatomy.md | Applied sort_by_key and match-guard fixes | ~4300 |
+| 04:38 | Verified Rust 1.95 CI commands after clippy fix | src-tauri | fmt, clippy, and check pass with +stable 1.95.0 | ~200 |
+| 04:38 | Logged Rust CI clippy failure fix in OpenWolf records | .wolf/buglog.json, .wolf/cerebrum.md | Records appended | ~1000 |

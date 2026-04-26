@@ -68,6 +68,7 @@
 - Prompt island can lag with huge histories if it reverses/maps/formats every prompt on open. Render the newest bounded slice first and append older rows in scroll batches.
 - LegendList scroll events are not a reliable proxy for user intent during streaming; growing rows can briefly report not-at-end. Keep bottom stickiness in an intent ref updated by wheel/touch/key/pointer handlers, and use scroll events only for visibility/progress telemetry.
 - Big-workflow performance: avoid per-panel global Tauri listeners and idle RAF polling. Terminal output should go through a single keyed dispatcher, browser panel bounds should sync from canvas/resize events, and full JSONL hydration caches must be capped by entry/message count.
+- CI uses floating stable Rust; on 2026-04-26 GitHub Actions picked Rust 1.95.0 while local was 1.94.1. When CI Clippy fails but local passes, run `rustup toolchain install stable --component rustfmt --component clippy --profile minimal --no-self-update` and verify with `cargo +stable clippy --all-targets -- -D warnings`.
 
 ### Voice pipeline (2026-04-18)
 - VAD with a single hard threshold + 1-frame hangover finalizes whisper early on breaths/soft consonants mid-utterance. Use Silero VADIterator-style hysteresis: activate 0.5, deactivate 0.35, `min_speech_duration_ms=250`, `min_silence_duration_ms=500`, `speech_pad_ms=300`. Tune orchestrator silence-frame counters to match (e.g. dictation `SILENCE_FRAMES_TO_FINALIZE` 25→9).

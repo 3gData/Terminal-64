@@ -2496,7 +2496,7 @@ pub fn list_codex_disk_sessions(cwd: &str) -> Vec<DiskSession> {
             }
         }
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.sort_by_key(|s| std::cmp::Reverse(s.modified));
     out
 }
 

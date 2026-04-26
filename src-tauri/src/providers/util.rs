@@ -110,14 +110,11 @@ fn truncate_text_field(s: &str) -> String {
 
 fn truncate_large_json_strings(value: &mut serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(s) => {
-            if s.len() > TRUNCATE_HEAD_BYTES + TRUNCATE_TAIL_BYTES {
-                *s = truncate_text_field(s);
-                true
-            } else {
-                false
-            }
+        serde_json::Value::String(s) if s.len() > TRUNCATE_HEAD_BYTES + TRUNCATE_TAIL_BYTES => {
+            *s = truncate_text_field(s);
+            true
         }
+        serde_json::Value::String(_) => false,
         serde_json::Value::Array(items) => {
             let mut changed = false;
             for item in items {
