@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnClaudeWithPrompt, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { pushToast } from "../../lib/notifications";
 import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
@@ -352,7 +352,7 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
       const fullPrompt = WIDGET_SYSTEM_PROMPT + "\n\n" + buildWidgetContext();
       const activeId = useCanvasStore.getState().activeTerminalId;
       const activeProvider = activeId
-        ? useClaudeStore.getState().sessions[activeId]?.provider
+        ? resolveSessionProviderState(useClaudeStore.getState().sessions[activeId]).provider
         : undefined;
       spawnClaudeWithPrompt(folderPath, `Widget: ${widgetName}`, fullPrompt, () => ({
         canvasStore: useCanvasStore,

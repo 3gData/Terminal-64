@@ -1,3 +1,6 @@
+import type { CreateClaudeRequest, SendClaudePromptRequest } from "../lib/types";
+import type { ProviderId } from "../lib/providers";
+
 export interface CreateCodexRequest {
   session_id: string;
   cwd: string;
@@ -11,6 +14,19 @@ export interface CreateCodexRequest {
   skip_git_repo_check?: boolean;
   mcp_env?: Record<string, string>;
   collaboration_mode?: "plan" | "default";
+}
+
+export type ProviderCreateRequest =
+  | { provider: "anthropic"; req: CreateClaudeRequest }
+  | { provider: "openai"; req: CreateCodexRequest };
+
+export type ProviderSendRequest =
+  | { provider: "anthropic"; req: SendClaudePromptRequest }
+  | { provider: "openai"; req: SendCodexPromptRequest };
+
+export interface ProviderSessionRequest {
+  provider: ProviderId;
+  sessionId: string;
 }
 
 export interface SendCodexPromptRequest {

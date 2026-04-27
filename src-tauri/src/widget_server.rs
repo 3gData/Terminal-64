@@ -672,6 +672,12 @@ impl WidgetServer {
         self.inner.port.load(Ordering::SeqCst)
     }
 
+    pub fn invalidate_widget(&self, widget_id: &str) {
+        if let Ok(mut cache) = self.inner.manifest_cache.lock() {
+            cache.remove(widget_id);
+        }
+    }
+
     /// Install the plugin host bridge. Intended to be called once, after the
     /// `PluginHost` has been constructed in `lib.rs` setup.
     #[allow(dead_code)] // Public API for plugin host wire-up; caller lands in a follow-up.

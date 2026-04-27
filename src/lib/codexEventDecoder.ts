@@ -1,3 +1,14 @@
+import {
+  buildProviderToolCall,
+  buildProviderToolResult,
+  providerToolChangedPaths,
+  type ProviderToolCall,
+  type ProviderToolChange,
+  type ProviderToolInput,
+  type ProviderToolPatch,
+  type ProviderToolResult,
+} from "../contracts/providerEvents";
+
 export interface CodexItem {
   id?: string;
   item_type?: string;
@@ -117,6 +128,23 @@ function codexChangeDiff(change: NonNullable<CodexItem["changes"]>[number]): str
   return change.diff || change.unified_diff || change.unifiedDiff;
 }
 
+function codexNormalizedChange(change: NonNullable<CodexItem["changes"]>[number]): ProviderToolChange {
+  const out: ProviderToolChange = {};
+  const path = codexChangePath(change);
+  if (path) {
+    out.path = path;
+    out.file_path = path;
+  }
+  const kind = typeof change.kind === "string" ? change.kind : change.kind?.type;
+  if (kind) out.kind = kind;
+  if (typeof change.kind === "object" && (typeof change.kind.move_path === "string" || change.kind.move_path === null)) {
+    out.move_path = change.kind.move_path;
+  }
+  const diff = codexChangeDiff(change);
+  if (diff) out.diff = diff;
+  return out;
+}
+
 export function codexItemDisplayName(item: CodexItem): string {
   const kind = item.item_type ?? item.type ?? "";
   if (kind === "command_execution" || kind === "local_shell_call") {
@@ -146,7 +174,7 @@ export function codexItemDisplayName(item: CodexItem): string {
   return item.name || kind || "tool";
 }
 
-export function codexItemInput(item: CodexItem): Record<string, unknown> {
+export function codexItemInput(item: CodexItem): ProviderToolInput {
   const kind = item.item_type ?? item.type ?? "";
   const out: Record<string, unknown> = {};
 
@@ -166,13 +194,7 @@ export function codexItemInput(item: CodexItem): Record<string, unknown> {
       out.paths = paths;
     }
     if (changes.length > 0) {
-      out.changes = changes.map((change) => ({
-        path: codexChangePath(change),
-        file_path: codexChangePath(change),
-        kind: typeof change.kind === "string" ? change.kind : change.kind?.type,
-        move_path: typeof change.kind === "object" ? change.kind.move_path : undefined,
-        diff: codexChangeDiff(change),
-      }));
+      out.changes = changes.map(codexNormalizedChange);
     }
     if (item.change) out.change = item.change;
     const diff = item.diff || item.unified_diff || item.unifiedDiff;
@@ -233,6 +255,47 @@ export function codexItemIsError(item: CodexItem): boolean {
   if (item.status === "failed" || item.status === "error") return true;
   if (typeof item.exit_code === "number" && item.exit_code !== 0) return true;
   return false;
+}
+
+export function codexItemToProviderToolCall(item: CodexItem, fallbackId?: string): ProviderToolCall | null {
+  const id = item.id || fallbackId;
+  if (!id) return null;
+  return buildProviderToolCall({
+    id,
+    name: codexItemDisplayName(item),
+    input: codexItemInput(item),
+  });
+}
+
+export function codexItemToProviderToolPatch(item: CodexItem): ProviderToolPatch {
+  return {
+    name: codexItemDisplayName(item),
+    input: codexItemInput(item),
+  };
+}
+
+export function codexItemToProviderToolResult(
+  item: CodexItem,
+  options?: { id?: string; result?: string; input?: ProviderToolInput; name?: string },
+): ProviderToolResult | null {
+  const id = options?.id || item.id;
+  if (!id) return null;
+  const input = options?.input ?? codexItemInput(item);
+  const name = options?.name ?? codexItemDisplayName(item);
+  return buildProviderToolResult({
+    id,
+    result: options?.result ?? codexItemResultText(item),
+    isError: codexItemIsError(item),
+    patch: { name, input },
+  });
+}
+
+export function codexItemChangedPaths(item: CodexItem): string[] {
+  return providerToolChangedPaths(codexItemInput(item));
+}
+
+export function codexInputChangedPaths(input: ProviderToolInput): string[] {
+  return providerToolChangedPaths(input);
 }
 
 export function getCodexContextWindow(model: string | undefined | null): number {

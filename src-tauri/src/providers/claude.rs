@@ -31,7 +31,8 @@ use tokio::sync::mpsc;
 use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderKind, ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
+    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderSendPromptRequest,
+    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
     ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
     ProviderUserInputAnswers,
 };
@@ -605,13 +606,83 @@ impl ClaudeAdapter {
     }
 
     pub fn close(&self, session_id: &str) -> Result<(), String> {
-        self.cancel(session_id)
+        let instance = self
+            .instances
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(session_id);
+        if let Some(mut instance) = instance {
+            let _ = instance.child.kill();
+            let _ = instance.child.wait();
+            safe_eprintln!("[claude] Closed session {}", session_id);
+        }
+        Ok(())
     }
 }
 
 impl Default for ClaudeAdapter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ProviderCommandAdapter for ClaudeAdapter {
+    fn create_session(
+        &self,
+        app_handle: &AppHandle,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<String, ProviderAdapterError> {
+        match req {
+            ProviderCreateSessionRequest::Claude {
+                req,
+                settings_path,
+                approver_mcp_config,
+                channel_server,
+            } => ClaudeAdapter::create_session(
+                self,
+                app_handle,
+                req,
+                settings_path,
+                approver_mcp_config,
+                channel_server,
+            ),
+            ProviderCreateSessionRequest::Codex { .. } => {
+                Err("ClaudeAdapter received Codex create-session request".to_string())
+            }
+        }
+    }
+
+    fn send_prompt(
+        &self,
+        app_handle: &AppHandle,
+        req: ProviderSendPromptRequest,
+    ) -> Result<(), ProviderAdapterError> {
+        match req {
+            ProviderSendPromptRequest::Claude {
+                req,
+                settings_path,
+                approver_mcp_config,
+                channel_server,
+            } => ClaudeAdapter::send_prompt(
+                self,
+                app_handle,
+                req,
+                settings_path,
+                approver_mcp_config,
+                channel_server,
+            ),
+            ProviderSendPromptRequest::Codex { .. } => {
+                Err("ClaudeAdapter received Codex send-prompt request".to_string())
+            }
+        }
+    }
+
+    fn cancel_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
+        self.cancel(session_id)
+    }
+
+    fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
+        self.close(session_id)
     }
 }
 

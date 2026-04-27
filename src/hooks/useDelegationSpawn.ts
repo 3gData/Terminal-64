@@ -1,10 +1,11 @@
 import { useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { createClaudeSession, createCodexSession, createMcpConfigFile, ensureCodexMcp, ensureCodexSkills, getDelegationPort, getDelegationSecret } from "../lib/tauriApi";
+import { createMcpConfigFile, getDelegationPort, getDelegationSecret } from "../lib/tauriApi";
 import type { PermissionMode } from "../lib/types";
-import { decodeCodexPermission, PROVIDER_CONFIG, type ProviderId } from "../lib/providers";
+import { PROVIDER_CONFIG, type ProviderId } from "../lib/providers";
+import { runProviderTurn } from "../lib/providerRuntime";
 import { useCanvasStore } from "../stores/canvasStore";
-import { useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 
 interface UseDelegationSpawnOptions {
@@ -62,10 +63,11 @@ export function useDelegationSpawn({
           ? sessCwd
           : "";
       const inheritSkipOpenwolf = !!parentSess?.skipOpenwolf;
-      const childProvider = parentSess?.provider ?? selectedProvider;
-      const childModel = parentSess?.selectedModel ?? selectedModel;
-      const childEffort = parentSess?.selectedEffort ?? selectedEffort;
-      const childCodexPermission = parentSess?.selectedCodexPermission
+      const parentProviderState = resolveSessionProviderState(parentSess);
+      const childProvider = parentSess ? parentProviderState.provider : selectedProvider;
+      const childModel = parentProviderState.selectedModel ?? selectedModel;
+      const childEffort = parentProviderState.selectedEffort ?? selectedEffort;
+      const childCodexPermission = parentProviderState.openai?.selectedCodexPermission
         ?? selectedCodexPermission
         ?? PROVIDER_CONFIG.openai.defaultPermission;
 
@@ -111,49 +113,38 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         addUserMessage(childSessionId, initialPrompt);
 
         setTimeout(() => {
-          if (childProvider === "openai") {
-            Promise.allSettled([ensureCodexMcp(appDir), ensureCodexSkills()])
-              .then(() => createCodexSession({
-                session_id: childSessionId,
-                cwd: appDir,
-                prompt: initialPrompt,
-                ...(childModel ? { model: childModel } : {}),
-                ...(childEffort ? { effort: childEffort } : {}),
-                ...decodeCodexPermission(childCodexPermission),
-                skip_git_repo_check: true,
-                ...(mcpEnv ? { mcp_env: mcpEnv } : {}),
-              }, true))
-              .catch((err) => {
-                console.warn(`[delegation] Failed to start Codex child ${childSessionId}:`, err);
-                delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
-              });
-          } else {
-            const startClaudeChild = async () => {
-              let mcpConfigPath = "";
-              if (delegationPort > 0 && delegationSecret) {
-                mcpConfigPath = await createMcpConfigFile(
-                  delegationPort,
-                  delegationSecret,
-                  group.id,
-                  `Agent ${i + 1}`,
-                );
-              }
-              await createClaudeSession({
-                session_id: childSessionId,
-                cwd: appDir,
-                prompt: initialPrompt,
-                permission_mode: "bypass_all",
-                ...(childModel ? { model: childModel } : {}),
-                ...(childEffort ? { effort: childEffort } : {}),
-                ...(mcpConfigPath ? { mcp_config: mcpConfigPath } : {}),
-                no_session_persistence: true,
-              }, inheritSkipOpenwolf);
-            };
-            startClaudeChild().catch((err) => {
-              console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
-              delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
+          const startChild = async () => {
+            let mcpConfigPath = "";
+            if (childProvider === "anthropic" && delegationPort > 0 && delegationSecret) {
+              mcpConfigPath = await createMcpConfigFile(
+                delegationPort,
+                delegationSecret,
+                group.id,
+                `Agent ${i + 1}`,
+              );
+            }
+            await runProviderTurn({
+              provider: childProvider,
+              sessionId: childSessionId,
+              cwd: appDir,
+              prompt: initialPrompt,
+              started: false,
+              selectedModel: childModel,
+              selectedEffort: childEffort,
+              selectedCodexPermission: childCodexPermission,
+              permissionOverride: "bypass_all",
+              skipOpenwolf: childProvider === "openai" ? true : inheritSkipOpenwolf,
+              ...(mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
+              ...(mcpEnv ? { mcpEnv } : {}),
+              noSessionPersistence: childProvider === "anthropic",
+              skipGitRepoCheck: childProvider === "openai",
             });
-          }
+          };
+
+          startChild().catch((err) => {
+            console.warn(`[delegation] Failed to start child ${childSessionId}:`, err);
+            delStore.updateTaskStatus(group.id, task.id, "failed", String(err));
+          });
         }, i * 500);
       });
     },

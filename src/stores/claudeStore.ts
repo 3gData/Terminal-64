@@ -2,9 +2,132 @@ import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage, ToolCall, McpTool, HookEvent } from "../lib/types";
 import type { ProviderId } from "../lib/providers";
-import { loadSessionHistory, mapHistoryMessages, statSessionJsonl, loadCodexSessionHistory } from "../lib/tauriApi";
+import { hydrateProviderHistory } from "../lib/providerRuntime";
+import type { ProviderHydrateInput } from "../contracts/providerRuntime";
 
 export const STORAGE_KEY = "terminal64-claude-sessions";
+const STALE_UNNAMED_META_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_PERSISTED_META_ENTRIES = 160;
+
+export interface ProviderSessionState {
+  provider: ProviderId;
+  selectedModel: string | null;
+  selectedEffort: string | null;
+  seedTranscript: ChatMessage[] | null;
+  openai?: {
+    codexThreadId: string | null;
+    selectedCodexPermission: string | null;
+  };
+}
+
+interface ProviderCompatibilityFields {
+  provider: ProviderId;
+  codexThreadId: string | null;
+  seedTranscript: ChatMessage[] | null;
+  selectedModel: string | null;
+  selectedEffort: string | null;
+  selectedCodexPermission: string | null;
+}
+
+type ProviderStateSource = {
+  providerState?: ProviderSessionState | undefined;
+  provider?: ProviderId | undefined;
+  codexThreadId?: string | null | undefined;
+  seedTranscript?: ChatMessage[] | null | undefined;
+  selectedModel?: string | null | undefined;
+  selectedEffort?: string | null | undefined;
+  selectedCodexPermission?: string | null | undefined;
+};
+
+function createProviderState({
+  provider,
+  selectedModel,
+  selectedEffort,
+  seedTranscript,
+  codexThreadId,
+  selectedCodexPermission,
+}: {
+  provider: ProviderId;
+  selectedModel?: string | null;
+  selectedEffort?: string | null;
+  seedTranscript?: ChatMessage[] | null;
+  codexThreadId?: string | null;
+  selectedCodexPermission?: string | null;
+}): ProviderSessionState {
+  return {
+    provider,
+    selectedModel: selectedModel ?? null,
+    selectedEffort: selectedEffort ?? null,
+    seedTranscript: seedTranscript ?? null,
+    ...(provider === "openai"
+      ? {
+          openai: {
+            codexThreadId: codexThreadId ?? null,
+            selectedCodexPermission: selectedCodexPermission ?? null,
+          },
+        }
+      : {}),
+  };
+}
+
+export function resolveSessionProviderState(session: ProviderStateSource | null | undefined): ProviderSessionState {
+  if (session?.providerState) return session.providerState;
+  return createProviderState({
+    provider: session?.provider ?? "anthropic",
+    selectedModel: session?.selectedModel ?? null,
+    selectedEffort: session?.selectedEffort ?? null,
+    seedTranscript: session?.seedTranscript ?? null,
+    codexThreadId: session?.codexThreadId ?? null,
+    selectedCodexPermission: session?.selectedCodexPermission ?? null,
+  });
+}
+
+function providerCompatibilityFields(providerState: ProviderSessionState): ProviderCompatibilityFields {
+  return {
+    provider: providerState.provider,
+    codexThreadId: providerState.openai?.codexThreadId ?? null,
+    seedTranscript: providerState.seedTranscript,
+    selectedModel: providerState.selectedModel,
+    selectedEffort: providerState.selectedEffort,
+    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? null,
+  };
+}
+
+function hasOwn<K extends PropertyKey>(value: object, key: K): value is Record<K, unknown> {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeProviderState(
+  base: ProviderSessionState,
+  patch: Partial<ProviderCompatibilityFields> & { providerState?: ProviderSessionState },
+): ProviderSessionState {
+  const source = patch.providerState ?? base;
+  const provider = hasOwn(patch, "provider") ? (patch.provider as ProviderId) : source.provider;
+  const selectedModel = hasOwn(patch, "selectedModel")
+    ? (patch.selectedModel as string | null)
+    : source.selectedModel;
+  const selectedEffort = hasOwn(patch, "selectedEffort")
+    ? (patch.selectedEffort as string | null)
+    : source.selectedEffort;
+  const seedTranscript = hasOwn(patch, "seedTranscript")
+    ? (patch.seedTranscript as ChatMessage[] | null)
+    : source.seedTranscript;
+  const codexThreadId = hasOwn(patch, "codexThreadId")
+    ? (patch.codexThreadId as string | null)
+    : source.openai?.codexThreadId ?? null;
+  const selectedCodexPermission = hasOwn(patch, "selectedCodexPermission")
+    ? (patch.selectedCodexPermission as string | null)
+    : source.openai?.selectedCodexPermission ?? null;
+
+  return createProviderState({
+    provider,
+    selectedModel,
+    selectedEffort,
+    seedTranscript,
+    codexThreadId,
+    selectedCodexPermission,
+  });
+}
 
 // localStorage now stores only lightweight UI/metadata. Messages and token/cost
 // counters are derived from the JSONL files in ~/.claude/projects/... — they are
@@ -17,6 +140,7 @@ export interface PersistedSessionMeta {
   draftPrompt: string;
   lastSeenAt: number;
   schemaVersion: number;
+  providerState?: ProviderSessionState;
   provider?: ProviderId;
   codexThreadId?: string | null;
   // Pre-rendered transcript inherited from a parent session when native
@@ -39,12 +163,14 @@ export interface PersistedSessionMeta {
 
 // Bump when the shape of PersistedSessionMeta changes. Older clients that
 // encounter a higher version refuse to overwrite — see downgradeLockActive.
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 // Flips true once we see persisted data written by a newer schema than we
 // understand. While active, saveToStorage is a no-op so a downgraded client
 // can't clobber data the next rollforward relies on.
 let downgradeLockActive = false;
+let persistedMetaCache: Record<string, PersistedSessionMeta> | null = null;
+let lastPersistedMetaJson: string | null = null;
 
 export interface ClaudeTask {
   id: string;
@@ -133,27 +259,36 @@ export interface ClaudeSession {
   // True once the JSONL on disk has been loaded (or load attempted and failed).
   // UI uses this to know when it's safe to claim "no messages" vs "still loading".
   jsonlLoaded: boolean;
+  // Canonical provider-owned metadata. New provider integrations should add
+  // provider-specific state here instead of widening the flat session shape.
+  providerState: ProviderSessionState;
   // Which backend CLI this session is bound to. Existing sessions hydrated
   // from older metadata default to "anthropic" for backward compatibility.
+  /** @deprecated Use providerState.provider. Kept as a compatibility mirror. */
   provider: ProviderId;
   // Codex's CLI mints its own thread id on `thread.started`; we capture it
   // here so follow-up `codex exec resume <id>` calls can find the thread.
   // Always null for anthropic sessions.
+  /** @deprecated Use providerState.openai?.codexThreadId. */
   codexThreadId: string | null;
   // Fork-time prelude. When non-null, these messages were rendered into
   // `messages` at session-create time; the send path may also splice them
   // into the first prompt sent to a freshly-spawned Codex thread so the
   // model has the parent's context. Null for normal (non-forked) sessions.
+  /** @deprecated Use providerState.seedTranscript. */
   seedTranscript: ChatMessage[] | null;
   // Per-session model + reasoning effort. Null = "use the settings-store
   // default for this session's provider". The topbar dropdowns read these,
   // and selecting a new value writes back via setSessionModel/setSessionEffort
   // so the choice survives reloads. Different from the existing `model` field
   // above, which is the CLI's runtime-reported active model.
+  /** @deprecated Use providerState.selectedModel. */
   selectedModel: string | null;
+  /** @deprecated Use providerState.selectedEffort. */
   selectedEffort: string | null;
   // Codex sandbox/approval preset id. Null on Anthropic sessions; defaults
   // to PROVIDER_CONFIG.openai.defaultPermission for OpenAI.
+  /** @deprecated Use providerState.openai?.selectedCodexPermission. */
   selectedCodexPermission: string | null;
 }
 
@@ -235,10 +370,49 @@ function updateSession(
 ): Record<string, ClaudeSession> {
   const session = sessions[sessionId];
   if (!session) return sessions;
-  return { ...sessions, [sessionId]: { ...session, ...update } };
+  const baseProviderState = resolveSessionProviderState(session);
+  const providerState = normalizeProviderState(baseProviderState, update);
+  return {
+    ...sessions,
+    [sessionId]: {
+      ...session,
+      ...update,
+      providerState,
+      ...providerCompatibilityFields(providerState),
+    },
+  };
+}
+
+type IdleDeadlineLike = { didTimeout: boolean; timeRemaining: () => number };
+type WindowWithIdleCallback = Window & typeof globalThis & {
+  requestIdleCallback?: (callback: (deadline: IdleDeadlineLike) => void, options?: { timeout: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+function scheduleIdle(callback: () => void): number {
+  const w = window as WindowWithIdleCallback;
+  if (typeof w.requestIdleCallback === "function") {
+    return w.requestIdleCallback(() => callback(), { timeout: 2000 });
+  }
+  return window.setTimeout(callback, 0);
+}
+
+function cancelIdle(handle: number) {
+  const w = window as WindowWithIdleCallback;
+  if (typeof w.cancelIdleCallback === "function") {
+    w.cancelIdleCallback(handle);
+  } else {
+    window.clearTimeout(handle);
+  }
+}
+
+function clonePersistedMeta(data: Record<string, PersistedSessionMeta>): Record<string, PersistedSessionMeta> {
+  return { ...data };
 }
 
 function readPersistedMeta(): Record<string, PersistedSessionMeta> {
+  if (persistedMetaCache) return clonePersistedMeta(persistedMetaCache);
+
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(STORAGE_KEY);
@@ -261,6 +435,8 @@ function readPersistedMeta(): Record<string, PersistedSessionMeta> {
         }
       }
     }
+    persistedMetaCache = data;
+    lastPersistedMetaJson = raw;
     return data;
   } catch (e) {
     // Parse failure: back up the raw bytes so a corrupted blob is still
@@ -283,13 +459,140 @@ function readPersistedMeta(): Record<string, PersistedSessionMeta> {
   }
 }
 
+function writePersistedMeta(data: Record<string, PersistedSessionMeta>) {
+  const json = JSON.stringify(data);
+  if (json === lastPersistedMetaJson) return;
+  localStorage.setItem(STORAGE_KEY, json);
+  persistedMetaCache = data;
+  lastPersistedMetaJson = json;
+}
+
+function deletePersistedMeta(sessionId: string) {
+  const data = readPersistedMeta();
+  if (!data[sessionId]) return;
+  delete data[sessionId];
+  writePersistedMeta(data);
+}
+
+function prunePersistedMeta(
+  data: Record<string, PersistedSessionMeta>,
+  activeSessionIds: Set<string>,
+  now: number,
+  aggressive: boolean,
+): Record<string, PersistedSessionMeta> {
+  for (const [id, row] of Object.entries(data)) {
+    if (!row || row.name?.startsWith("[D] ")) {
+      delete data[id];
+      continue;
+    }
+    const isActive = activeSessionIds.has(id);
+    const isUnnamed = !row.name?.trim();
+    if (!isActive && isUnnamed && now - (row.lastSeenAt || 0) > STALE_UNNAMED_META_MS) {
+      delete data[id];
+    }
+  }
+
+  const entries = Object.entries(data);
+  if (entries.length <= MAX_PERSISTED_META_ENTRIES && !aggressive) return data;
+
+  const removable = entries
+    .filter(([id]) => !activeSessionIds.has(id))
+    .sort((a, b) => (a[1].lastSeenAt || 0) - (b[1].lastSeenAt || 0));
+  let overage = Math.max(0, entries.length - MAX_PERSISTED_META_ENTRIES);
+  for (const [id, row] of removable) {
+    if (overage <= 0 && (!aggressive || row.name?.trim())) break;
+    delete data[id];
+    overage--;
+  }
+  return data;
+}
+
+function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSessionState {
+  const legacyProvider: ProviderId = entry.provider === "openai" ? "openai" : "anthropic";
+  const savedState = entry.providerState;
+  const provider: ProviderId = savedState?.provider === "openai" ? "openai" : legacyProvider;
+  const selectedModel = typeof savedState?.selectedModel === "string"
+    ? savedState.selectedModel
+    : typeof entry.selectedModel === "string"
+      ? entry.selectedModel
+      : null;
+  const selectedEffort = typeof savedState?.selectedEffort === "string"
+    ? savedState.selectedEffort
+    : typeof entry.selectedEffort === "string"
+      ? entry.selectedEffort
+      : null;
+  const seedTranscript = Array.isArray(savedState?.seedTranscript)
+    ? savedState.seedTranscript
+    : Array.isArray(entry.seedTranscript)
+      ? entry.seedTranscript
+      : null;
+  const codexThreadId = savedState?.openai?.codexThreadId ?? entry.codexThreadId ?? null;
+  const selectedCodexPermission =
+    savedState?.openai?.selectedCodexPermission ??
+    (typeof entry.selectedCodexPermission === "string" ? entry.selectedCodexPermission : null);
+
+  return createProviderState({
+    provider,
+    selectedModel,
+    selectedEffort,
+    seedTranscript,
+    codexThreadId,
+    selectedCodexPermission,
+  });
+}
+
+function buildPersistedMeta(
+  sessions: Record<string, ClaudeSession>,
+  dropSeedTranscripts: boolean,
+  aggressivePrune: boolean,
+): Record<string, PersistedSessionMeta> {
+  const existing = readPersistedMeta();
+  const next = clonePersistedMeta(existing);
+  const activeSessionIds = new Set<string>();
+  const now = Date.now();
+
+  for (const [id, s] of Object.entries(sessions)) {
+    if (s.ephemeral) continue;
+    activeSessionIds.add(id);
+    const baseProviderState = s.providerState ?? createProviderState({
+      provider: s.provider ?? "anthropic",
+      selectedModel: s.selectedModel,
+      selectedEffort: s.selectedEffort,
+      seedTranscript: s.seedTranscript,
+      codexThreadId: s.codexThreadId,
+      selectedCodexPermission: s.selectedCodexPermission,
+    });
+    const providerState = normalizeProviderState(baseProviderState, s);
+    const persistedProviderState = dropSeedTranscripts
+      ? { ...providerState, seedTranscript: null }
+      : providerState;
+    const compat = providerCompatibilityFields(persistedProviderState);
+    next[id] = {
+      sessionId: s.sessionId,
+      name: s.name,
+      cwd: s.cwd,
+      draftPrompt: s.draftPrompt || "",
+      lastSeenAt: now,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      providerState: persistedProviderState,
+      provider: compat.provider,
+      codexThreadId: compat.codexThreadId,
+      ...(!dropSeedTranscripts && compat.seedTranscript ? { seedTranscript: compat.seedTranscript } : {}),
+      ...(compat.selectedModel ? { selectedModel: compat.selectedModel } : {}),
+      ...(compat.selectedEffort ? { selectedEffort: compat.selectedEffort } : {}),
+      ...(compat.selectedCodexPermission ? { selectedCodexPermission: compat.selectedCodexPermission } : {}),
+    };
+  }
+
+  return prunePersistedMeta(next, activeSessionIds, now, aggressivePrune);
+}
+
 function loadMetadata(sessionId: string): PersistedSessionMeta | null {
   const data = readPersistedMeta();
   const entry = data[sessionId];
   if (!entry) return null;
-  // Older blobs (schemaVersion < 2) lacked `provider` — back-fill anthropic
-  // so the session keeps routing through the Claude adapter as before.
-  const provider: ProviderId = entry.provider === "openai" ? "openai" : "anthropic";
+  const providerState = providerStateFromPersistedMeta(entry);
+  const compat = providerCompatibilityFields(providerState);
   return {
     sessionId: entry.sessionId || sessionId,
     name: entry.name || "",
@@ -297,16 +600,16 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
     draftPrompt: entry.draftPrompt || "",
     lastSeenAt: entry.lastSeenAt || 0,
     schemaVersion: (entry as { schemaVersion?: number }).schemaVersion ?? 0,
-    provider,
-    codexThreadId: entry.codexThreadId ?? null,
+    providerState,
+    provider: compat.provider,
+    codexThreadId: compat.codexThreadId,
     // v2 blobs lack seedTranscript — leave undefined so consumers treat the
     // session as un-seeded. Stored as ChatMessage[] when present.
-    ...(Array.isArray(entry.seedTranscript) ? { seedTranscript: entry.seedTranscript } : {}),
+    ...(compat.seedTranscript ? { seedTranscript: compat.seedTranscript } : {}),
     // v3 and earlier didn't carry per-session model/effort; v4+ does.
-    selectedModel: typeof entry.selectedModel === "string" ? entry.selectedModel : null,
-    selectedEffort: typeof entry.selectedEffort === "string" ? entry.selectedEffort : null,
-    selectedCodexPermission:
-      typeof entry.selectedCodexPermission === "string" ? entry.selectedCodexPermission : null,
+    selectedModel: compat.selectedModel,
+    selectedEffort: compat.selectedEffort,
+    selectedCodexPermission: compat.selectedCodexPermission,
   };
 }
 
@@ -315,48 +618,44 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
 function saveToStorage(sessions: Record<string, ClaudeSession>) {
   if (downgradeLockActive) return;
   try {
-    const existing = readPersistedMeta();
+    const data = buildPersistedMeta(sessions, false, false);
     // readPersistedMeta may have flipped the lock on a newer-schema read.
     if (downgradeLockActive) return;
-
-    // Delegation children must never persist — they are spawned ephemeral,
-    // but this also scrubs any `[D] ` entries left over from older builds
-    // or races that wrote them before the ephemeral flag was set.
-    for (const id of Object.keys(existing)) {
-      const row = existing[id];
-      if (row?.name?.startsWith("[D] ")) {
-        delete existing[id];
-      }
-    }
-
-    const now = Date.now();
-    for (const [id, s] of Object.entries(sessions)) {
-      if (s.ephemeral) continue;
-      existing[id] = {
-        sessionId: s.sessionId,
-        name: s.name,
-        cwd: s.cwd,
-        draftPrompt: s.draftPrompt || "",
-        lastSeenAt: now,
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        provider: s.provider,
-        codexThreadId: s.codexThreadId,
-        ...(s.seedTranscript ? { seedTranscript: s.seedTranscript } : {}),
-        ...(s.selectedModel ? { selectedModel: s.selectedModel } : {}),
-        ...(s.selectedEffort ? { selectedEffort: s.selectedEffort } : {}),
-        ...(s.selectedCodexPermission ? { selectedCodexPermission: s.selectedCodexPermission } : {}),
-      };
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
+    writePersistedMeta(data);
   } catch (e) {
-    console.error("[claudeStore] Failed to save session metadata:", e);
+    try {
+      // Quota fallback: preserve session rows and current choices, but drop
+      // fork seed transcripts and prune old inactive rows before retrying.
+      writePersistedMeta(buildPersistedMeta(sessions, true, true));
+      console.warn("[claudeStore] Saved compact metadata after localStorage quota pressure:", e);
+    } catch (retryErr) {
+      console.error("[claudeStore] Failed to save session metadata:", retryErr);
+    }
   }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let idleSaveHandle: number | null = null;
+let savePending = false;
+
+function scheduleIdleSave() {
+  if (idleSaveHandle !== null) return;
+  idleSaveHandle = scheduleIdle(() => {
+    idleSaveHandle = null;
+    if (!savePending) return;
+    savePending = false;
+    saveToStorage(useClaudeStore.getState().sessions);
+    if (savePending) scheduleIdleSave();
+  });
+}
+
 function debouncedSave() {
+  savePending = true;
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveToStorage(useClaudeStore.getState().sessions), 1000);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    scheduleIdleSave();
+  }, 1000);
 }
 
 function patchSession(sessionId: string, patch: Partial<ClaudeSession>) {
@@ -401,67 +700,50 @@ function rememberHydration(sessionId: string, mtimeMs: number, size: number, mes
   trimHydrationCache();
 }
 
-// Async JSONL hydration. Fire-and-forget — errors are logged but non-fatal so
-// the user can still interact with a session whose history hasn't loaded yet.
+// Async provider history hydration. Fire-and-forget — errors are logged but
+// non-fatal so the user can still interact with a session whose history hasn't
+// loaded yet.
 function hydrateFromJsonl(sessionId: string, cwd: string) {
-  // Codex sessions don't live in `~/.claude/projects` — they're at
-  // `~/.codex/sessions/.../rollout-*-<thread_id>.jsonl`. We key off the
-  // codexThreadId stored in the session (captured from `thread.started`
-  // and persisted to localStorage). When it's not yet known (very first
-  // turn before the thread.started event fires) we just mark loaded so
-  // the UI doesn't sit in a loading state forever.
   const sess = useClaudeStore.getState().sessions[sessionId];
-  if (sess?.provider === "openai") {
-    const tid = sess.codexThreadId;
-    if (!tid) {
-      patchSession(sessionId, { jsonlLoaded: true });
-      return;
-    }
-    loadCodexSessionHistory(tid)
-      .then((history) => {
-        if (history.length > 0) {
-          const messages = mapHistoryMessages(history);
-          useClaudeStore.getState().loadFromDisk(sessionId, messages);
-        } else {
-          patchSession(sessionId, { jsonlLoaded: true });
-        }
-      })
-      .catch((err) => {
-        console.warn("[claudeStore] Codex hydrate failed:", sessionId, err);
-        patchSession(sessionId, { jsonlLoaded: true });
-      });
-    return;
+  const providerState = sess?.providerState;
+  const provider = providerState?.provider ?? sess?.provider ?? "anthropic";
+  const codexThreadId = providerState?.openai?.codexThreadId ?? sess?.codexThreadId ?? null;
+  const input: ProviderHydrateInput = {
+    provider,
+    sessionId,
+    cwd,
+  };
+  if (codexThreadId !== undefined) {
+    input.codexThreadId = codexThreadId;
   }
-  statSessionJsonl(sessionId, cwd)
-    .then((stat) => {
-      if (stat) {
-        const cached = hydrationCache.get(sessionId);
-        if (cached && cached.mtimeMs === stat.mtime_ms && cached.size === stat.size) {
-          cached.lastUsedAt = Date.now();
-          useClaudeStore.getState().loadFromDisk(sessionId, cached.messages);
-          return;
-        }
-      } else {
-        // File missing — nothing on disk. Drop any stale cache and mark loaded.
+  const cached = hydrationCache.get(sessionId);
+  if (cached) {
+    cached.lastUsedAt = Date.now();
+    input.cacheEntry = cached;
+  }
+
+  hydrateProviderHistory(input)
+    .then((result) => {
+      if (result.clearCache) {
         hydrationCache.delete(sessionId);
-        patchSession(sessionId, { jsonlLoaded: true });
-        return;
       }
-      return loadSessionHistory(sessionId, cwd).then((history) => {
-        if (history.length > 0) {
-          const messages = mapHistoryMessages(history);
-          if (stat) {
-            rememberHydration(sessionId, stat.mtime_ms, stat.size, messages);
-          }
-          useClaudeStore.getState().loadFromDisk(sessionId, messages);
-        } else {
-          // Fresh session — no JSONL yet. Still flip the flag so UI stops waiting.
-          patchSession(sessionId, { jsonlLoaded: true });
+      if (result.status === "messages") {
+        if (result.cacheWrite) {
+          rememberHydration(
+            sessionId,
+            result.cacheWrite.mtimeMs,
+            result.cacheWrite.size,
+            result.cacheWrite.messages,
+          );
         }
-      });
+        useClaudeStore.getState().loadFromDisk(sessionId, result.messages);
+      } else {
+        patchSession(sessionId, { jsonlLoaded: true });
+      }
     })
     .catch((err) => {
-      console.warn("[claudeStore] JSONL hydrate failed:", sessionId, err);
+      const label = input.provider === "openai" ? "Codex" : "JSONL";
+      console.warn(`[claudeStore] ${label} hydrate failed:`, sessionId, err);
       patchSession(sessionId, { jsonlLoaded: true });
     });
 }
@@ -492,20 +774,33 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     const seededName = initialName ?? meta?.name ?? "";
     const seededCwd = cwd ?? meta?.cwd ?? "";
     const seededDraft = meta?.draftPrompt ?? "";
-    const seededProvider: ProviderId = provider ?? meta?.provider ?? "anthropic";
-    const seededCodexThreadId = meta?.codexThreadId ?? null;
+    const metaProviderState = meta?.providerState;
+    const seededProvider: ProviderId = provider ?? metaProviderState?.provider ?? meta?.provider ?? "anthropic";
+    const seededCodexThreadId = metaProviderState?.openai?.codexThreadId ?? meta?.codexThreadId ?? null;
     // Fork plumbing: a parent session can stash a transcript in metadata
     // before the child is created. We pre-render those messages so the UI
     // shows the inherited history immediately; the actual model context for
     // a Codex thread gets restitched into the first prompt by the send path.
-    const seededTranscript: ChatMessage[] | null = Array.isArray(meta?.seedTranscript) && meta.seedTranscript.length > 0
-      ? meta.seedTranscript
-      : null;
+    const seededTranscript: ChatMessage[] | null = Array.isArray(metaProviderState?.seedTranscript) && metaProviderState.seedTranscript.length > 0
+      ? metaProviderState.seedTranscript
+      : Array.isArray(meta?.seedTranscript) && meta.seedTranscript.length > 0
+        ? meta.seedTranscript
+        : null;
     const seededMessages: ChatMessage[] = seededTranscript ? [...seededTranscript] : [];
     const seededPromptCount = seededMessages.filter((m) => m.role === "user").length;
-    const seededSelectedModel = meta?.selectedModel ?? null;
-    const seededSelectedEffort = meta?.selectedEffort ?? null;
-    const seededSelectedCodexPermission = meta?.selectedCodexPermission ?? null;
+    const seededSelectedModel = metaProviderState?.selectedModel ?? meta?.selectedModel ?? null;
+    const seededSelectedEffort = metaProviderState?.selectedEffort ?? meta?.selectedEffort ?? null;
+    const seededSelectedCodexPermission =
+      metaProviderState?.openai?.selectedCodexPermission ?? meta?.selectedCodexPermission ?? null;
+    const seededProviderState = createProviderState({
+      provider: seededProvider,
+      selectedModel: seededSelectedModel,
+      selectedEffort: seededSelectedEffort,
+      seedTranscript: seededTranscript,
+      codexThreadId: seededCodexThreadId,
+      selectedCodexPermission: seededSelectedCodexPermission,
+    });
+    const seededProviderCompat = providerCompatibilityFields(seededProviderState);
 
     set((s) => {
       const sessions = {
@@ -547,12 +842,8 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
           subagentIds: [],
           hookEventLog: [],
           jsonlLoaded: !!ephemeral, // ephemeral sessions never load from disk
-          provider: seededProvider,
-          codexThreadId: seededCodexThreadId,
-          seedTranscript: seededTranscript,
-          selectedModel: seededSelectedModel,
-          selectedEffort: seededSelectedEffort,
-          selectedCodexPermission: seededSelectedCodexPermission,
+          providerState: seededProviderState,
+          ...seededProviderCompat,
         },
       };
       if (!ephemeral) debouncedSave();
@@ -577,11 +868,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       // pulled back from JSONL.
       if (!removed?.name || removed?.ephemeral) {
         try {
-          const data = readPersistedMeta();
-          if (data[sessionId]) {
-            delete data[sessionId];
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-          }
+          deletePersistedMeta(sessionId);
         } catch (e) {
           console.warn("[claudeStore] Failed to prune metadata on remove:", e);
         }
@@ -827,7 +1114,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session || session.codexThreadId === threadId) return s;
-      shouldHydrate = session.provider === "openai" && !!threadId && !!session.cwd && session.jsonlLoaded;
+      shouldHydrate = (session.providerState?.provider ?? session.provider) === "openai" && !!threadId && !!session.cwd && session.jsonlLoaded;
       hydrateCwd = session.cwd;
       const updated = updateSession(s.sessions, sessionId, { codexThreadId: threadId });
       if (!session.ephemeral) debouncedSave();
@@ -1006,11 +1293,7 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions;
       try {
-        const data = readPersistedMeta();
-        if (data[sessionId]) {
-          delete data[sessionId];
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        }
+        deletePersistedMeta(sessionId);
       } catch (e) {
         console.warn("[claudeStore] Failed to delete metadata:", e);
       }
@@ -1100,7 +1383,13 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
 // Provider routing selector. Returns "anthropic" for any unknown / missing
 // session so the legacy Claude path stays the safe default.
 export function selectSessionProvider(sessionId: string): ProviderId {
-  return useClaudeStore.getState().sessions[sessionId]?.provider ?? "anthropic";
+  const session = useClaudeStore.getState().sessions[sessionId];
+  return resolveSessionProviderState(session).provider;
+}
+
+export function selectSessionProviderState(sessionId: string): ProviderSessionState {
+  const session = useClaudeStore.getState().sessions[sessionId];
+  return resolveSessionProviderState(session);
 }
 
 // Lightweight selector for voice/fuzzy session matching.
@@ -1117,6 +1406,11 @@ export function getSessionsForVoiceMatch(): { id: string; name: string }[] {
 // just a handful of strings per session.
 export function flushSave() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  if (idleSaveHandle !== null) {
+    cancelIdle(idleSaveHandle);
+    idleSaveHandle = null;
+  }
+  savePending = false;
   saveToStorage(useClaudeStore.getState().sessions);
 }
 
@@ -1130,6 +1424,10 @@ if (typeof window !== "undefined") {
       document.removeEventListener("visibilitychange", visibilityHandler);
       window.removeEventListener("beforeunload", flushSave);
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      if (idleSaveHandle !== null) {
+        cancelIdle(idleSaveHandle);
+        idleSaveHandle = null;
+      }
     });
   }
 }

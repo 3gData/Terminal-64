@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-04-25T22:00:00.423Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-04-27T22:00:00.849Z
 > Files: 518 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ./
@@ -20,28 +20,6 @@
 - `tsconfig.node.json` (~67 tok)
 - `vite.config.ts` — Vite build configuration (~140 tok)
 
-## Agent 4 delegation audit entries (2026-04-26)
-
-- `docs/delegation-mcp-limitations.md` — Documents current delegation MCP bridge behavior and known protocol limitations. (~300 tok)
-- `src/hooks/useDelegationSpawn.ts` — Spawns delegated child sessions, creates shared chat panel, wires provider-specific MCP/env config, and starts Claude/Codex child processes. (~1900 tok)
-- `src/hooks/useDelegationOrchestrator.ts` — Tracks delegation child progress, report_done/idle completion, merge prompts, shared chat cleanup, and ephemeral child purging. (~4100 tok)
-- `src/components/claude/SharedChat.tsx` — Shared delegation team chat panel; hydrates messages and listens for `delegation-message` events. (~1200 tok)
-- `src/components/claude/ClaudeChat.tsx` — Main chat surface including `/delegate` planning, Discord prompt routing, and delegation spawn call site. (~36000 tok)
-- `src/lib/tauriApi.ts` — Frontend IPC wrappers for Claude/Codex sessions, MCP config helpers, delegation messages, and Discord commands. (~10000 tok)
-- `mcp/t64-server.mjs` — Built-in MCP stdio server exposing delegation tools when delegation env vars are present. (~1700 tok)
-- `mcp/delegation-server.mjs` — Standalone delegation MCP stdio server for team chat/report_done over permission-server HTTP endpoints. (~1500 tok)
-- `src-tauri/src/permission_server.rs` — Permission HTTP server and delegation message endpoints backing MCP team chat. (~10500 tok)
-- `src-tauri/src/discord_bot.rs` — Discord bot gateway/API sync for named sessions and frontend-routed Discord prompts. (~31000 tok)
-- `src-tauri/src/providers/codex.rs` — Codex provider runtime: app-server/exec transport, event normalization, rollout JSONL history hydration, rewind/fork helpers, and disk session discovery. (~65000 tok)
-- `src-tauri/src/providers/util.rs` — Shared provider stream utilities including live event size caps and recursive JSON string truncation for renderer-safe events. (~1200 tok)
-
-## src/components/claude/
-
-- `ClaudeChat.tsx` — Main chat container: session controls, LegendList message virtualization, sticky scroll state, prompt island, jump-to-bottom, rewind/fork/history, editor overlay, drag/drop, send/cancel orchestration (~43208 tok)
-- `PromptIsland.tsx` — Prompt picker island for recent user prompts with incremental older-row reveal and jump callbacks (~2661 tok)
-- `ChatMessage.tsx` — Render individual chat messages, markdown, grouped tool calls, tool actions, permission status, and per-message controls (~19242 tok)
-- `ClaudeChat.css` — Chat UI, message list, tool-call groups, prompt island, jump button, editor/rewind overlays, input/menu styling (~55367 tok)
-
 ## .claude/
 
 - `settings.json` (~441 tok)
@@ -50,6 +28,10 @@
 ## .claude/rules/
 
 - `openwolf.md` (~313 tok)
+
+## .codex/
+
+- `config.toml` (~93 tok)
 
 ## .github/
 
@@ -68,11 +50,13 @@
 
 ## docs/
 
+- `delegation-mcp-limitations.md` — Delegation MCP Limitations (~370 tok)
+- `provider-events.md` — Provider Event Contract (~487 tok)
 - `wake-training.md` — Training a Custom Wake Word ("T Six Four") (~2432 tok)
 
 ## mcp/
 
-- `delegation-server.mjs` — Terminal 64 Delegation MCP Server (~1463 tok)
+- `delegation-server.mjs` — Terminal 64 Delegation MCP Server (~1532 tok)
 - `t64-server.mjs` — Terminal 64 MCP Server (~1741 tok)
 - `widget-server.mjs` — Terminal 64 Widget MCP Server (~1952 tok)
 
@@ -747,11 +731,6 @@
 - `README` (~377 tok)
 - `README.developer` (~689 tok)
 
-## scripts/.wake-venv/lib/python3.11/site-packages/contourpy-1.3.3.dist-info/
-
-- `INSTALLER` (~2 tok)
-- `LICENSE` — Project license (~410 tok)
-
 ## scripts/.wake-venv/lib/python3.11/site-packages/contourpy/
 
 - `__init__.py` — name: contour_generator (~3362 tok)
@@ -775,4 +754,52 @@
 - `data.py` — simple, random (~739 tok)
 - `mpl_renderer.py` — MplRenderer: filled, grid, lines, mask + 5 more (~5741 tok)
 - `mpl_util.py` — filled_to_mpl_paths, lines_to_mpl_paths (~987 tok)
-- `renderer.py` — Renderer: filled, grid, lines, mask + 7 more (~1463 tok)
+
+## src/ (OpenWolf supplemental entries, 2026-04-28)
+
+- `src/contracts/providerIpc.ts` — TypeScript Codex/Claude IPC request interfaces for provider command wrappers (~120 tok)
+- `src/contracts/providerRuntime.ts` — Provider runtime input/result contracts used by frontend runtime modules (~220 tok)
+- `src/lib/providerRuntimes/openai.ts` — OpenAI/Codex frontend runtime adapter: builds Codex create/send/fork/rewind/hydrate requests and preserves legacy thread fallback (~220 tok)
+- `src/lib/providerRuntime.ts` — Frontend provider runtime router and public compatibility exports (~80 tok)
+- `src/lib/tauriApi.ts` — Frontend Tauri IPC wrappers for Claude, Codex, MCP, filesystem, checkpoints, widgets, and browser commands (~2500 tok)
+- `src/hooks/useChatSend.ts` — Chat send hook that prepares provider turn inputs, handles Codex plan slash command, and increments prompt count (~180 tok)
+
+## src-tauri/src/providers/ (OpenWolf supplemental entries, 2026-04-28)
+
+- `src-tauri/src/providers/codex.rs` — Rust Codex provider adapter with legacy exec transport, app-server JSON-RPC lifecycle, event normalization, rollback/fork, and rollout hydration (~30000 tok)
+- `src-tauri/src/providers/events.rs` — Rust provider event types shared by provider adapters and frontend emits (~500 tok)
+- `src-tauri/src/providers/registry.rs` — Provider registry routing typed command requests to provider adapters (~500 tok)
+- `src-tauri/src/providers/traits.rs` — Provider adapter traits and command request/result enums (~800 tok)
+## Agent 5 provider verification scope
+
+- `docs/provider-events.md` — Provider Event Contract (~487 tok)
+- `src/contracts/providerEvents.ts` — Provider-neutral event and tool contracts for Claude/Codex runtime decoding (~900 tok)
+- `src/contracts/providerRuntime.ts` — Provider runtime operation interfaces and request payload types (~900 tok)
+- `src/contracts/providerIpc.ts` — Provider IPC type surface used by frontend/runtime wrappers (~900 tok)
+- `src/lib/providers.ts` — Provider manifests, defaults, capabilities, and compatibility config alias (~1300 tok)
+- `src/lib/providerRuntime.ts` — Frontend provider runtime dispatcher for create/send/cancel/close/fork/rewind/hydrate (~1400 tok)
+- `src/lib/providerModularity.verification.ts` — Focused provider modularity verification fixtures for manifests, migration, runtime request shaping, and tool normalization (~2600 tok)
+- `src/lib/providerRuntimes/anthropic.ts` — Anthropic/Claude provider runtime adapter (~1300 tok)
+- `src/lib/providerRuntimes/openai.ts` — OpenAI/Codex provider runtime adapter and request shaping (~1600 tok)
+- `src/lib/claudeEventDecoder.ts` — Claude raw event to provider-neutral event/tool decoder (~1500 tok)
+- `src/lib/codexEventDecoder.ts` — Codex raw event to provider-neutral event/tool decoder (~2200 tok)
+- `src/stores/claudeStore.ts` — Zustand Claude/Codex session store, persistence, providerState migration (~3000 tok)
+- `src/hooks/useChatSend.ts` — Chat send hook that routes through provider runtime (~1600 tok)
+- `src/hooks/useChatFork.ts` — Chat fork hook and provider metadata seeding (~1400 tok)
+- `src/hooks/useChatRewind.ts` — Chat rewind hook and provider rollback dispatch (~1300 tok)
+- `src/lib/tauriApi.ts` — Tauri IPC frontend wrappers, including provider commands (~1600 tok)
+- `src/lib/types.ts` — Shared frontend types including ClaudeSession provider metadata (~2500 tok)
+- `src-tauri/src/providers/events.rs` — Rust provider event normalization contracts (~1200 tok)
+- `src-tauri/src/providers/traits.rs` — Rust provider adapter traits and request structs (~1200 tok)
+- `src-tauri/src/providers/registry.rs` — Rust provider registry wiring for command adapters (~1200 tok)
+- `src-tauri/src/providers/codex.rs` — Rust Codex provider command adapter (~1600 tok)
+- `src-tauri/src/providers/claude.rs` — Rust Claude provider command adapter (~1200 tok)
+- `src-tauri/src/providers/mod.rs` — Rust provider module exports (~200 tok)
+- `src-tauri/src/providers/util.rs` — Rust provider helper utilities (~500 tok)
+
+## Agent 1 provider UI routing scope
+
+- `src/components/claude/ClaudeChat.tsx` — Main chat shell and workflow orchestration for provider-backed sessions (~34000 tok)
+- `src/components/widget/WidgetPanel.tsx` — Widget iframe bridge, including session creation and prompt APIs (~18000 tok)
+- `src/components/claude/DelegationBadge.tsx` — Delegation child badge and sibling prompt forwarding (~1500 tok)
+- `src/hooks/useDelegationOrchestrator.ts` — Delegation lifecycle, child cleanup, and auto-merge routing (~7000 tok)

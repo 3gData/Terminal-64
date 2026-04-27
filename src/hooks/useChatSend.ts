@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { createCheckpoint, readFile } from "../lib/tauriApi";
 import { runProviderTurn } from "../lib/providerRuntime";
 import { isAbsolutePath, joinPath } from "../lib/platform";
-import { useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import type { PermissionMode } from "../lib/types";
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
 
@@ -34,8 +34,12 @@ export function useChatSend({
       const store = useClaudeStore.getState();
       const sess = store.sessions[sessionId];
       const started = sess?.hasBeenStarted ?? false;
-      const provider = sess?.provider ?? "anthropic";
+      const providerState = resolveSessionProviderState(sess);
+      const provider = providerState.provider;
+      const codexThreadId = providerState.openai?.codexThreadId ?? null;
+      const seedTranscript = providerState.seedTranscript;
       try {
+        store.setStreaming(sessionId, true);
         if (sess && sess.modifiedFiles.length > 0) {
           const snapshotBase = sess.cwd || effectiveCwd;
           const resolveSnapshotPath = (fp: string) =>
@@ -74,13 +78,13 @@ export function useChatSend({
           cwd: effectiveCwd,
           prompt: providerPrompt,
           started,
-          threadId: sess?.codexThreadId ?? null,
+          threadId: codexThreadId,
           selectedModel,
           selectedEffort,
           selectedCodexPermission,
           permissionMode,
           skipOpenwolf: sess?.skipOpenwolf || false,
-          seedTranscript: sess?.seedTranscript ?? null,
+          seedTranscript,
           resumeAtUuid: sess?.resumeAtUuid ?? null,
           forkParentSessionId: sess?.forkParentSessionId ?? null,
           codexCollaborationMode,
@@ -96,7 +100,9 @@ export function useChatSend({
         if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
         incrementPromptCount(sessionId);
       } catch (err) {
-        useClaudeStore.getState().setError(sessionId, String(err));
+        const currentStore = useClaudeStore.getState();
+        currentStore.setStreaming(sessionId, false);
+        currentStore.setError(sessionId, String(err));
       }
     },
     [sessionId, effectiveCwd, permissionMode, selectedModel, selectedEffort, selectedCodexPermission, incrementPromptCount],

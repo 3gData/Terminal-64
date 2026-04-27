@@ -96,8 +96,12 @@ export default function Canvas() {
     // Apply initial state
     const { panX, panY, zoom: z } = useCanvasStore.getState();
     apply(panX, panY, z);
-    // Subscribe to store changes — fires synchronously on every set()
-    return useCanvasStore.subscribe((s) => apply(s.panX, s.panY, s.zoom));
+    // Subscribe to store changes — fires synchronously on every set(), so only
+    // touch layout when the transform inputs actually changed.
+    return useCanvasStore.subscribe((s, prev) => {
+      if (s.panX === prev.panX && s.panY === prev.panY && s.zoom === prev.zoom) return;
+      apply(s.panX, s.panY, s.zoom);
+    });
   }, [showGrid]);
 
   // Dynamically compute widget↔chat links by matching cwd to widget folder

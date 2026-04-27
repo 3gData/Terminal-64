@@ -21,7 +21,7 @@
     {
       "id": "bug-002",
       "timestamp": "2026-04-16",
-      "error_message": "RewindPromptDialog shows the whole path as 'dir' on Windows \u2014 path.split('/').pop() returns the entire string when separators are all backslashes",
+      "error_message": "RewindPromptDialog shows the whole path as 'dir' on Windows — path.split('/').pop() returns the entire string when separators are all backslashes",
       "file": "src/components/claude/ClaudeChat.tsx",
       "root_cause": "Basename computed via path.split('/').pop() only splits on forward slash. Windows paths use backslashes, so split returns [path] and pop gives the full path, leaving dir = '' and fileName = full path.",
       "fix": "Introduced src/lib/platform.ts helpers (baseName, dirName) that split on both separators, and replaced the inline split with baseName(path) + dirName(path).",
@@ -40,7 +40,7 @@
       "timestamp": "2026-04-16",
       "error_message": "FileTree produces mixed-separator paths on Windows (e.g. C:\\foo/bar/baz.txt) and fails to detect Windows absolute paths from semantic search",
       "file": "src/components/claude/FileTree.tsx",
-      "root_cause": "All fullPath construction used template-literal '${cwd}/${name}' \u2014 appends forward slash even when cwd uses backslashes. Absolute-path detection used relPath.startsWith('/') which misses drive letters (C:\\) and UNC (\\\\server\\share).",
+      "root_cause": "All fullPath construction used template-literal '${cwd}/${name}' — appends forward slash even when cwd uses backslashes. Absolute-path detection used relPath.startsWith('/') which misses drive letters (C:\\) and UNC (\\\\server\\share).",
       "fix": "Replaced hardcoded slash joins with joinPath(), replaced startsWith('/') with isAbsolutePath() (detects /, \\, drive letter, UNC), and replaced .split(/[/\\\\]/).pop() with baseName().",
       "tags": [
         "windows",
@@ -57,9 +57,9 @@
     {
       "id": "bug-004",
       "timestamp": "2026-04-16",
-      "error_message": "tauriApi.setT64DelegationEnv / clearT64DelegationEnv write .mcp.json with forward-slash paths baked in \u2014 MCP args[0] and path strings produce mixed separators on Windows",
+      "error_message": "tauriApi.setT64DelegationEnv / clearT64DelegationEnv write .mcp.json with forward-slash paths baked in — MCP args[0] and path strings produce mixed separators on Windows",
       "file": "src/lib/tauriApi.ts",
-      "root_cause": "scriptPath and mcpPath were built with template literals using '/' \u2014 on Windows appDir is a backslash path so the resulting script path is C:\\Users\\x/mcp/t64-server.mjs. Some downstream consumers (Claude CLI, node module resolution) don't normalize and can fail.",
+      "root_cause": "scriptPath and mcpPath were built with template literals using '/' — on Windows appDir is a backslash path so the resulting script path is C:\\Users\\x/mcp/t64-server.mjs. Some downstream consumers (Claude CLI, node module resolution) don't normalize and can fail.",
       "fix": "Imported joinPath from platform.ts and replaced the two templated joins in setT64DelegationEnv and clearT64DelegationEnv.",
       "tags": [
         "windows",
@@ -79,7 +79,7 @@
       "error_message": "navigator.platform is deprecated; no fallback detection on browsers that lock it to a placeholder (e.g. future privacy-reduced webviews)",
       "file": "src/lib/keybindingEngine.ts, src/lib/constants.ts, src/components/terminal/XTerminal.tsx",
       "root_cause": "Each call site did its own navigator.platform.includes('Mac'|'Win') check. That property is deprecated and, when the webview starts returning a reduced value, all three call sites would silently report the wrong platform.",
-      "fix": "Centralized detection in src/lib/platform.ts (IS_WIN / IS_MAC) \u2014 checks navigator.userAgentData.platform first, falls back to navigator.platform, then to navigator.userAgent. Replaced the three inline checks with the shared constants.",
+      "fix": "Centralized detection in src/lib/platform.ts (IS_WIN / IS_MAC) — checks navigator.userAgentData.platform first, falls back to navigator.platform, then to navigator.userAgent. Replaced the three inline checks with the shared constants.",
       "tags": [
         "windows",
         "mac",
@@ -93,7 +93,7 @@
     {
       "id": "bug-006",
       "timestamp": "2026-04-16",
-      "error_message": "ChatInput inline separator detection was fragile \u2014 /[\\\\]/.test(cwd) && !/[/]/.test(cwd) misses mixed-separator cwd values",
+      "error_message": "ChatInput inline separator detection was fragile — /[\\\\]/.test(cwd) && !/[/]/.test(cwd) misses mixed-separator cwd values",
       "file": "src/components/claude/ChatInput.tsx",
       "root_cause": "The prior Windows pass added an ad-hoc absolute-path + separator check. It still failed when cwd contained any forward slash (common after passing through APIs that normalize).",
       "fix": "Replaced the inline regex + sep detection with isAbsolutePath(file) + joinPath(cwd, file) from the centralized platform helper.",
@@ -115,8 +115,8 @@
       "timestamp": "2026-04-16",
       "error_message": "Windows production build fails or hangs because tauri.conf.json `targets: \"all\"` tries to build both NSIS and MSI; MSI requires WiX Toolset (~50MB extra dep) which is not installed on the dev machine and not declared in the build prerequisites.",
       "file": "src-tauri/tauri.conf.json",
-      "root_cause": "Tauri 2's `targets: \"all\"` enumerates every bundle format the host platform supports. On Windows that includes NSIS *and* MSI. MSI is generated by WiX, which Tauri downloads on demand only if it's already configured \u2014 otherwise the build aborts. CI / fresh dev machines hit this.",
-      "fix": "Replaced `targets: \"all\"` with explicit array `[\"app\", \"dmg\", \"deb\", \"appimage\", \"rpm\", \"nsis\"]`. Tauri silently skips formats not applicable to the current host, so macOS still builds app+dmg, Linux still builds deb+appimage+rpm, Windows builds NSIS only \u2014 and never tries MSI/WiX.",
+      "root_cause": "Tauri 2's `targets: \"all\"` enumerates every bundle format the host platform supports. On Windows that includes NSIS *and* MSI. MSI is generated by WiX, which Tauri downloads on demand only if it's already configured — otherwise the build aborts. CI / fresh dev machines hit this.",
+      "fix": "Replaced `targets: \"all\"` with explicit array `[\"app\", \"dmg\", \"deb\", \"appimage\", \"rpm\", \"nsis\"]`. Tauri silently skips formats not applicable to the current host, so macOS still builds app+dmg, Linux still builds deb+appimage+rpm, Windows builds NSIS only — and never tries MSI/WiX.",
       "tags": [
         "windows",
         "tauri",
@@ -134,7 +134,7 @@
       "timestamp": "2026-04-16",
       "error_message": "Older WebView2 runtimes on long-lived Windows installs render xterm.js / Monaco / CSS conic-gradient incorrectly, and there is no installer-side enforcement of a minimum.",
       "file": "src-tauri/tauri.conf.json",
-      "root_cause": "tauri.conf.json bundle.windows.nsis had no `minimumWebview2Version` \u2014 WebView2 is auto-updated by Edge in most cases, but enterprise / locked-down machines can stay on very old (sub-110) builds where modern Web APIs misbehave. Without the gate, the installer happily proceeds and runtime breaks silently.",
+      "root_cause": "tauri.conf.json bundle.windows.nsis had no `minimumWebview2Version` — WebView2 is auto-updated by Edge in most cases, but enterprise / locked-down machines can stay on very old (sub-110) builds where modern Web APIs misbehave. Without the gate, the installer happily proceeds and runtime breaks silently.",
       "fix": "Added `nsis.minimumWebview2Version: \"110.0.1587.40\"` so the NSIS installer triggers a WebView2 update if the local version is older. Also added `nsis.compression: \"lzma\"` (smaller installer), `webviewInstallMode.silent: true` (no extra UI on first install), and `allowDowngrades: true` (explicit, matches default).",
       "tags": [
         "windows",
@@ -152,7 +152,7 @@
     {
       "id": "bug-rust-win-001",
       "timestamp": "2026-04-16",
-      "error_message": "resolve_claude_path / resolve_openwolf_path_inner call `where claude.exe` / `where openwolf.exe` \u2014 explicit extension disables PATHEXT, so the .cmd shim installed by npm is not found. Then the candidate fallback works in most cases, but users who installed claude via a non-standard PATHEXT-only location get bare `claude` / `openwolf` as the binary name.",
+      "error_message": "resolve_claude_path / resolve_openwolf_path_inner call `where claude.exe` / `where openwolf.exe` — explicit extension disables PATHEXT, so the .cmd shim installed by npm is not found. Then the candidate fallback works in most cases, but users who installed claude via a non-standard PATHEXT-only location get bare `claude` / `openwolf` as the binary name.",
       "file": "src-tauri/src/claude_manager.rs",
       "root_cause": "Windows `where` respects PATHEXT only when the query has no extension. `where claude.exe` only looks for claude.exe, missing claude.cmd (the npm form).",
       "fix": "Changed the lookup to `where claude` / `where openwolf` (no extension) so PATHEXT finds .cmd shims. First match from `where` output is used.",
@@ -174,7 +174,7 @@
     {
       "id": "bug-rust-win-002",
       "timestamp": "2026-04-16",
-      "error_message": "resolve_claude_path() final fallback returns bare string \"claude\" on all platforms \u2014 on Windows Command::new(\"claude\") does NOT apply PATHEXT, so Claude CLI never launches if no candidate path exists.",
+      "error_message": "resolve_claude_path() final fallback returns bare string \"claude\" on all platforms — on Windows Command::new(\"claude\") does NOT apply PATHEXT, so Claude CLI never launches if no candidate path exists.",
       "file": "src-tauri/src/claude_manager.rs",
       "root_cause": "Unlike the shell, std::process::Command on Windows uses CreateProcessW without PATHEXT expansion. Bare name without extension fails to resolve .cmd shims even when they're on PATH.",
       "fix": "Fallback now returns \"claude.cmd\" on Windows (parallel to the existing openwolf fallback). Bare \"claude\" kept for Unix.",
@@ -195,7 +195,7 @@
     {
       "id": "bug-rust-win-003",
       "timestamp": "2026-04-16",
-      "error_message": "Five call sites (build_command, ensure_openwolf, and three Haiku subprocess spawners in lib.rs \u2014 rewrite_prompt, generate_theme, generate_rewind_summary) call Command::new(&claude_bin)/Command::new(&wolf_bin) directly. Per cerebrum, .cmd/.bat shims on Windows must go through `cmd /C` to get correct arg escaping and console-flash suppression.",
+      "error_message": "Five call sites (build_command, ensure_openwolf, and three Haiku subprocess spawners in lib.rs — rewrite_prompt, generate_theme, generate_rewind_summary) call Command::new(&claude_bin)/Command::new(&wolf_bin) directly. Per cerebrum, .cmd/.bat shims on Windows must go through `cmd /C` to get correct arg escaping and console-flash suppression.",
       "file": "src-tauri/src/claude_manager.rs, src-tauri/src/lib.rs",
       "root_cause": "Rust 1.77+ does spawn .cmd/.bat via cmd.exe internally, but arg escaping rules differ between direct exe and cmd-dispatched batch files, and PATHEXT resolution for bare names never applies. Uniformly wrapping in cmd /C avoids both pitfalls and keeps CREATE_NO_WINDOW applied in one place.",
       "fix": "Added pub fn shim_command(bin) in claude_manager.rs that returns `cmd /C <bin>` with CREATE_NO_WINDOW on Windows and a plain Command on Unix. Replaced all five Command::new(&bin) sites with claude_manager::shim_command(&bin). Removed redundant creation_flags blocks at call sites.",
@@ -217,9 +217,9 @@
     {
       "id": "bug-rust-win-004",
       "timestamp": "2026-04-16",
-      "error_message": "Discord attachment filenames sanitised against control chars and \\: * ? \" < > | but did not reject Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) or trailing dots/spaces \u2014 a Discord user sending \"CON.png\" or \"file.txt. \" causes fs::write to fail silently or collide on Windows.",
+      "error_message": "Discord attachment filenames sanitised against control chars and \\: * ? \" < > | but did not reject Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) or trailing dots/spaces — a Discord user sending \"CON.png\" or \"file.txt. \" causes fs::write to fail silently or collide on Windows.",
       "file": "src-tauri/src/discord_bot.rs",
-      "root_cause": "Windows kernel reserves DOS device names regardless of extension \u2014 \"CON.png\" tries to open the console device. Windows also silently strips trailing dots/spaces, so \"file.\" becomes \"file\" and \"file. \" becomes \"file\", which can collide with sibling files or confuse consumers.",
+      "root_cause": "Windows kernel reserves DOS device names regardless of extension — \"CON.png\" tries to open the console device. Windows also silently strips trailing dots/spaces, so \"file.\" becomes \"file\" and \"file. \" becomes \"file\", which can collide with sibling files or confuse consumers.",
       "fix": "After the existing separator/control-char filter, trim trailing dots and spaces, then upper-case the stem (pre-first-dot) and compare against the reserved set. Reserved or empty names fall back to literal \"file\".",
       "tags": [
         "windows",
@@ -235,10 +235,10 @@
     {
       "id": "bug-rewind-001",
       "timestamp": "2026-04-17",
-      "error_message": "Rewind does too much AND doesn't fully rewind delegation changes \u2014 git checkout HEAD wiped uncommitted work, and only the most recent delegation group's child files were tracked",
+      "error_message": "Rewind does too much AND doesn't fully rewind delegation changes — git checkout HEAD wiped uncommitted work, and only the most recent delegation group's child files were tracked",
       "file": "src/components/claude/ClaudeChat.tsx",
-      "root_cause": "Two bugs. (A) handleRewind called revertFilesGit on delegation children's modified files; revert_files_git uses `git checkout HEAD -- path` which restores tracked files to the LAST COMMIT \u2014 wiping user's pre-session uncommitted edits, other sessions' changes, or parent-session edits not in checkpoints. (B) handleRewind read delState.parentToGroup[sessionId], a single-slot map that each new delegation overwrites (delegationStore L100). If the parent did delegation 1 \u2192 completed \u2192 delegation 2, rewinding past delegation 1 couldn't find its child modifiedFiles \u2014 they were orphaned.",
-      "fix": "(A) Replaced revertFilesGit with filterUntrackedFiles \u2192 deleteFiles for child files (matches parent handling): only delete untracked/new files; leave tracked-but-modified files alone so user doesn't lose uncommitted work. Log the tracked-left list so user knows. (B) Replaced `parentToGroup[sessionId]` lookup with `Object.values(delState.groups).filter(g => g.parentSessionId === sessionId)` to collect child modifiedFiles from ALL groups ever spawned by this parent, not just the current one. Also end-cancel any still-active groups.",
+      "root_cause": "Two bugs. (A) handleRewind called revertFilesGit on delegation children's modified files; revert_files_git uses `git checkout HEAD -- path` which restores tracked files to the LAST COMMIT — wiping user's pre-session uncommitted edits, other sessions' changes, or parent-session edits not in checkpoints. (B) handleRewind read delState.parentToGroup[sessionId], a single-slot map that each new delegation overwrites (delegationStore L100). If the parent did delegation 1 → completed → delegation 2, rewinding past delegation 1 couldn't find its child modifiedFiles — they were orphaned.",
+      "fix": "(A) Replaced revertFilesGit with filterUntrackedFiles → deleteFiles for child files (matches parent handling): only delete untracked/new files; leave tracked-but-modified files alone so user doesn't lose uncommitted work. Log the tracked-left list so user knows. (B) Replaced `parentToGroup[sessionId]` lookup with `Object.values(delState.groups).filter(g => g.parentSessionId === sessionId)` to collect child modifiedFiles from ALL groups ever spawned by this parent, not just the current one. Also end-cancel any still-active groups.",
       "tags": [
         "rewind",
         "delegation",
@@ -255,9 +255,9 @@
     {
       "id": "bug-002",
       "timestamp": "2026-04-16",
-      "error_message": "Forked chat doesn't respond \u2014 sending a prompt in a newly forked session hangs with no streaming",
+      "error_message": "Forked chat doesn't respond — sending a prompt in a newly forked session hangs with no streaming",
       "file": "src/components/claude/ClaudeChat.tsx",
-      "root_cause": "handleFork calls claudeStore.loadFromDisk(newSessionId, forkedMessages), which sets hasBeenStarted=true whenever promptCount>0. actualSend then guarded the fork-first-send path with `if (forkParent && !started)` \u2014 so started=true made it fall through to the `--resume <newId>` branch against a session JSONL that the CLI hasn't created yet, causing the CLI to stall silently.",
+      "root_cause": "handleFork calls claudeStore.loadFromDisk(newSessionId, forkedMessages), which sets hasBeenStarted=true whenever promptCount>0. actualSend then guarded the fork-first-send path with `if (forkParent && !started)` — so started=true made it fall through to the `--resume <newId>` branch against a session JSONL that the CLI hasn't created yet, causing the CLI to stall silently.",
       "fix": "Reordered branches in actualSend: check `if (forkParent)` first (ignoring `started`). The presence of forkParentSessionId is the unambiguous signal that this is the fork's first send and must use --fork-session. After success the store clears forkParentSessionId so subsequent sends use the normal --resume path.",
       "tags": [
         "fork",
@@ -274,7 +274,7 @@
       "timestamp": "2026-04-18",
       "error_message": "Chat panel background flickers in/out at specific canvas positions; clicking the panel temporarily restores it",
       "file": "src/components/canvas/FloatingTerminal.css",
-      "root_cause": "`.floating-terminal` uses `overflow: hidden` + `border-radius: 8px` while its parent `.canvas-content` has `transform: scale(z)`. On WebKit, the rounded-corner clip is repainted non-atomically at fractional pixel positions caused by the scale, invalidating the panel's background paint. A click triggers `bringToFront` \u2192 zIndex change \u2192 repaint, briefly restoring it.",
+      "root_cause": "`.floating-terminal` uses `overflow: hidden` + `border-radius: 8px` while its parent `.canvas-content` has `transform: scale(z)`. On WebKit, the rounded-corner clip is repainted non-atomically at fractional pixel positions caused by the scale, invalidating the panel's background paint. A click triggers `bringToFront` → zIndex change → repaint, briefly restoring it.",
       "fix": "Promoted `.floating-terminal` to its own compositor layer: added `will-change: transform`, `transform: translateZ(0)`, `backface-visibility: hidden`, `contain: layout paint`, `isolation: isolate`. This keeps the rounded clip stable across subpixel-scaled positions.",
       "tags": [
         "rendering",
@@ -312,7 +312,7 @@
       "timestamp": "2026-04-18",
       "error_message": "Dictation feels laggy and partials stall during long utterances",
       "file": "src-tauri/src/voice/whisper.rs",
-      "root_cause": "partial_worker cloned the entire rolling audio buffer every 250ms tick and handed the full thing to whisper. Per-tick cost grew ~O(utterance length) and effectively O(n^2) across a multi-second dictation because each successive tick re-decoded everything from scratch (no_context + no cursor). A 12s utterance re-decoded 12s every tick \u2192 300-700ms decode under Metal \u2192 lag stacks, partials stop keeping up with speech, decode queue bloats.",
+      "root_cause": "partial_worker cloned the entire rolling audio buffer every 250ms tick and handed the full thing to whisper. Per-tick cost grew ~O(utterance length) and effectively O(n^2) across a multi-second dictation because each successive tick re-decoded everything from scratch (no_context + no cursor). A 12s utterance re-decoded 12s every tick → 300-700ms decode under Metal → lag stacks, partials stop keeping up with speech, decode queue bloats.",
       "fix": "Replaced full-buffer g.clone() in partial_worker with a trailing window slice g[buf_len - PARTIAL_WINDOW_SECS*SR ..]. Added a 120ms min-new-samples gate so ticks without fresh audio no-op. When the window slides (window_start advances), AgreementBuffer is reset so word-index LCP doesn't correlate across different audio spans. Added a decode watchdog that skips the next tick if a decode exceeds 2x the tick interval. Emits voice-telemetry { decode_ms, window_samples, window_start, buffer_samples, window_shifted, committed_len, tentative_len } per tick so regressions are visible.",
       "tags": [
         "voice",
@@ -341,7 +341,9 @@
         "replay",
         "infinite-loop"
       ],
-      "related_bugs": ["bug-018"],
+      "related_bugs": [
+        "bug-018"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-19"
     },
@@ -360,7 +362,9 @@
         "tauri-ipc",
         "main-thread"
       ],
-      "related_bugs": ["bug-017"],
+      "related_bugs": [
+        "bug-017"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-19"
     },
@@ -379,7 +383,9 @@
         "session-history",
         "load_session_history"
       ],
-      "related_bugs": ["bug-001"],
+      "related_bugs": [
+        "bug-001"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-22"
     },
@@ -417,7 +423,9 @@
         "print-mode",
         "workaround"
       ],
-      "related_bugs": ["bug-020"],
+      "related_bugs": [
+        "bug-020"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-22"
     },
@@ -436,7 +444,9 @@
         "history-refresh",
         "app-server"
       ],
-      "related_bugs": ["bug-019"],
+      "related_bugs": [
+        "bug-019"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-26"
     },
@@ -455,7 +465,9 @@
         "edit-ui",
         "history-refresh"
       ],
-      "related_bugs": ["bug-022"],
+      "related_bugs": [
+        "bug-022"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-26"
     },
@@ -493,7 +505,10 @@
         "tool-calls",
         "parity"
       ],
-      "related_bugs": ["bug-023", "bug-024"],
+      "related_bugs": [
+        "bug-023",
+        "bug-024"
+      ],
       "occurrences": 1,
       "last_seen": "2026-04-26"
     },
@@ -797,6 +812,552 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-26"
+    },
+    {
+      "id": "bug-041",
+      "timestamp": "2026-04-27",
+      "error_message": "Dragging files or images onto the canvas could attach them to the last active chat, and in some layouts appeared to affect multiple chats.",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Tauri drag/drop events are window-level, but ClaudeChat only let the active session handle drops. That made file targeting depend on focus history instead of the cursor position, while each mounted chat still had its own listener and drag-over state.",
+      "fix": "Marked chat roots with data-session-id and routed drag enter/over/drop to the chat under the cursor, falling back to the nearest visible chat rectangle. The chosen chat is activated before files attach, and .zip files still stay out of the chat path for widget import handling.",
+      "tags": [
+        "drag-drop",
+        "file-attachments",
+        "chat-ui",
+        "tauri"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-042",
+      "timestamp": "2026-04-27",
+      "error_message": "Codex MCP servers showed as configured instead of connected, and the built-in T64 MCP could appear twice in the MCP dropdown.",
+      "file": "src-tauri/src/providers/codex.rs, src/hooks/useClaudeEvents.ts, src/components/claude/ClaudeChat.tsx",
+      "root_cause": "The Codex app-server emits MCP startup changes as `mcpServer/startupStatus/updated` with status `ready`, but Terminal 64 did not translate that notification into the live MCP store. The dropdown also chose either live status or configured servers wholesale and treated `t64`, `terminal-64`, and `codex/terminal-64` as separate rows.",
+      "fix": "Translated Codex startup status notifications to provider events, normalized `ready` to `connected`, merged live MCP status over configured entries, and canonicalized T64 MCP aliases into one built-in dropdown row.",
+      "tags": [
+        "codex",
+        "mcp",
+        "chat-ui",
+        "claude-parity",
+        "dedupe"
+      ],
+      "related_bugs": [
+        "bug-027"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-043",
+      "timestamp": "2026-04-27",
+      "error_message": "Many open chat and terminal panels still did repeated renderer work on window drag/drop and unrelated canvas-store updates.",
+      "file": "src/components/claude/ClaudeChat.tsx, src/components/canvas/Canvas.tsx, src/components/terminal/XTerminal.tsx",
+      "root_cause": "Each ClaudeChat mounted its own Tauri drag/drop listener and recomputed chat hit-testing for every drag event. Canvas and XTerminal subscribed to the whole canvas store, so terminal movement, z-index, and other unrelated writes still rewrote canvas transform styles or ran xterm zoom/fit checks.",
+      "fix": "Moved chat file drag/drop routing behind one module-level listener with per-chat registration, then guarded Canvas and XTerminal subscriptions so they only run when pan/zoom or zoom actually changes.",
+      "tags": [
+        "frontend",
+        "performance",
+        "drag-drop",
+        "canvas",
+        "xterm",
+        "many-panels"
+      ],
+      "related_bugs": [
+        "bug-039",
+        "bug-041"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-044",
+      "timestamp": "2026-04-27",
+      "error_message": "`cargo clippy --all-targets -- -D warnings` failed with `clippy::items-after-test-module` after adding tests to `src-tauri/src/providers/util.rs`.",
+      "file": "src-tauri/src/providers/util.rs",
+      "root_cause": "The new `#[cfg(test)] mod tests` block was inserted before later production items (`session_jsonl_path` and `sanitize_dangling_tool_uses`). The repo treats Clippy warnings as errors, so test modules must come after all non-test items in the module.",
+      "fix": "Moved the provider utility test module to the end of the file and ran `cargo fmt`.",
+      "tags": [
+        "rust",
+        "clippy",
+        "tests",
+        "stability"
+      ],
+      "related_bugs": [
+        "bug-040"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-045",
+      "timestamp": "2026-04-27",
+      "error_message": "`cargo clippy --all-targets -- -D warnings` failed while Agent 4 had in-progress edits in `src-tauri/src/permission_server.rs`: duplicate `PendingMap` plus `PendingPermission` field mismatches.",
+      "file": "src-tauri/src/permission_server.rs",
+      "root_cause": "Parallel backend lifecycle edits temporarily left two incompatible `PendingMap` type aliases in the permission server while code expected the newer `PendingPermission` wrapper.",
+      "fix": "Agent 5 did not modify the permission server; reported the blocker in team chat and left the in-progress backend fix to Agent 4.",
+      "tags": [
+        "rust",
+        "clippy",
+        "parallel-work",
+        "permission-server"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-048",
+      "timestamp": "2026-04-27T03:18:53+02:00",
+      "error_message": "Backend session/resource lifecycle could leave stale PTY/provider map entries, temp permission files, pending permission waiters, and widget manifest cache entries after panel/session close or fast process exit.",
+      "file": "src-tauri/src/pty_manager.rs, src-tauri/src/providers/claude.rs, src-tauri/src/providers/codex.rs, src-tauri/src/permission_server.rs, src-tauri/src/widget_server.rs, src-tauri/src/lib.rs",
+      "root_cause": "PTY instances were only removed by explicit close, so shells that exited naturally stayed in the manager map. Claude/Codex close delegated to cancel, which killed the child but kept the instance slot until reader cleanup. Permission pending requests were keyed only by request id, so unregistering a session could not release blocked hook/MCP threads. Claude sessions with an empty frontend id registered temp hook files against an empty id before the backend generated the real id. Widget manifest cache entries were not invalidated when widget folders were deleted or replaced.",
+      "fix": "Inserted PTY instances before starting readers and made reader EOF remove only the matching generation; made Claude/Codex close remove and wait the child directly; tracked pending permission requests by session id and denied them on unregister; pre-generated empty Claude session ids before permission registration and unregistered temp files on spawn failure; added widget manifest cache invalidation on widget delete/install.",
+      "tags": [
+        "rust",
+        "backend",
+        "lifecycle",
+        "memory-leak",
+        "permissions",
+        "pty",
+        "widgets"
+      ],
+      "related_bugs": [
+        "bug-045"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-046",
+      "timestamp": "2026-04-27T01:18:56Z",
+      "error_message": "Widget/browser panels could leak background work or native webviews during iframe reloads, duplicate subscriptions, or rapid panel close/reopen.",
+      "file": "src/components/widget/WidgetPanel.tsx, src/components/widget/BrowserPanel.tsx, src-tauri/src/browser_manager.rs",
+      "root_cause": "Widget hot-reload polling ran every 1.5s even while hidden, allowed overlapping mtime IPCs, and forced a first-poll iframe reload. Plugin subscriptions with the same id overwrote old handles without closing them, voice and terminal-ready listeners could resolve after bridge teardown, and async native browser creation could complete after React unmount. BrowserManager also attempted duplicate child-webview creation without first removing stale ids.",
+      "fix": "Baselined widget mtimes, paused polling while hidden, guarded polling with an in-flight flag, cancelled async widget server setup, replaced the embedded-browser idle RAF loop with event-coalesced bounds sync, closed duplicate plugin subscriptions, cancelled late voice/terminal-ready listeners, closed embedded/native browsers if create resolves after unmount, and made BrowserManager replace duplicate ids plus prune stale visibility entries.",
+      "tags": [
+        "widget",
+        "browser",
+        "lifecycle",
+        "memory-leak",
+        "native-webview",
+        "postmessage"
+      ],
+      "related_bugs": [
+        "bug-043"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-047",
+      "timestamp": "2026-04-27T03:24:00+02:00",
+      "error_message": "Frontend persistence paths could block the renderer and grow localStorage with many open workflows.",
+      "file": "src/stores/canvasStore.ts, src/stores/claudeStore.ts, src/stores/delegationStore.ts",
+      "root_cause": "Canvas used a permanent 5-second interval and rewrote unchanged layout snapshots; Claude metadata reparsed and rewrote the full localStorage key on every debounced save while retaining stale unnamed/delegation rows; delegation persistence wrote full group payloads, including large result/action/context strings and old completed groups.",
+      "fix": "Replaced canvas polling with dirty-triggered scheduled saves plus serialized-payload dedupe; added cached Claude metadata reads, idle debounced writes, stale unnamed/delegation cleanup, entry caps, and compact quota retry; added idle delegation saves with stale completed-group pruning and bounded persisted result/action/context strings while keeping in-memory runtime state unchanged.",
+      "tags": [
+        "frontend",
+        "localStorage",
+        "performance",
+        "memory",
+        "zustand",
+        "delegation",
+        "canvas"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-050",
+      "timestamp": "2026-04-27T20:59:33Z",
+      "error_message": "npm run build failed while parallel ClaudeChat extractions were in progress: duplicate declarations for handleAttach, handlePasteImage, and hasPlan in src/components/claude/ClaudeChat.tsx.",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Concurrent extraction patches left legacy in-file attachment and plan declarations alongside newly extracted hook declarations.",
+      "fix": "Not fixed by Agent 3 because the duplicate declarations are owned by Agent 2 attachment extraction and Agent 4 plan extraction; reported in t64 team chat. Verified ChatEditOverlay.tsx independently with tsc.",
+      "tags": [
+        "frontend",
+        "parallel-agents",
+        "claude-chat",
+        "build"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-049",
+      "timestamp": "2026-04-27T21:00:17Z",
+      "error_message": "npx tsc --noEmit failed while parallel ClaudeChat extractions were in progress: ChatMessageList callback prop mismatches, ClaudeChat session type mismatch from stripped streamingText, scroll handler signature mismatches, and missing setPlanContent references.",
+      "file": "src/components/claude/ChatMessageList.tsx, src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Concurrent message-list and plan-mode extraction patches have integration type mismatches outside Agent 1's provider controls write scope.",
+      "fix": "Not fixed by Agent 1; ProviderControls.tsx produced no TypeScript diagnostics and the failure was reported in t64 team chat for the owning agents.",
+      "tags": [
+        "frontend",
+        "typescript",
+        "parallel-agents",
+        "claude-chat"
+      ],
+      "related_bugs": [
+        "bug-048"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-051",
+      "timestamp": "2026-04-27T21:01:00Z",
+      "error_message": "npm exec tsc -- --noEmit failed after Agent 2 attachment extraction: ChatMessageList callback/LegendList prop types and useChatPlanMode ClaudeSession type expectations still fail in the shared ClaudeChat extraction branch.",
+      "file": "src/components/claude/ChatMessageList.tsx, src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Concurrent message-list and plan-mode extraction patches left type mismatches outside the attachment/drop hook scope. The new useChatAttachments hook produced no TypeScript diagnostics.",
+      "fix": "Agent 2 kept write scopes disjoint and reported the failure in t64 team chat; after the owning agents landed their fixes, npm exec tsc -- --noEmit and npm run build both passed for the shared tree.",
+      "tags": [
+        "frontend",
+        "typescript",
+        "parallel-agents",
+        "claude-chat",
+        "attachments"
+      ],
+      "related_bugs": [
+        "bug-049",
+        "bug-050"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-050",
+      "timestamp": "2026-04-27T21:01:00Z",
+      "error_message": "npx tsc --noEmit reported Agent 5 list extraction type errors: ChatMessageList onRewind/onFork callback signatures, LegendList ListFooterComponent footer type, and useChatRows requiring ClaudeSession with streamingText.",
+      "file": "src/components/claude/ChatMessageList.tsx, src/components/claude/useChatRows.ts",
+      "root_cause": "The extracted list component used approximate callback/footer prop types, and the row hook depended on the full ClaudeSession type even though ClaudeChat's shallow selector intentionally omits streamingText.",
+      "fix": "Changed ChatMessageList props to match ChatMessage callback signatures and LegendList footer expectations, and narrowed useChatRows to the minimal session fields it reads. A remaining useChatPlanMode session type error is owned by the plan-mode extraction.",
+      "tags": [
+        "frontend",
+        "typescript",
+        "parallel-agents",
+        "claude-chat",
+        "message-list"
+      ],
+      "related_bugs": [
+        "bug-049"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-052",
+      "timestamp": "2026-04-27T23:01:37+02:00",
+      "error_message": "npm run typecheck failed after plan-mode extraction: useChatPlanMode expected ClaudeSession but ClaudeChat passes a shallow session object with streamingText omitted.",
+      "file": "src/components/claude/useChatPlanMode.ts",
+      "root_cause": "The extracted hook typed its session parameter as the full ClaudeSession even though it only needs messages, isStreaming, and planModeActive. ClaudeChat intentionally strips streamingText to avoid per-token rerenders.",
+      "fix": "Narrowed useChatPlanMode to a local ChatPlanSession interface containing only the fields used by plan detection/completion logic. npm run typecheck now passes.",
+      "tags": [
+        "frontend",
+        "typescript",
+        "parallel-agents",
+        "claude-chat",
+        "plan-mode"
+      ],
+      "related_bugs": [
+        "bug-050",
+        "bug-051"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-053",
+      "timestamp": "2026-04-27T23:31:18+02:00",
+      "error_message": "Codex fork opened a Claude session with the Codex transcript JSONL and failed on send.",
+      "file": "src/hooks/useChatFork.ts",
+      "root_cause": "The fork flow added the new canvas panel, then awaited provider-specific fork preparation before creating the child session in claudeStore. ClaudeChat could mount during that await and create the session with the default Anthropic provider.",
+      "fix": "Seed the child claudeStore session immediately after addClaudeTerminalAt with the parent provider, cwd, model, effort, and Codex permission before any async fork work runs.",
+      "tags": [
+        "codex",
+        "fork",
+        "provider-runtime",
+        "race",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-049",
+        "bug-052"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-054",
+      "timestamp": "2026-04-27T23:31:18+02:00",
+      "error_message": "Claude rewind failed after truncation with stderr: No message found with message.uuid of: 44768e6e-2d52-4d86-bcf9-014070618437.",
+      "file": "src/lib/providerRuntime.ts, src/hooks/useChatRewind.ts, src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Terminal 64 physically rewrites the Claude JSONL during rewind, but still stored and reused a resumeAtUuid through --resume-session-at. Claude's CLI can reject that UUID after the file rewrite even though the truncated JSONL is the desired source of truth.",
+      "fix": "Stop sending --resume-session-at for Claude rewind resumes, clear any legacy resumeAtUuid after truncation and on the next provider turn, and let normal session resume use the already-truncated JSONL.",
+      "tags": [
+        "claude",
+        "rewind",
+        "jsonl",
+        "provider-runtime",
+        "resume"
+      ],
+      "related_bugs": [
+        "bug-017"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-055",
+      "timestamp": "2026-04-27T23:39:00+02:00",
+      "error_message": "npx tsc --noEmit failed: src/lib/codexEventDecoder.ts(297,35): Argument of type 'ProviderToolInput | CodexItem' is not assignable to parameter of type 'ProviderToolInput'.",
+      "file": "src/lib/codexEventDecoder.ts",
+      "root_cause": "A parallel decoder edit currently passes a union containing CodexItem to a helper that requires ProviderToolInput.",
+      "fix": "Not fixed by Agent 1; outside provider manifest ownership. Logged so the decoder owner can resolve the union narrowing.",
+      "tags": [
+        "typescript",
+        "codex",
+        "decoder",
+        "parallel-work"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-056",
+      "timestamp": "2026-04-27T23:40:00+02:00",
+      "error_message": "cargo fmt --check failed after adding provider command registry wiring.",
+      "file": "src-tauri/src/providers/claude.rs, src-tauri/src/providers/codex.rs, src-tauri/src/providers/mod.rs, src-tauri/src/providers/registry.rs",
+      "root_cause": "New import lists and a registry helper signature were not in rustfmt's preferred layout.",
+      "fix": "Ran cargo fmt from src-tauri to apply canonical formatting.",
+      "tags": [
+        "rust",
+        "formatting",
+        "provider-registry"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-057",
+      "timestamp": "2026-04-27T23:41:07+02:00",
+      "error_message": "python -m json.tool .wolf/buglog.json failed: zsh:1: command not found: python.",
+      "file": ".wolf/buglog.json",
+      "root_cause": "This shell exposes python3 but not python.",
+      "fix": "Validated the JSON with python3 -m json.tool instead.",
+      "tags": [
+        "environment",
+        "python",
+        "openwolf"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-058",
+      "timestamp": "2026-04-27T23:42:00+02:00",
+      "error_message": "npx tsc --noEmit failed: src/lib/codexEventDecoder.ts(297,35): Argument of type 'ProviderToolInput | CodexItem' is not assignable to parameter of type 'ProviderToolInput'.",
+      "file": "src/lib/codexEventDecoder.ts",
+      "root_cause": "The Codex changed-path helper accepted a union of raw CodexItem and normalized ProviderToolInput, and TypeScript could not narrow the record-shaped ProviderToolInput branch safely.",
+      "fix": "Split the helper into codexItemChangedPaths(item) and codexInputChangedPaths(input), then updated useClaudeEvents to call the normalized-input helper for patched tool inputs.",
+      "tags": [
+        "typescript",
+        "codex",
+        "decoder",
+        "provider-events"
+      ],
+      "related_bugs": [
+        "bug-055"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-059",
+      "timestamp": "2026-04-27T23:44:01+02:00",
+      "error_message": "Provider metadata was duplicated across flat ClaudeSession fields, making future provider-specific metadata widen the shared session shape.",
+      "file": "src/stores/claudeStore.ts",
+      "root_cause": "Codex-specific thread, permission, and fork transcript metadata lived beside provider-neutral session fields and persistence wrote only the flat shape.",
+      "fix": "Added canonical providerState, normalized legacy flat mirrors through updateSession, bumped persisted metadata schema to v5, and migrated old flat metadata on load.",
+      "tags": [
+        "provider-state",
+        "metadata",
+        "migration",
+        "typescript"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-060",
+      "timestamp": "2026-04-27T23:47:55+02:00",
+      "error_message": "Legacy or hot-reloaded in-memory Codex sessions without providerState would hydrate and route as Anthropic.",
+      "file": "src/stores/claudeStore.ts",
+      "root_cause": "After introducing canonical providerState, hydrateFromJsonl and selectSessionProvider read providerState directly without falling back to the legacy flat provider/codexThreadId mirrors. A live HMR session created before the migration can still lack providerState.",
+      "fix": "Added fallback from providerState to legacy provider and codexThreadId fields during provider history hydration and provider selection.",
+      "tags": [
+        "provider-state",
+        "migration",
+        "codex",
+        "hydration",
+        "hmr"
+      ],
+      "related_bugs": [
+        "bug-059",
+        "bug-053"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-27"
+    },
+    {
+      "id": "bug-061",
+      "timestamp": "2026-04-28T00:00:27+02:00",
+      "error_message": "User sent 'yo' to Codex GPT-5.5, then queued repeated 'y' prompts; Codex showed 'Turn never started' and 'Codex app-server exited without output'.",
+      "file": "src/hooks/useChatSend.ts, src-tauri/src/providers/codex.rs",
+      "root_cause": "Terminal 64 only marked a Codex chat streaming after provider events arrived, so fast follow-up sends were treated as new turns and each new app-server spawn killed the previous worker before it reached turn/start. The Codex 0.125 app-server contract also requires thread/start/resume booleans and turn text_elements that Terminal 64 omitted, making startup more fragile before a thread id was returned.",
+      "fix": "Set session streaming immediately when a provider send begins so extra prompts queue instead of replacing the worker; added required experimentalRawEvents=false and persistExtendedHistory=true to app-server thread params; added text_elements=[] and effort to turn/start params.",
+      "tags": [
+        "codex",
+        "app-server",
+        "queue",
+        "streaming",
+        "provider-runtime"
+      ],
+      "related_bugs": [
+        "bug-053",
+        "bug-060"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-062",
+      "timestamp": "2026-04-28T00:38:00+02:00",
+      "error_message": "npm run typecheck failed with missing names in src/hooks/useDelegationOrchestrator.ts and missing ProviderCreateRequest/ProviderSendRequest exports in src/lib/tauriApi.ts.",
+      "file": "src/hooks/useDelegationOrchestrator.ts, src/lib/tauriApi.ts",
+      "root_cause": "Concurrent provider runtime/IPC refactors removed or renamed direct IPC imports and generic provider IPC types while dependent files still referenced the old names.",
+    "fix": "Reported to the team because the failures were in files owned by concurrent Agent 1/Agent 2 work; after those concurrent provider runtime/IPC edits landed, npm run typecheck passed.",
+      "tags": [
+        "typescript",
+        "provider-runtime",
+        "ipc",
+        "concurrent-work"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-063",
+      "timestamp": "2026-04-28T00:39:00+02:00",
+      "error_message": "Isolated npx tsc check for src/lib/providerModularity.verification.ts failed with Property 'hot' does not exist on type 'ImportMeta'.",
+      "file": "src/stores/claudeStore.ts",
+      "root_cause": "The one-off tsc command did not load Vite client ambient types, while claudeStore references import.meta.hot.",
+      "fix": "Re-ran the isolated verification check with --types vite/client; the focused providerModularity.verification.ts compile check passed.",
+      "tags": [
+        "typescript",
+        "vite",
+        "verification"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-064",
+      "timestamp": "2026-04-27T22:39:08.971Z",
+      "error_message": "npm run build -- --noEmit failed with CACError: Unknown option `--noEmit`",
+      "file": "package.json",
+      "root_cause": "The project has a dedicated `typecheck` script for `tsc --noEmit`; passing --noEmit through Vite build is not supported.",
+      "fix": "Used `npm run typecheck` for TypeScript no-emit verification and `npm run build` for the production frontend build.",
+      "tags": [
+        "verification",
+        "typescript",
+        "vite"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27T22:39:08.971Z"
+    },
+    {
+      "id": "bug-065",
+      "timestamp": "2026-04-27T22:39:08.971Z",
+      "error_message": "cargo fmt --check failed after adding provider IPC helper functions",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "Manual Rust edits did not match rustfmt line wrapping for match arms and chained method calls.",
+      "fix": "Ran `cargo fmt`, then re-ran `cargo fmt --check` successfully.",
+      "tags": [
+        "verification",
+        "rustfmt",
+        "provider-ipc"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-27T22:39:08.971Z"
+    },
+    {
+      "id": "bug-066",
+      "timestamp": "2026-04-28T00:39:08+02:00",
+      "error_message": "Codex app-server startup/turn failures could hang or be hidden, and rapid second sends could kill an active app-server turn.",
+      "file": "src-tauri/src/providers/codex.rs",
+      "root_cause": "The app-server worker used blocking stdout reads with no startup deadline, marked turn_started immediately after writing turn/start instead of after an app-server response or notification, and removed/killed any existing instance for the same local session before spawning the next app-server process.",
+      "fix": "Added app-server startup and turn-start timeouts, JSON-RPC method-specific error messages, initialize protocol diagnostics, stronger thread id extraction, confirmed-turn tracking, and active-turn rejection for app-server transport while leaving legacy exec transport replacement behavior unchanged.",
+      "tags": [
+        "codex",
+        "app-server",
+        "lifecycle",
+        "json-rpc",
+        "timeout",
+        "concurrency"
+      ],
+      "related_bugs": [
+        "bug-061"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-067",
+      "timestamp": "2026-04-28T00:40:00+02:00",
+      "error_message": "npm run typecheck failed in ClaudeChat.tsx with missing provider/runtime names after concurrent frontend refactors.",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Concurrent provider routing changes removed or renamed direct Codex/Claude imports while remaining ClaudeChat call sites still referenced decodeCodexPermission, sendCodexPrompt, createCodexSession, sendClaudePrompt, history loaders, mapHistoryMessages, and ChatMessageData.",
+      "fix": "Reported the blocker in team chat; after concurrent frontend integration settled, reran npm run typecheck successfully.",
+      "tags": [
+        "typescript",
+        "provider-runtime",
+        "claude-chat",
+        "concurrent-work"
+      ],
+      "related_bugs": [
+        "bug-062"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-068",
+      "timestamp": "2026-04-28T00:52:00+02:00",
+      "error_message": "Integration verification initially ran cargo fmt --check from the repo root and jq '.[-3:]' against an object-shaped buglog.",
+      "file": ".wolf/buglog.json",
+      "root_cause": "Terminal 64's Rust crate lives under src-tauri, and .wolf/buglog.json stores entries under a top-level bugs array rather than as the root array.",
+      "fix": "Reran cargo fmt --check from src-tauri, inspected buglog structure directly, and recorded the command-shape gotcha for future sessions.",
+      "tags": [
+        "verification",
+        "openwolf",
+        "cargo",
+        "buglog"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-04-28"
     }
   ]
 }

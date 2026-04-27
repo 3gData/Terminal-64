@@ -1,31 +1,35 @@
 {
-  "generated_at": "2026-04-20T02:00:32.994Z",
+  "generated_at": "2026-04-27T02:00:42.981Z",
   "achievements": [
-    "Voice pipeline shipped: whisper.cpp dictation with Metal pre-warm, LocalAgreement-2 two-span render (committed/tentative), windowed 15s decode with watchdog, VAD hysteresis tuning",
-    "Jarvis wake/command flow: 'jarvis' as boundary token, command-mode pause-then-speak, trim 'jarvis...' from live partial display",
-    "Windows compatibility pass across backend (PATHEXT/cmd shims, reserved names), frontend (platform.ts), and bundle config (NSIS lzma, webview2 install)",
-    "Stability fixes: bash replay loop sanitization, heavy-output cap, rewind/fork JSONL audit (filtered leaf candidates, malformed-line tolerance), event parser ghost-spinner fix",
-    "UX polish: Escape closes dialogs, Settings z-index over widgets, Jarvis send snapshot-before-clear, chat bg flicker fix via compositor promotion"
+    "Shipped Windows compatibility pass across backend (PATHEXT/cmd shim, reserved-name sanitize), frontend (platform.ts, path helpers), and bundle config (NSIS lzma, webview2 min version)",
+    "Built end-to-end voice control: VAD hysteresis, whisper.cpp Metal-prewarmed dictation, LocalAgreement-2 two-span render (committed + tentative), windowed incremental decode with 500ms watchdog, jarvis-as-boundary command parsing",
+    "Reverse skill bridge syncs ~/.claude/skills into ~/.terminal64/skills with symlinks, sidecar metadata, and Haiku-backfilled descriptions",
+    "Big-workflow stability sweep: PTY/provider/permission/widget cleanup paths, JSONL truncate-by-message audit fixes, canvas/claude/delegation store persistence with idle/quota fallback",
+    "Renderer hot-path patch: chat drag-drop routed by cursor proximity, guarded pan/zoom subscriptions, embedded widget-browser RAF loop replaced with event-coalesced ResizeObserver",
+    "Event parser hardening: top-level error handler, stream_request_start, thinking-block aware deltas, stop_reason surface for refusal/max_tokens",
+    "Codex MCP connected-status mapping + dropdown dedupe of T64 aliases across live/config entries"
   ],
   "improvements": [
-    "Voice testkit (voice/testkit.rs) exists but no CI hook — wire voice_run_selftest + voice_run_fixtures into a smoke test target",
-    "scripts/ folder is untracked and contains a 9000+ file .wake-venv — add scripts/.wake-venv to .gitignore before it gets committed accidentally",
-    "/tmp/sanitize-jsonl.mjs has been 'session-end' written 9 times in a row (00:00–00:08) — likely a runaway hook or loop, investigate .wolf/hooks/_session.json",
-    "Anti-hallucination reconciliation in whisper.rs is load-bearing per CLAUDE.md but lacks regression tests — add fixture-based tests via testkit",
-    "docs/wake-training.md exists but train_wake.py/.sh are untracked — decide if wake-word custom training ships or stays internal"
+    "Dirty working tree across 22 files (browser_manager, lib.rs, permission_server, providers/*, pty_manager, widget_server, Canvas, ClaudeChat, XTerminal, BrowserPanel, WidgetPanel, useClaudeEvents, canvasStore, claudeStore, delegationStore) — split into reviewable commits before more work lands",
+    "lib.rs is ~70k tokens; the recent stability tests were placed there per buglog note — extract command handlers into per-domain modules (file_ops, history, checkpoints, theme, party) to reduce cognitive load and recompile times",
+    "Test coverage is thin given the surface area: only 8 intent tests + 7 command_stt tests + new JSONL/util guards. Add provider-event golden fixtures and a permission_server integration test",
+    "Voice subsystem has many tunable thresholds (VAD 0.5/0.35, silence frames 9, min_new_samples 120ms, decode watchdog 500ms) — promote to a single tuning struct + `voice_run_fixtures` regression run on PR",
+    "Memory/anatomy.md is dominated by venv contents — exclude scripts/.wake-venv/ from anatomy scanner to keep the index actionable"
   ],
   "next_tasks": [
-    "Commit or stash the 14 modified voice-related files (voice/adapters.rs, models.rs, testkit.rs, voice_manager.rs, ChatInput.tsx, VoiceLivePanel.tsx, useVoiceControl.ts, voiceApi.ts, voiceStore.ts) — currently dirty on master",
-    "Add scripts/.wake-venv/ and any python venv artifacts to .gitignore",
-    "Diagnose the repeating 00:00–00:08 'sanitize-jsonl.mjs' session-end log entries — possible daemon misfire",
-    "Document the Jarvis voice protocol (wake → command mode → keywords) in README or docs/ now that the UX is settled",
-    "Run voice_run_selftest at startup and surface a status badge if models fail to load (whisper, silero, wake)"
+    "Stage and commit the 22 dirty files in 3-4 logical commits: (a) backend lifecycle cleanup, (b) frontend hot-path + store persistence, (c) provider/event/MCP fixes, (d) widget/browser panel patches",
+    "Run cargo clippy --all-targets across the dirty Rust files; the 03:19 entry noted Clippy was blocked by parallel edits — confirm clean now before pushing",
+    "Verify CI invariants locally: tsc --noEmit, cargo fmt --check, cargo clippy -D warnings, cargo check for all 3 targets if possible",
+    "Backfill an integration test for the new permission_server pending-cleanup path (bug-046) — easy regression target",
+    "Add anatomy.md ignore rule for scripts/.wake-venv/** so future scans don't waste tokens on venv internals",
+    "Tag a release candidate once committed — release.yml is already wired for draft releases; signing is still TODO per CLAUDE.md so note that in the draft"
   ],
   "risks": [
-    "Untracked scripts/ directory (~5MB venv) risks being added via 'git add .' — large repo bloat",
-    "Voice features ship behind voice-dictation feature flag but it's on by default — Linux/Windows builds may break since whisper-rs Metal is macOS-only; verify CI matrix covers cfg-gated paths",
-    "Release signing still TODO (Apple notarytool, Azure Trusted Signing) per CLAUDE.md — every tagged release ships unsigned; users hit Gatekeeper",
-    "Live-work files (whisper.rs, useVoiceControl.ts) have been edited heavily this week — high risk of a subtle regression in the snapshot-before-clear or anti-hallucination logic",
-    "buglog.json shows bug-002 (fork regression from hasBeenStarted ordering) — pattern of state-flag ordering bugs; audit other started/loaded guards in claudeStore"
+    "Unsigned macOS/Windows builds — Apple notarytool + Azure Trusted Signing secrets still missing; first-launch UX is right-click→Open. Decide whether to ship vN unsigned or hold for signing keys",
+    "voice/whisper.rs is flagged as load-bearing in CLAUDE.md (anti-hallucination reconciliation); recent windowed-decode + AgreementBuffer rewrite is large and lightly tested — high risk of subtle regression in long-utterance dictation",
+    "permission_server, widget_server, PTY spawning, and Discord bot are the exposed surfaces in SECURITY.md; recent lifecycle fixes touched all four — schedule a focused security review (or run /security-review) before tagging",
+    "claudeStore + delegationStore now have quota-fallback persistence with pruning logic — if pruning is too aggressive, users lose session metadata silently. Add telemetry/log when prune fires",
+    "lib.rs concentration is a bus factor + merge-conflict risk; the 03:30 entry already had a duplicate buglog id from parallel agent edits — likely to repeat",
+    "Codex provider (~55k tok) is the largest single file and changed recently; provider events, rollback/fork, and exec transport in one module is hard to reason about for incident response"
   ]
 }

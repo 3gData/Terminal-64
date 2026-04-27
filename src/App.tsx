@@ -25,7 +25,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { closeTerminal, closeClaudeSession, closeCodexSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
 import { pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
-import { useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
 import { checkForUpdate, type UpdateInfo } from "./lib/updater";
 import "./App.css";
 
@@ -260,7 +260,7 @@ function App() {
         if (!currentIds.has(t.terminalId) && !t.poppedOut) {
           if (t.panelType === "claude") {
             const sess = useClaudeStore.getState().sessions[t.terminalId];
-            if (sess?.provider === "openai") {
+            if (resolveSessionProviderState(sess).provider === "openai") {
               closeCodexSession(t.terminalId).catch(() => {});
             } else {
               closeClaudeSession(t.terminalId).catch(() => {});

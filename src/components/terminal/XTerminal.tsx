@@ -90,7 +90,10 @@ export default function XTerminal({
       fitAddonRef.current?.fit();
     };
     applyZoom(useCanvasStore.getState().zoom);
-    return useCanvasStore.subscribe((s) => applyZoom(s.zoom));
+    return useCanvasStore.subscribe((s, prev) => {
+      if (s.zoom === prev.zoom) return;
+      applyZoom(s.zoom);
+    });
   }, []);
 
   // Apply theme + alpha changes to xterm

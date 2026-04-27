@@ -8,10 +8,12 @@ import {
   onCodexEvent,
   onCodexDone,
 } from "../lib/tauriApi";
-import { useClaudeStore, type ClaudeTask, type PendingQuestionItem } from "../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore, type ClaudeTask, type McpServerStatus, type PendingQuestionItem } from "../stores/claudeStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import type { ToolCall, HookEventPayload, HookEvent, HookEventType } from "../lib/types";
 import {
+  claudeBlockToProviderToolCall,
+  claudeBlockToProviderToolResult,
   getClaudeContextWindowForModel,
   type ClaudeContentBlock,
   type ClaudeQuestion,
@@ -21,10 +23,14 @@ import {
 } from "../lib/claudeEventDecoder";
 import {
   classifyCodexItem,
+  codexInputChangedPaths,
   codexItemDisplayName,
   codexItemInput,
   codexItemIsError,
   codexItemResultText,
+  codexItemToProviderToolCall,
+  codexItemToProviderToolPatch,
+  codexItemToProviderToolResult,
   getCodexContextWindow,
   type CodexNdjsonEvent,
   type CodexPendingItem,
@@ -79,6 +85,61 @@ const codexPending = new Map<string, Map<string, CodexPendingItem>>();
 const codexAssistantFinalized = new Set<string>();
 const codexParseErrorCounts = new Map<string, number>();
 
+function normalizeMcpServerStatus(raw: unknown): McpServerStatus | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const name = obj.name ?? obj.server ?? obj.serverName;
+  if (typeof name !== "string" || !name) return null;
+  const rawStatus = obj.status ?? obj.startupStatus;
+  const status = rawStatus === "ready" ? "connected" : String(rawStatus || "unknown");
+  const tools = Array.isArray(obj.tools) ? obj.tools.map((tool) => {
+    if (!tool || typeof tool !== "object") return { name: "" };
+    const t = tool as Record<string, unknown>;
+    return {
+      name: String(t.name || ""),
+      ...(t.description ? { description: String(t.description) } : {}),
+    };
+  }).filter((tool) => tool.name.length > 0) : undefined;
+  return {
+    name,
+    status,
+    ...(obj.error ? { error: String(obj.error) } : {}),
+    ...(obj.type || obj.transport ? { transport: String(obj.type || obj.transport) } : {}),
+    ...(obj.scope ? { scope: String(obj.scope) } : {}),
+    ...(tools ? { tools, toolCount: tools.length } : {}),
+  };
+}
+
+function mcpServerKey(name: string): string {
+  return name === "t64" || name === "terminal-64" ? "terminal-64" : name;
+}
+
+function mergeMcpServerStatuses(current: McpServerStatus[], incoming: McpServerStatus[]): McpServerStatus[] {
+  const merged = new Map<string, McpServerStatus>();
+  for (const server of current) {
+    merged.set(mcpServerKey(server.name), server);
+  }
+  for (const server of incoming) {
+    const key = mcpServerKey(server.name);
+    const previous = merged.get(key);
+    const next: McpServerStatus = {
+      ...previous,
+      ...server,
+      name: key === "terminal-64" ? "terminal-64" : server.name,
+    };
+    const transport = server.transport ?? previous?.transport;
+    if (transport) next.transport = transport;
+    const scope = server.scope ?? previous?.scope;
+    if (scope) next.scope = scope;
+    const tools = server.tools ?? previous?.tools;
+    if (tools) next.tools = tools;
+    const toolCount = server.toolCount ?? previous?.toolCount;
+    if (toolCount != null) next.toolCount = toolCount;
+    merged.set(key, next);
+  }
+  return Array.from(merged.values());
+}
+
 function getCodexItemMap(sessionId: string): Map<string, CodexPendingItem> {
   let map = codexPending.get(sessionId);
   if (!map) {
@@ -93,30 +154,6 @@ function appendOrReplaceAccumulated(prev: string, next: string): string {
   if (!prev) return next;
   if (next.startsWith(prev)) return next;
   return prev + next;
-}
-
-function codexChangedPaths(input: Record<string, unknown>): string[] {
-  const paths = new Set<string>();
-  for (const key of ["file_path", "path"]) {
-    const value = input[key];
-    if (typeof value === "string" && value.length > 0) paths.add(value);
-  }
-  if (Array.isArray(input.paths)) {
-    for (const path of input.paths) {
-      if (typeof path === "string" && path.length > 0) paths.add(path);
-    }
-  }
-  if (Array.isArray(input.changes)) {
-    for (const change of input.changes) {
-      if (!change || typeof change !== "object") continue;
-      const row = change as Record<string, unknown>;
-      for (const key of ["file_path", "path"]) {
-        const value = row[key];
-        if (typeof value === "string" && value.length > 0) paths.add(value);
-      }
-    }
-  }
-  return [...paths];
 }
 
 // RAF batching for streaming text — coalesces deltas into one store update per frame
@@ -183,9 +220,11 @@ function processContentArray(
     if (block.type === "text") {
       text += block.text;
     } else if (block.type === "tool_use") {
-      const name = block.name ?? "";
-      const blockId = block.id ?? "";
-      const input = block.input || {};
+      const toolCall = claudeBlockToProviderToolCall(block, block.parentToolUseId);
+      if (!toolCall) continue;
+      const name = toolCall.name;
+      const blockId = toolCall.id;
+      const input = toolCall.input;
       const toolMap = getSessionMap(sessionToolMaps, session_id);
       toolMap.set(blockId, name);
       evictIfNeeded(toolMap);
@@ -255,12 +294,7 @@ function processContentArray(
       }
 
       if (!HIDDEN_TOOLS.has(name)) {
-        toolCalls.push({
-          id: blockId,
-          name,
-          input,
-          ...(block.parentToolUseId !== undefined && { parentToolUseId: block.parentToolUseId }),
-        });
+        toolCalls.push(toolCall);
       }
     }
   }
@@ -340,20 +374,10 @@ export function useClaudeEvents() {
           const prevUsed = store.sessions[session_id]?.contextUsed || 0;
           store.setContextUsage(session_id, prevUsed, getClaudeContextWindowForModel(model));
           if (Array.isArray(parsed.mcp_servers)) {
-            store.setMcpServers(session_id, parsed.mcp_servers.map((s) => {
-              const tools = Array.isArray(s.tools) ? s.tools.map((t) => ({
-                name: String(t.name || ""),
-                ...(t.description ? { description: String(t.description) } : {}),
-              })) : undefined;
-              return {
-                name: String(s.name || ""),
-                status: String(s.status || "unknown"),
-                ...(s.error ? { error: String(s.error) } : {}),
-                ...(s.type || s.transport ? { transport: String(s.type || s.transport) } : {}),
-                ...(s.scope ? { scope: String(s.scope) } : {}),
-                ...(tools ? { tools, toolCount: tools.length } : {}),
-              };
-            }));
+            const servers = parsed.mcp_servers
+              .map((s) => normalizeMcpServerStatus(s))
+              .filter((s): s is McpServerStatus => s != null);
+            store.setMcpServers(session_id, mergeMcpServerStatuses([], servers));
           }
           return;
         }
@@ -528,7 +552,9 @@ export function useClaudeEvents() {
           if (Array.isArray(content)) {
             for (const block of content) {
               if (block.type === "tool_result") {
-                const toolId = block.tool_use_id || "";
+                const toolResult = claudeBlockToProviderToolResult(block);
+                if (!toolResult) continue;
+                const toolId = toolResult.id;
                 const toolName = getSessionMap(sessionToolMaps, session_id).get(toolId);
 
                 if (toolName === "TaskCreate" && block.content) {
@@ -550,20 +576,13 @@ export function useClaudeEvents() {
                 }
 
                 const filePath = getSessionMap(sessionFilePathMaps, session_id).get(toolId);
-                if (filePath && !block.is_error) {
+                if (filePath && !toolResult.isError) {
                   store.addModifiedFiles(session_id, [filePath]);
                 }
 
                 if (toolName && HIDDEN_TOOLS.has(toolName)) continue;
 
-                const resultText =
-                  typeof block.content === "string"
-                    ? block.content
-                    : Array.isArray(block.content)
-                      ? block.content.map((c: ClaudeContentBlock) => c.type === "text" ? c.text : JSON.stringify(c)).join("\n")
-                      : JSON.stringify(block.content);
-
-                store.updateToolResult(session_id, toolId, resultText, block.is_error || false);
+                store.updateToolResult(session_id, toolId, toolResult.result, toolResult.isError);
               }
             }
           }
@@ -721,6 +740,25 @@ export function useClaudeEvents() {
           return;
         }
 
+        if (type === "mcp.status.updated") {
+          const mcpEvent = parsed as CodexNdjsonEvent & Record<string, unknown>;
+          const rawServers: unknown[] = Array.isArray(mcpEvent.mcp_servers)
+            ? mcpEvent.mcp_servers
+            : Array.isArray(mcpEvent.servers)
+              ? mcpEvent.servers
+              : mcpEvent.server
+                ? [mcpEvent.server]
+                : [mcpEvent];
+          const incoming = rawServers
+            .map((server) => normalizeMcpServerStatus(server))
+            .filter((server): server is McpServerStatus => server != null);
+          if (incoming.length > 0) {
+            const current = store.sessions[session_id]?.mcpServers ?? [];
+            store.setMcpServers(session_id, mergeMcpServerStatuses(current, incoming));
+          }
+          return;
+        }
+
         if (type === "turn.started") {
           codexAssistantFinalized.delete(session_id);
           return;
@@ -734,7 +772,7 @@ export function useClaudeEvents() {
             const reportedWindow = typeof parsed.context_window === "number" && parsed.context_window > 0
               ? parsed.context_window
               : null;
-            const ctxMax = reportedWindow ?? getCodexContextWindow(sess?.selectedModel ?? sess?.model ?? null);
+            const ctxMax = reportedWindow ?? getCodexContextWindow(resolveSessionProviderState(sess).selectedModel ?? sess?.model ?? null);
             store.setContextUsage(session_id, Math.min(inputUsed, ctxMax), ctxMax);
           }
           return;
@@ -758,11 +796,8 @@ export function useClaudeEvents() {
           });
 
           if (kind === "tool") {
-            const toolCall: ToolCall = {
-              id: item.id,
-              name: codexItemDisplayName(item),
-              input: codexItemInput(item),
-            };
+            const toolCall = codexItemToProviderToolCall(item);
+            if (!toolCall) return;
             store.finalizeAssistantMessage(session_id, "", [toolCall]);
             codexAssistantFinalized.add(session_id);
           }
@@ -797,12 +832,10 @@ export function useClaudeEvents() {
               pendingText.set(session_id, existing + deltaText);
               scheduleFlush();
             } else if (tracked && tracked.kind === "tool") {
-              const input = codexItemInput(item);
+              const patch = codexItemToProviderToolPatch(item);
+              const input = patch.input ?? {};
               tracked.inputArgs = { ...tracked.inputArgs, ...input };
-              store.updateToolCall(session_id, item.id, {
-                name: codexItemDisplayName(item),
-                input,
-              });
+              store.updateToolCall(session_id, item.id, patch);
               const resultDelta = codexItemResultText(item);
               const hasResultDelta = resultDelta.length > 0 || codexItemIsError(item);
               if (hasResultDelta) {
@@ -811,7 +844,7 @@ export function useClaudeEvents() {
                     ? tracked.outputText + resultDelta
                     : appendOrReplaceAccumulated(tracked.outputText, resultDelta);
                 store.updateToolResult(session_id, item.id, tracked.outputText, codexItemIsError(item), {
-                  name: codexItemDisplayName(item),
+                  ...(patch.name !== undefined ? { name: patch.name } : {}),
                   input,
                 });
               }
@@ -866,29 +899,33 @@ export function useClaudeEvents() {
           } else if (kind === "tool") {
             const completedResult = codexItemResultText(item);
             const isError = codexItemIsError(item);
-            const completedInput = codexItemInput(item);
+            const completedPatch = codexItemToProviderToolPatch(item);
+            const completedInput = completedPatch.input ?? {};
             const patchedInput = tracked
               ? { ...tracked.inputArgs, ...completedInput }
               : completedInput;
-            const completedName = codexItemDisplayName(item);
+            const completedName = completedPatch.name ?? "";
             const completedInputIsEmpty = Object.keys(completedInput).length === 0;
             const patchedName = tracked?.toolName && (completedInputIsEmpty || completedName === "dynamic_tool_call")
               ? tracked.toolName
               : completedName || tracked?.toolName || "tool";
             if (!tracked) {
-              store.finalizeAssistantMessage(session_id, "", [{
-                id: item.id,
-                name: patchedName,
-                input: patchedInput,
-              }]);
+              const toolCall = codexItemToProviderToolCall(item);
+              if (toolCall) {
+                store.finalizeAssistantMessage(session_id, "", [{ ...toolCall, name: patchedName, input: patchedInput }]);
+              }
               codexAssistantFinalized.add(session_id);
             }
             const result = completedResult || tracked?.outputText || "";
-            store.updateToolResult(session_id, item.id, result, isError, {
-              name: patchedName,
+            const toolResult = codexItemToProviderToolResult(item, {
+              result,
               input: patchedInput,
+              name: patchedName,
             });
-            const changedPaths = !isError ? codexChangedPaths(patchedInput) : [];
+            if (toolResult) {
+              store.updateToolResult(session_id, toolResult.id, toolResult.result, isError, toolResult.patch);
+            }
+            const changedPaths = !isError ? codexInputChangedPaths(patchedInput) : [];
             if (changedPaths.length > 0) {
               store.addModifiedFiles(session_id, changedPaths);
             }
@@ -904,11 +941,8 @@ export function useClaudeEvents() {
         if (type === "tool_use" || type === "tool_call_begin") {
           const item = parsed.item || {};
           const id = item.id || parsed.thread_id || `${type}-${Date.now()}`;
-          const toolCall: ToolCall = {
-            id,
-            name: codexItemDisplayName(item),
-            input: codexItemInput(item),
-          };
+          const toolCall = codexItemToProviderToolCall(item, id);
+          if (!toolCall) return;
           store.finalizeAssistantMessage(session_id, "", [toolCall]);
           codexAssistantFinalized.add(session_id);
           return;
@@ -920,8 +954,9 @@ export function useClaudeEvents() {
           const result =
             (typeof parsed.output === "string" ? parsed.output : "") ||
             codexItemResultText(item);
-          const isError = codexItemIsError(item);
-          store.updateToolResult(session_id, id, result, isError);
+          const toolResult = codexItemToProviderToolResult(item, { id, result });
+          if (!toolResult) return;
+          store.updateToolResult(session_id, toolResult.id, toolResult.result, toolResult.isError, toolResult.patch);
           return;
         }
 
@@ -955,7 +990,7 @@ export function useClaudeEvents() {
           if (usage && typeof usage.input_tokens === "number") {
             const inputUsed = usage.input_tokens || 0;
             const ctxMax =
-              getCodexContextWindow(sess?.selectedModel ?? sess?.model ?? null);
+              getCodexContextWindow(resolveSessionProviderState(sess).selectedModel ?? sess?.model ?? null);
             store.setContextUsage(session_id, Math.min(inputUsed, ctxMax), ctxMax);
           }
           const completionError =

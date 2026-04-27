@@ -1,12 +1,13 @@
-// Provider-aware constants for the topbar dropdowns + session creation.
+// Provider registry for UI manifests + session defaults.
 //
-// Each provider has its own models / effort / permission-mode taxonomy.
-// The UI reads from PROVIDER_CONFIG[selectedProvider] so adding/removing
-// options for one provider doesn't ripple into the other.
+// Each provider owns its model, effort, permission, and capability surface.
+// UI components should read from this registry instead of branching on provider
+// ids for labels or feature availability.
 
 import type { PermissionMode } from "./types";
 
 export type ProviderId = "anthropic" | "openai";
+export type ProviderFeature = "mcp" | "plan" | "fork" | "rewind" | "images" | "hookLog";
 
 export interface ModelOption {
   id: string;
@@ -23,10 +24,31 @@ export interface PermissionOption {
   label: string;
   color: string;
   desc: string;
+  inputLabel?: string;
 }
 
-interface ProviderConfig {
+export interface ProviderCapabilities {
+  mcp: boolean;
+  plan: boolean;
+  fork: boolean;
+  rewind: boolean;
+  images: boolean;
+  hookLog: boolean;
+}
+
+export interface ProviderUiMetadata {
   label: string;
+  shortLabel: string;
+  defaultSessionName: string;
+  modelMenuLabel: string;
+  effortMenuLabel: string;
+  inputPermissionSuffix: string;
+}
+
+export interface ProviderManifest {
+  id: ProviderId;
+  ui: ProviderUiMetadata;
+  capabilities: ProviderCapabilities;
   models: ModelOption[];
   efforts: EffortOption[];
   permissions: PermissionOption[];
@@ -55,11 +77,11 @@ const ANTHROPIC_EFFORTS: EffortOption[] = [
 ];
 
 const ANTHROPIC_PERMISSIONS: PermissionOption[] = [
-  { id: "default", label: "Default", color: "#89b4fa", desc: "Ask before every tool" },
-  { id: "plan", label: "Plan", color: "#94e2d5", desc: "Read-only, no edits" },
-  { id: "auto", label: "Auto", color: "#a6e3a1", desc: "Auto-approve safe ops" },
-  { id: "accept_edits", label: "Edits", color: "#cba6f7", desc: "Auto-approve all edits" },
-  { id: "bypass_all", label: "YOLO", color: "#f38ba8", desc: "Skip ALL permissions" },
+  { id: "default", label: "Default", color: "#89b4fa", desc: "Ask before every tool", inputLabel: "ask permissions" },
+  { id: "plan", label: "Plan", color: "#94e2d5", desc: "Read-only, no edits", inputLabel: "plan mode" },
+  { id: "auto", label: "Auto", color: "#a6e3a1", desc: "Auto-approve safe ops", inputLabel: "auto-approve" },
+  { id: "accept_edits", label: "Edits", color: "#cba6f7", desc: "Auto-approve all edits", inputLabel: "auto-accept edits" },
+  { id: "bypass_all", label: "YOLO", color: "#f38ba8", desc: "Skip ALL permissions", inputLabel: "bypass permissions" },
 ];
 
 // Models accepted by `codex exec` with a ChatGPT (Plus/Pro) account, verified
@@ -105,9 +127,25 @@ const OPENAI_PERMISSIONS: PermissionOption[] = [
   { id: "yolo", label: "YOLO", color: "#f38ba8", desc: "No sandbox, no approvals" },
 ];
 
-export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
+export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
   anthropic: {
-    label: "Anthropic",
+    id: "anthropic",
+    ui: {
+      label: "Anthropic",
+      shortLabel: "Claude",
+      defaultSessionName: "Claude",
+      modelMenuLabel: "Model",
+      effortMenuLabel: "Effort",
+      inputPermissionSuffix: "on",
+    },
+    capabilities: {
+      mcp: true,
+      plan: true,
+      fork: true,
+      rewind: true,
+      images: true,
+      hookLog: true,
+    },
     models: ANTHROPIC_MODELS,
     efforts: ANTHROPIC_EFFORTS,
     permissions: ANTHROPIC_PERMISSIONS,
@@ -116,7 +154,23 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
     defaultPermission: "default",
   },
   openai: {
-    label: "OpenAI",
+    id: "openai",
+    ui: {
+      label: "OpenAI",
+      shortLabel: "Codex",
+      defaultSessionName: "Codex",
+      modelMenuLabel: "Model",
+      effortMenuLabel: "Effort",
+      inputPermissionSuffix: "sandbox",
+    },
+    capabilities: {
+      mcp: true,
+      plan: true,
+      fork: true,
+      rewind: true,
+      images: true,
+      hookLog: false,
+    },
     models: OPENAI_MODELS,
     efforts: OPENAI_EFFORTS,
     permissions: OPENAI_PERMISSIONS,
@@ -126,11 +180,21 @@ export const PROVIDER_CONFIG: Record<ProviderId, ProviderConfig> = {
   },
 };
 
+export const PROVIDER_CONFIG = PROVIDER_REGISTRY;
+
+export function getProviderManifest(provider: ProviderId): ProviderManifest {
+  return PROVIDER_REGISTRY[provider];
+}
+
+export function providerSupports(provider: ProviderId, feature: ProviderFeature): boolean {
+  return PROVIDER_REGISTRY[provider].capabilities[feature];
+}
+
 export function isCodexPermissionId(id: string): boolean {
-  return PROVIDER_CONFIG.openai.permissions.some((p) => p.id === id);
+  return PROVIDER_REGISTRY.openai.permissions.some((p) => p.id === id);
 }
 export function isClaudePermissionId(id: string): id is PermissionMode {
-  return PROVIDER_CONFIG.anthropic.permissions.some((p) => p.id === id);
+  return PROVIDER_REGISTRY.anthropic.permissions.some((p) => p.id === id);
 }
 
 /**

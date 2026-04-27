@@ -32,6 +32,10 @@ impl BrowserManager {
 
         let parsed: url::Url = url.parse().map_err(|e| format!("Invalid URL: {e}"))?;
 
+        // Reusing a panel id should replace the old child webview rather than
+        // leaving a stale native view alive behind a failed duplicate create.
+        let _ = self.close(app, &id);
+
         let app_clone = app.clone();
         let id_clone = id.clone();
 
@@ -136,8 +140,17 @@ impl BrowserManager {
             .iter()
             .cloned()
             .collect();
+        let mut stale = Vec::new();
         for id in ids {
-            let _ = self.set_visible(app, &id, visible);
+            if self.set_visible(app, &id, visible).is_err() {
+                stale.push(id);
+            }
+        }
+        if !stale.is_empty() {
+            self.active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|id| !stale.contains(id));
         }
     }
 }

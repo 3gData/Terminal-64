@@ -138,7 +138,13 @@ export interface ClaudeDone {
 
 // ── Codex (OpenAI Codex CLI) ──────────────────────────────
 
-export type { CreateCodexRequest, SendCodexPromptRequest } from "../contracts/providerIpc";
+export type {
+  CreateCodexRequest,
+  ProviderCreateRequest,
+  ProviderSendRequest,
+  ProviderSessionRequest,
+  SendCodexPromptRequest,
+} from "../contracts/providerIpc";
 
 export interface CodexEvent {
   session_id: string;

@@ -61,9 +61,11 @@ export default function BrowserPanel({ browserId, initialUrl }: BrowserPanelProp
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
+    let disposed = false;
 
     // Small delay to let the panel render and position itself
     const timer = setTimeout(() => {
+      if (disposed) return;
       const rect = el.getBoundingClientRect();
       const startUrl = normalizeUrl(url);
       if (!startUrl) return;
@@ -71,16 +73,24 @@ export default function BrowserPanel({ browserId, initialUrl }: BrowserPanelProp
       setLoading(true);
       createBrowser(browserId, startUrl, rect.x, rect.y, rect.width, rect.height)
         .then(() => {
+          if (disposed) {
+            closeBrowser(browserId).catch(() => {});
+            return;
+          }
           setCreated(true);
           setLoading(false);
         })
         .catch((err) => {
+          if (disposed) return;
           console.warn("[browser] Failed to create:", err);
           setLoading(false);
         });
     }, 100);
 
-    return () => clearTimeout(timer);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
   }, [browserId]); // Only on mount
 
   // Destroy the native webview on unmount

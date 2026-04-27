@@ -96,7 +96,10 @@ use discord_bot::DiscordBot;
 use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
-use providers::{ClaudeAdapter, CodexAdapter, ProviderKind, ProviderRegistry};
+use providers::{
+    ClaudeAdapter, CodexAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderRegistry,
+    ProviderSendPromptRequest,
+};
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -205,16 +208,9 @@ fn check_rewrite_size_limit(path: &std::path::Path) -> Result<Option<u64>, Strin
 
 struct AppState {
     pty_manager: PtyManager,
-    // Provider registry holds every CLI adapter (Claude today, Codex/Cursor
-    // later) behind `Arc<dyn ProviderAdapter>`. Tauri commands that need
-    // Claude-specific helpers (`create_session`, `send_prompt`, `cancel`,
-    // `close`) reach for the typed `claude` handle below; the registry
-    // exists for future provider-agnostic dispatch.
-    // Held to keep the trait-object map alive for future Codex/Cursor
-    // dispatch; Tauri commands today reach for the typed `claude` handle.
-    #[allow(dead_code)]
+    // Provider registry owns CLI adapters behind a small command boundary for
+    // today's create/send/cancel/close IPCs plus the future normalized trait.
     providers: Arc<ProviderRegistry>,
-    claude: Arc<ClaudeAdapter>,
     codex: Arc<CodexAdapter>,
     discord_bot: Mutex<DiscordBot>,
     permission_server: Arc<PermissionServer>,
@@ -304,6 +300,245 @@ fn cli_permission_mode(mode: &str) -> &str {
     }
 }
 
+fn provider_kind_from_frontend_id(provider: &str) -> Result<ProviderKind, String> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude" | "claude_agent" | "claudeagent" => Ok(ProviderKind::ClaudeAgent),
+        "openai" | "codex" => Ok(ProviderKind::Codex),
+        "cursor" => Ok(ProviderKind::Cursor),
+        "opencode" | "open_code" => Ok(ProviderKind::OpenCode),
+        other => Err(format!("Unknown provider '{}'", other)),
+    }
+}
+
+fn provider_create_impl(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    provider: &str,
+    req: serde_json::Value,
+    openwolf_enabled: Option<bool>,
+    openwolf_auto_init: Option<bool>,
+    openwolf_design_qc: Option<bool>,
+) -> Result<String, String> {
+    match provider_kind_from_frontend_id(provider)? {
+        ProviderKind::ClaudeAgent => {
+            let mut req: CreateClaudeRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid Anthropic create request: {}", e))?;
+            if req.session_id.trim().is_empty() {
+                req.session_id = uuid::Uuid::new_v4().to_string();
+            }
+            let cli_mode = cli_permission_mode(&req.permission_mode);
+            let registration = state
+                .permission_server
+                .register_session(&req.session_id, cli_mode)
+                .ok();
+            let settings_path = registration
+                .as_ref()
+                .map(|(_, s, _)| s.to_string_lossy().to_string());
+            let approver_path = registration
+                .as_ref()
+                .map(|(_, _, m)| m.to_string_lossy().to_string());
+            maybe_apply_openwolf(
+                &settings_path,
+                &req.cwd,
+                openwolf_enabled.unwrap_or(false),
+                openwolf_auto_init.unwrap_or(true),
+                openwolf_design_qc.unwrap_or(false),
+            );
+            let channel = req.channel_server.clone();
+            // Returns the resolved session UUID so the frontend can adopt the
+            // backend-generated id (when it sent an empty one) without waiting
+            // for the first `system/init` stream event.
+            let result = state.providers.create_session(
+                ProviderKind::ClaudeAgent,
+                app_handle,
+                ProviderCreateSessionRequest::Claude {
+                    req,
+                    settings_path,
+                    approver_mcp_config: approver_path,
+                    channel_server: channel,
+                },
+            );
+            if result.is_err() {
+                if let Some((token, _, _)) = &registration {
+                    state.permission_server.unregister_session(token);
+                }
+            }
+            result
+        }
+        ProviderKind::Codex => {
+            let req: CreateCodexRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid OpenAI create request: {}", e))?;
+            maybe_apply_openwolf(
+                &None,
+                &req.cwd,
+                openwolf_enabled.unwrap_or(false),
+                openwolf_auto_init.unwrap_or(true),
+                openwolf_design_qc.unwrap_or(false),
+            );
+            state.providers.create_session(
+                ProviderKind::Codex,
+                app_handle,
+                ProviderCreateSessionRequest::Codex { req },
+            )
+        }
+        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
+            "Provider {:?} is known but does not have a create IPC binding yet",
+            provider_kind_from_frontend_id(provider)?
+        )),
+    }
+}
+
+fn provider_send_impl(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    provider: &str,
+    req: serde_json::Value,
+    openwolf_enabled: Option<bool>,
+    openwolf_auto_init: Option<bool>,
+    openwolf_design_qc: Option<bool>,
+) -> Result<(), String> {
+    match provider_kind_from_frontend_id(provider)? {
+        ProviderKind::ClaudeAgent => {
+            let req: SendClaudePromptRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid Anthropic send request: {}", e))?;
+            let cli_mode = cli_permission_mode(&req.permission_mode);
+            let registration = state
+                .permission_server
+                .register_session(&req.session_id, cli_mode)
+                .ok();
+            let settings_path = registration
+                .as_ref()
+                .map(|(_, s, _)| s.to_string_lossy().to_string());
+            let approver_path = registration
+                .as_ref()
+                .map(|(_, _, m)| m.to_string_lossy().to_string());
+            maybe_apply_openwolf(
+                &settings_path,
+                &req.cwd,
+                openwolf_enabled.unwrap_or(false),
+                openwolf_auto_init.unwrap_or(true),
+                openwolf_design_qc.unwrap_or(false),
+            );
+            let channel = req.channel_server.clone();
+            let result = state.providers.send_prompt(
+                ProviderKind::ClaudeAgent,
+                app_handle,
+                ProviderSendPromptRequest::Claude {
+                    req,
+                    settings_path,
+                    approver_mcp_config: approver_path,
+                    channel_server: channel,
+                },
+            );
+            if result.is_err() {
+                if let Some((token, _, _)) = &registration {
+                    state.permission_server.unregister_session(token);
+                }
+            }
+            result
+        }
+        ProviderKind::Codex => {
+            let req: SendCodexPromptRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid OpenAI send request: {}", e))?;
+            maybe_apply_openwolf(
+                &None,
+                &req.cwd,
+                openwolf_enabled.unwrap_or(false),
+                openwolf_auto_init.unwrap_or(true),
+                openwolf_design_qc.unwrap_or(false),
+            );
+            state.providers.send_prompt(
+                ProviderKind::Codex,
+                app_handle,
+                ProviderSendPromptRequest::Codex { req },
+            )
+        }
+        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
+            "Provider {:?} is known but does not have a send IPC binding yet",
+            provider_kind_from_frontend_id(provider)?
+        )),
+    }
+}
+
+#[tauri::command]
+fn provider_create(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    provider: String,
+    req: serde_json::Value,
+    openwolf_enabled: Option<bool>,
+    openwolf_auto_init: Option<bool>,
+    openwolf_design_qc: Option<bool>,
+) -> Result<String, String> {
+    provider_create_impl(
+        state.inner(),
+        &app_handle,
+        &provider,
+        req,
+        openwolf_enabled,
+        openwolf_auto_init,
+        openwolf_design_qc,
+    )
+}
+
+#[tauri::command]
+fn provider_send(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    provider: String,
+    req: serde_json::Value,
+    openwolf_enabled: Option<bool>,
+    openwolf_auto_init: Option<bool>,
+    openwolf_design_qc: Option<bool>,
+) -> Result<(), String> {
+    provider_send_impl(
+        state.inner(),
+        &app_handle,
+        &provider,
+        req,
+        openwolf_enabled,
+        openwolf_auto_init,
+        openwolf_design_qc,
+    )
+}
+
+#[tauri::command]
+fn provider_cancel(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    session_id: String,
+) -> Result<(), String> {
+    let kind = provider_kind_from_frontend_id(&provider)?;
+    state.providers.cancel_session(kind, &session_id)
+}
+
+#[tauri::command]
+fn provider_close(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    session_id: String,
+) -> Result<(), String> {
+    let kind = provider_kind_from_frontend_id(&provider)?;
+    if kind == ProviderKind::ClaudeAgent {
+        // Clean up permission server temp files for this session.
+        let tokens_to_remove: Vec<String> = {
+            let map = state
+                .permission_server
+                .session_map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.iter()
+                .filter(|(_, sid)| **sid == session_id)
+                .map(|(t, _)| t.clone())
+                .collect()
+        };
+        for token in tokens_to_remove {
+            state.permission_server.unregister_session(&token);
+        }
+    }
+    state.providers.close_session(kind, &session_id)
+}
+
 #[tauri::command]
 fn create_claude_session(
     state: tauri::State<'_, AppState>,
@@ -313,31 +548,16 @@ fn create_claude_session(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<String, String> {
-    let cli_mode = cli_permission_mode(&req.permission_mode);
-    let registration = state
-        .permission_server
-        .register_session(&req.session_id, cli_mode)
-        .ok();
-    let settings_path = registration
-        .as_ref()
-        .map(|(_, s, _)| s.to_string_lossy().to_string());
-    let approver_path = registration
-        .as_ref()
-        .map(|(_, _, m)| m.to_string_lossy().to_string());
-    maybe_apply_openwolf(
-        &settings_path,
-        &req.cwd,
-        openwolf_enabled.unwrap_or(false),
-        openwolf_auto_init.unwrap_or(true),
-        openwolf_design_qc.unwrap_or(false),
-    );
-    let channel = req.channel_server.clone();
-    // Returns the resolved session UUID so the frontend can adopt the
-    // backend-generated id (when it sent an empty one) without waiting for
-    // the first `system/init` stream event.
-    state
-        .claude
-        .create_session(&app_handle, req, settings_path, approver_path, channel)
+    let req = serde_json::to_value(req).map_err(|e| format!("serialize Claude request: {}", e))?;
+    provider_create_impl(
+        state.inner(),
+        &app_handle,
+        "anthropic",
+        req,
+        openwolf_enabled,
+        openwolf_auto_init,
+        openwolf_design_qc,
+    )
 }
 
 #[tauri::command]
@@ -349,33 +569,21 @@ fn send_claude_prompt(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    let cli_mode = cli_permission_mode(&req.permission_mode);
-    let registration = state
-        .permission_server
-        .register_session(&req.session_id, cli_mode)
-        .ok();
-    let settings_path = registration
-        .as_ref()
-        .map(|(_, s, _)| s.to_string_lossy().to_string());
-    let approver_path = registration
-        .as_ref()
-        .map(|(_, _, m)| m.to_string_lossy().to_string());
-    maybe_apply_openwolf(
-        &settings_path,
-        &req.cwd,
-        openwolf_enabled.unwrap_or(false),
-        openwolf_auto_init.unwrap_or(true),
-        openwolf_design_qc.unwrap_or(false),
-    );
-    let channel = req.channel_server.clone();
-    state
-        .claude
-        .send_prompt(&app_handle, req, settings_path, approver_path, channel)
+    let req = serde_json::to_value(req).map_err(|e| format!("serialize Claude request: {}", e))?;
+    provider_send_impl(
+        state.inner(),
+        &app_handle,
+        "anthropic",
+        req,
+        openwolf_enabled,
+        openwolf_auto_init,
+        openwolf_design_qc,
+    )
 }
 
 #[tauri::command]
 fn cancel_claude(state: tauri::State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.claude.cancel(&session_id)
+    provider_cancel(state, "anthropic".to_string(), session_id)
 }
 
 #[tauri::command]
@@ -383,22 +591,7 @@ fn close_claude_session(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<(), String> {
-    // Clean up permission server temp files for this session
-    let tokens_to_remove: Vec<String> = {
-        let map = state
-            .permission_server
-            .session_map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        map.iter()
-            .filter(|(_, sid)| **sid == session_id)
-            .map(|(t, _)| t.clone())
-            .collect()
-    };
-    for token in tokens_to_remove {
-        state.permission_server.unregister_session(&token);
-    }
-    state.claude.close(&session_id)
+    provider_close(state, "anthropic".to_string(), session_id)
 }
 
 // ── Codex (OpenAI Codex CLI) ────────────────────────────────
@@ -418,14 +611,16 @@ fn create_codex_session(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<String, String> {
-    maybe_apply_openwolf(
-        &None,
-        &req.cwd,
-        openwolf_enabled.unwrap_or(false),
-        openwolf_auto_init.unwrap_or(true),
-        openwolf_design_qc.unwrap_or(false),
-    );
-    state.codex.create_session(&app_handle, req)
+    let req = serde_json::to_value(req).map_err(|e| format!("serialize Codex request: {}", e))?;
+    provider_create_impl(
+        state.inner(),
+        &app_handle,
+        "openai",
+        req,
+        openwolf_enabled,
+        openwolf_auto_init,
+        openwolf_design_qc,
+    )
 }
 
 #[tauri::command]
@@ -437,19 +632,21 @@ fn send_codex_prompt(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    maybe_apply_openwolf(
-        &None,
-        &req.cwd,
-        openwolf_enabled.unwrap_or(false),
-        openwolf_auto_init.unwrap_or(true),
-        openwolf_design_qc.unwrap_or(false),
-    );
-    state.codex.send_prompt(&app_handle, req)
+    let req = serde_json::to_value(req).map_err(|e| format!("serialize Codex request: {}", e))?;
+    provider_send_impl(
+        state.inner(),
+        &app_handle,
+        "openai",
+        req,
+        openwolf_enabled,
+        openwolf_auto_init,
+        openwolf_design_qc,
+    )
 }
 
 #[tauri::command]
 fn cancel_codex(state: tauri::State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.codex.cancel(&session_id)
+    provider_cancel(state, "openai".to_string(), session_id)
 }
 
 #[tauri::command]
@@ -457,7 +654,7 @@ fn close_codex_session(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<(), String> {
-    state.codex.close(&session_id)
+    provider_close(state, "openai".to_string(), session_id)
 }
 
 #[tauri::command]
@@ -3391,7 +3588,11 @@ fn list_widget_folders() -> Result<Vec<serde_json::Value>, String> {
 }
 
 #[tauri::command]
-fn delete_widget_folder(widget_id: String) -> Result<(), String> {
+fn delete_widget_folder(
+    state: tauri::State<'_, AppState>,
+    widget_id: String,
+) -> Result<(), String> {
+    state.widget_server.invalidate_widget(&widget_id);
     let dir = widgets_base_dir()?.join(&widget_id);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("rm: {}", e))?;
@@ -3400,7 +3601,10 @@ fn delete_widget_folder(widget_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn install_widget_zip(zip_path: String) -> Result<String, String> {
+fn install_widget_zip(
+    state: tauri::State<'_, AppState>,
+    zip_path: String,
+) -> Result<String, String> {
     let src = std::path::Path::new(&zip_path);
     if !src.exists() {
         return Err(format!("File not found: {}", zip_path));
@@ -3441,6 +3645,7 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
     };
 
     let dest = widgets_base_dir()?.join(&widget_id);
+    state.widget_server.invalidate_widget(&widget_id);
     if dest.exists() {
         std::fs::remove_dir_all(&dest).map_err(|e| format!("cleanup: {}", e))?;
     }
@@ -3504,6 +3709,7 @@ fn install_widget_zip(zip_path: String) -> Result<String, String> {
         }
     }
 
+    state.widget_server.invalidate_widget(&widget_id);
     Ok(widget_id)
 }
 
@@ -5291,9 +5497,6 @@ pub fn run() {
             })?;
             let mic_mgr = MicManager::new();
             let voice_mgr = VoiceManager::new(Arc::clone(&mic_mgr));
-            // The Claude adapter is held both as a typed `Arc<ClaudeAdapter>`
-            // (for inherent IPC-shaped methods) and as `Arc<dyn ProviderAdapter>`
-            // inside the registry. Same instance, two views.
             let claude_adapter = Arc::new(ClaudeAdapter::new());
             let codex_adapter = Arc::new(CodexAdapter::new());
             let mut registry = ProviderRegistry::new();
@@ -5308,7 +5511,6 @@ pub fn run() {
             app.manage(AppState {
                 pty_manager: PtyManager::new(),
                 providers: Arc::new(registry),
-                claude: claude_adapter,
                 codex: codex_adapter,
                 discord_bot: Mutex::new(DiscordBot::new()),
                 permission_server: Arc::new(perm_server),
@@ -5373,6 +5575,10 @@ pub fn run() {
             write_terminal,
             resize_terminal,
             close_terminal,
+            provider_create,
+            provider_send,
+            provider_cancel,
+            provider_close,
             create_claude_session,
             send_claude_prompt,
             cancel_claude,
@@ -5492,4 +5698,78 @@ pub fn run() {
             safe_eprintln!("[fatal] tauri runtime error: {}", e);
             std::process::exit(1);
         });
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod stability_tests {
+    use super::*;
+
+    fn temp_file_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "terminal64-{}-{}-{}",
+            name,
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn rewrite_size_limit_rejects_pathological_jsonl_before_full_read() {
+        let path = temp_file_path("oversized-jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_REWRITE_BYTES + 1).unwrap();
+
+        let err = check_rewrite_size_limit(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(err.contains("jsonl_too_large"));
+        assert!(err.contains("refusing to load entire file into memory"));
+    }
+
+    #[test]
+    fn tail_reader_keeps_complete_trailing_lines_and_drops_inflight_tail() {
+        let path = temp_file_path("tail-lines");
+        std::fs::write(&path, "one\ntwo\nthree\npartial").unwrap();
+
+        let lines = read_jsonl_tail_lines(&path, 2).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(lines, vec!["two".to_string(), "three".to_string()]);
+    }
+
+    #[test]
+    fn tail_reader_strips_bom_when_window_reaches_file_start() {
+        let path = temp_file_path("tail-bom");
+        std::fs::write(
+            &path,
+            "\u{FEFF}{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n",
+        )
+        .unwrap();
+
+        let lines = read_jsonl_tail_lines(&path, 10).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("{\"type\":\"user\"}")
+        );
+    }
+
+    #[test]
+    fn history_parser_merges_tool_results_without_emitting_tool_result_messages() {
+        let lines = [
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-04-27T00:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"printf hi"}}]}}"#,
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-04-27T00:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"hi","is_error":false}]}}"#,
+            "not-json",
+        ];
+
+        let messages = parse_session_history_lines(lines);
+
+        assert_eq!(messages.len(), 1);
+        let tool_calls = messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].result.as_deref(), Some("hi"));
+        assert!(!tool_calls[0].is_error);
+    }
 }

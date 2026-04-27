@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { truncateProviderHistory } from "../lib/providerRuntime";
-import { useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import type { ProviderId } from "../lib/providers";
 import type { ProviderHistoryTruncateInput } from "../contracts/providerRuntime";
 
@@ -19,6 +19,7 @@ export function useChatRewind() {
     keepMessages,
   }: RewindHistoryInput) => {
     const session = useClaudeStore.getState().sessions[sessionId];
+    const codexThreadId = resolveSessionProviderState(session).openai?.codexThreadId ?? null;
     const input: ProviderHistoryTruncateInput = {
       provider,
       sessionId,
@@ -26,12 +27,10 @@ export function useChatRewind() {
       keepMessages,
       preMessages: session?.messages ?? [],
     };
-    if (session?.codexThreadId !== undefined) {
-      input.codexThreadId = session.codexThreadId;
+    if (codexThreadId !== undefined) {
+      input.codexThreadId = codexThreadId;
     }
     const result = await truncateProviderHistory(input);
-    if (result.resumeAtUuid) {
-      useClaudeStore.getState().setResumeAtUuid(sessionId, result.resumeAtUuid);
-    }
+    useClaudeStore.getState().setResumeAtUuid(sessionId, result.resumeAtUuid ?? null);
   }, []);
 }

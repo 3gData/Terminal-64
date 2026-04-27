@@ -3,7 +3,8 @@ use crate::types::*;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 pub type TerminalId = String;
@@ -12,16 +13,19 @@ struct PtyInstance {
     writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send>,
+    generation: u64,
 }
 
 pub struct PtyManager {
-    instances: Mutex<HashMap<TerminalId, PtyInstance>>,
+    instances: Arc<Mutex<HashMap<TerminalId, PtyInstance>>>,
 }
+
+static PTY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl PtyManager {
     pub fn new() -> Self {
         Self {
-            instances: Mutex::new(HashMap::new()),
+            instances: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -82,29 +86,39 @@ impl PtyManager {
 
         let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-
-        // Start reader thread
-        let terminal_id = req.id.clone();
-        let handle = app_handle.clone();
-        std::thread::spawn(move || {
-            Self::reader_loop(handle, terminal_id, reader);
-        });
+        let generation = PTY_GENERATION.fetch_add(1, Ordering::Relaxed);
 
         let instance = PtyInstance {
             writer,
             master: pair.master,
             _child: child,
+            generation,
         };
 
         self.instances
             .lock()
             .map_err(|e| e.to_string())?
-            .insert(req.id, instance);
+            .insert(req.id.clone(), instance);
+
+        // Start reader thread after the map insert so a fast shell exit cannot
+        // race ahead and leave a stale instance behind.
+        let terminal_id = req.id.clone();
+        let handle = app_handle.clone();
+        let instances = Arc::clone(&self.instances);
+        std::thread::spawn(move || {
+            Self::reader_loop(handle, terminal_id, generation, reader, instances);
+        });
 
         Ok(())
     }
 
-    fn reader_loop(app_handle: AppHandle, terminal_id: String, mut reader: Box<dyn Read + Send>) {
+    fn reader_loop(
+        app_handle: AppHandle,
+        terminal_id: String,
+        generation: u64,
+        mut reader: Box<dyn Read + Send>,
+        instances: Arc<Mutex<HashMap<TerminalId, PtyInstance>>>,
+    ) {
         safe_eprintln!("[pty] Reader thread started for {}", terminal_id);
         let mut buf = [0u8; 4096];
         let mut total_bytes = 0usize;
@@ -137,13 +151,26 @@ impl PtyManager {
                 }
             }
         }
-        let _ = app_handle.emit(
-            "terminal-exit",
-            TerminalExit {
-                id: terminal_id,
-                code: None,
+        let is_current = match instances.lock() {
+            Ok(mut instances) => match instances.get(&terminal_id) {
+                Some(instance) if instance.generation == generation => {
+                    instances.remove(&terminal_id);
+                    true
+                }
+                Some(_) => false,
+                None => true,
             },
-        );
+            Err(_) => true,
+        };
+        if is_current {
+            let _ = app_handle.emit(
+                "terminal-exit",
+                TerminalExit {
+                    id: terminal_id,
+                    code: None,
+                },
+            );
+        }
     }
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
@@ -172,8 +199,8 @@ impl PtyManager {
     }
 
     pub fn close(&self, id: &str) -> Result<(), String> {
-        let mut instances = self.instances.lock().map_err(|e| e.to_string())?;
-        if let Some(mut instance) = instances.remove(id) {
+        let instance = self.instances.lock().map_err(|e| e.to_string())?.remove(id);
+        if let Some(mut instance) = instance {
             let _ = instance._child.kill();
             let _ = instance._child.wait();
         }

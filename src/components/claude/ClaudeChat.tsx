@@ -1,24 +1,24 @@
-import { useEffect, useLayoutEffect, useRef, useCallback, useState, useMemo } from "react";
-import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useRef, useCallback, useState, useMemo } from "react";
+import type { LegendListRef } from "@legendapp/list/react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { resolveSessionProviderState, selectSessionProvider, useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
 import { useShallow } from "zustand/react/shallow";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useThemeStore } from "../../stores/themeStore";
-import { createClaudeSession, sendClaudePrompt, cancelClaude, closeClaudeSession, createCodexSession, sendCodexPrompt, cancelCodex, closeCodexSession, loadCodexSessionHistory, listSlashCommands, resolvePermission, readFile, readFileBase64, writeFile, loadSessionHistoryTail, mapHistoryMessages, findRewindUuid, truncateSessionJsonlByMessages, truncateCodexRollout, forkSessionJsonl, listMcpServers, createCheckpoint, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, ensureT64Mcp, ensureCodexMcp, ensureCodexSkills, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, savePastedImage, resolveSkillPrompt } from "../../lib/tauriApi";
-import type { SlashCommand, PermissionMode, McpServer, HookEvent, ChatMessage as ChatMessageData, ToolCall, CreateCodexRequest, SendCodexPromptRequest } from "../../lib/types";
-import { decodeCodexPermission, type ProviderId } from "../../lib/providers";
-import type { McpServerStatus } from "../../stores/claudeStore";
+import { listSlashCommands, resolvePermission, readFile, writeFile, listMcpServers, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, resolveSkillPrompt } from "../../lib/tauriApi";
+import type { SlashCommand, PermissionMode, McpServer, HookEvent } from "../../lib/types";
+import { getProviderManifest, providerSupports, type ProviderId } from "../../lib/providers";
 import { rewritePromptStream } from "../../lib/ai";
-import ChatMessage, { toolHeader, renderContent, ToolGroupCard, GROUPABLE_TOOLS } from "./ChatMessage";
-import Editor from "@monaco-editor/react";
+import { toolHeader } from "./ChatMessage";
 import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
 import { CLAUDE_BUILTIN_COMMANDS } from "../../lib/claudeSlashCommands";
 import ChatInput from "./ChatInput";
-import PromptIsland from "./PromptIsland";
+import ProviderControls, { buildProviderPermissionInputProps } from "./ProviderControls";
+import ChatEditOverlay, { useChatEditOverlay } from "./ChatEditOverlay";
+import ChatMessageList from "./ChatMessageList";
+import { findPromptVisualRowIndex, useChatRows } from "./useChatRows";
+import { PlanFinishedActions, PlanViewer } from "./PlanViewer";
+import { parseCodexPlanCommand, useChatPlanMode } from "./useChatPlanMode";
 import { registerChatInputVoiceActions, unregisterChatInputVoiceActions, useVoiceStore, type ChatInputVoiceActions } from "../../stores/voiceStore";
 import { useDelegationStore } from "../../stores/delegationStore";
 import { endDelegation } from "../../hooks/useDelegationOrchestrator";
@@ -26,26 +26,19 @@ import { useChatSend } from "../../hooks/useChatSend";
 import { useChatFork } from "../../hooks/useChatFork";
 import { useChatRewind } from "../../hooks/useChatRewind";
 import { useDelegationSpawn } from "../../hooks/useDelegationSpawn";
+import { useChatAttachments } from "../../hooks/useChatAttachments";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { v4 as uuidv4 } from "uuid";
-import { formatDuration } from "../../lib/constants";
-import { baseName, dirName, isAbsolutePath, joinPath } from "../../lib/platform";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-} from "../ui/DropdownMenu";
+import { baseName, dirName } from "../../lib/platform";
 import "./ClaudeChat.css";
 import "../ui/DropdownMenu.css";
-import { cancelProviderSession, closeProviderSession } from "../../lib/providerRuntime";
+import { cancelProviderSession, closeProviderSession, hydrateProviderHistory, runProviderTurn } from "../../lib/providerRuntime";
+import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 
 // Provider lookup. `provider` is non-optional on ClaudeSession but the
 // fallback covers the brief window between mount and createSession.
 function sessionProviderFor(sessionId: string): ProviderId {
-  return useClaudeStore.getState().sessions[sessionId]?.provider ?? "anthropic";
+  return selectSessionProvider(sessionId);
 }
 
 async function cancelByProvider(sessionId: string, provider: ProviderId): Promise<void> {
@@ -56,7 +49,56 @@ async function closeByProvider(sessionId: string, provider: ProviderId): Promise
   return closeProviderSession(sessionId, provider);
 }
 
-let monacoThemeForBg = "";
+function providerTurnForSession({
+  sessionId,
+  session,
+  cwd,
+  prompt,
+  permissionMode,
+  selectedModel,
+  selectedEffort,
+  defaultCodexPermission = "workspace",
+  disallowedTools,
+}: {
+  sessionId: string;
+  session: ClaudeSession;
+  cwd: string;
+  prompt: string;
+  permissionMode: PermissionMode;
+  selectedModel?: string | null;
+  selectedEffort?: string | null;
+  defaultCodexPermission?: string;
+  disallowedTools?: string;
+}): ProviderTurnInput {
+  const providerState = resolveSessionProviderState(session);
+  const input: ProviderTurnInput = {
+    provider: providerState.provider,
+    sessionId,
+    cwd,
+    prompt,
+    started: session.hasBeenStarted,
+    threadId: providerState.openai?.codexThreadId ?? null,
+    selectedModel: selectedModel ?? providerState.selectedModel,
+    selectedEffort: selectedEffort ?? providerState.selectedEffort,
+    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? defaultCodexPermission,
+    permissionMode,
+    skipOpenwolf: session.skipOpenwolf,
+    seedTranscript: providerState.seedTranscript,
+    resumeAtUuid: session.resumeAtUuid ?? null,
+    forkParentSessionId: session.forkParentSessionId ?? null,
+  };
+  if (disallowedTools !== undefined) {
+    input.disallowedTools = disallowedTools;
+  }
+  return input;
+}
+
+function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
+  const store = useClaudeStore.getState();
+  if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
+  if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
+  if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
+}
 
 const REWIND_ACTION_META: Record<string, { label: string; color: string }> = {
   M: { label: "M", color: "#f9e2af" },
@@ -65,24 +107,6 @@ const REWIND_ACTION_META: Record<string, { label: string; color: string }> = {
   U: { label: "U", color: "#89b4fa" },
 };
 const REWIND_ACTION_FALLBACK = { label: "?", color: "#89b4fa" };
-
-function toolLayoutSignature(toolCalls: ToolCall[] | undefined): string {
-  if (!toolCalls?.length) return "0";
-  return toolCalls
-    .map((tc) => {
-      const resultLen = typeof tc.result === "string" ? tc.result.length : 0;
-      const inputLen = JSON.stringify(tc.input ?? {}).length;
-      return `${tc.id}:${tc.name}:${resultLen}:${inputLen}:${tc.isError ? 1 : 0}`;
-    })
-    .join("|");
-}
-
-function messageLayoutKey(msg: ChatMessageData): string {
-  if (msg.role === "assistant") {
-    return `${msg.id}:${msg.content?.length ?? 0}:${toolLayoutSignature(msg.toolCalls)}`;
-  }
-  return msg.id;
-}
 
 interface AffectedFile {
   path: string;
@@ -203,34 +227,6 @@ function RewindPromptDialog({ affectedFiles, toolSummary, onConfirm, onCancel }:
   );
 }
 
-/** Streaming bubble body — owns its own `.cc-row` gutter so renderRow can
- *  return it directly without the standard wrapper. Rendered as a list item
- *  (not inside the Footer) so growing token text participates in row layout
- *  without constantly remeasuring the footer. */
-function StreamingBubbleBody({
-  sessionId,
-  onStreamUpdate,
-}: {
-  sessionId: string;
-  onStreamUpdate: () => void;
-}) {
-  const text = useClaudeStore((s) => s.sessions[sessionId]?.streamingText);
-  useLayoutEffect(() => {
-    if (text) onStreamUpdate();
-  }, [text, onStreamUpdate]);
-  if (!text) return null;
-  return (
-    <div className="cc-row">
-      <div className="cc-message cc-message--assistant">
-        <div className="cc-bubble cc-bubble--assistant cc-bubble--streaming">
-          {text}
-          <span className="cc-cursor" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /** Chat body footer. Lives below the last virtualized item and renders the
  *  streaming bubble + pending-question prompt + error bar + bottom spacer.
  *  Extracted from ClaudeChat's render so its identity is stable across
@@ -270,43 +266,24 @@ function ChatFooter({
         .join("\n");
       store.updateToolResult(sessionId, pendingQuestions.toolUseId, formatted, false);
       store.addUserMessage(sessionId, `Answered questions:\n${formatted}`);
-      const provider = sessionProviderFor(sessionId);
       const followupPrompt = `Here are my answers to your questions:\n${formatted}\n\nProceed based on these choices. Do not ask the same questions again.`;
       const currentSession = useClaudeStore.getState().sessions[sessionId];
-      const codexBase = {
-        session_id: sessionId,
+      if (!currentSession) return;
+      runProviderTurn(providerTurnForSession({
+        sessionId,
+        session: currentSession,
         cwd: effectiveCwd,
         prompt: followupPrompt,
-        ...(model ? { model } : {}),
-        ...(effort ? { effort } : {}),
-        ...decodeCodexPermission(currentSession?.selectedCodexPermission || "workspace"),
-      };
-      const sendPromise = provider === "openai"
-        ? (currentSession?.codexThreadId ? sendCodexPrompt({
-            ...codexBase,
-            thread_id: currentSession.codexThreadId,
-          }) : createCodexSession({
-            session_id: sessionId,
-            cwd: effectiveCwd,
-            prompt: followupPrompt,
-            ...(model ? { model } : {}),
-            ...(effort ? { effort } : {}),
-            ...decodeCodexPermission(currentSession?.selectedCodexPermission || "workspace"),
-          }))
-        : sendClaudePrompt(
-            {
-              session_id: sessionId,
-              cwd: effectiveCwd,
-              prompt: followupPrompt,
-              permission_mode: permissionMode,
-              model,
-              effort,
-              disallowed_tools: "AskUserQuestion",
-            },
-            useClaudeStore.getState().sessions[sessionId]?.skipOpenwolf,
-          );
-      sendPromise
-        .then(() => store.incrementPromptCount(sessionId))
+        permissionMode,
+        selectedModel: model || null,
+        selectedEffort: effort || null,
+        defaultCodexPermission: "workspace",
+        disallowedTools: "AskUserQuestion",
+      }))
+        .then((result) => {
+          applyProviderTurnResult(sessionId, result);
+          store.incrementPromptCount(sessionId);
+        })
         .catch((err) => store.setError(sessionId, String(err)));
     }
   };
@@ -364,29 +341,15 @@ function ChatFooter({
   );
 }
 
-function guessLanguage(filePath: string): string {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  const map: Record<string, string> = {
-    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
-    rs: "rust", py: "python", go: "go", java: "java", json: "json",
-    css: "css", scss: "scss", html: "html", md: "markdown", yaml: "yaml",
-    yml: "yaml", toml: "toml", sh: "shell", bash: "shell", zsh: "shell",
-    sql: "sql", xml: "xml", swift: "swift", kt: "kotlin", rb: "ruby",
-    c: "c", cpp: "cpp", h: "c", hpp: "cpp",
-  };
-  return map[ext] || "plaintext";
-}
-
 // MODELS / EFFORTS / PERMISSION_MODES are the Anthropic-provider defaults.
-// When the user picks OpenAI in the provider dropdown, we swap to
-// PROVIDER_CONFIG.openai's lists at render time.
-import { PROVIDER_CONFIG } from "../../lib/providers";
+// When the user picks another provider, the topbar/input controls read that
+// provider's manifest at render time.
 import { pushToast } from "../../lib/notifications";
 
-const MODELS = PROVIDER_CONFIG.anthropic.models;
-const EFFORTS = PROVIDER_CONFIG.anthropic.efforts;
+const MODELS = getProviderManifest("anthropic").models;
+const EFFORTS = getProviderManifest("anthropic").efforts;
 const PERMISSION_MODES: { id: PermissionMode; label: string; color: string; desc: string }[] =
-  PROVIDER_CONFIG.anthropic.permissions.map((p) => ({
+  getProviderManifest("anthropic").permissions.map((p) => ({
     id: p.id as PermissionMode,
     label: p.label,
     color: p.color,
@@ -399,33 +362,6 @@ interface ClaudeChatProps {
   skipPermissions: boolean;
   isActive: boolean;
 }
-
-function CompactDivider({ status, startedAt }: { status: "compacting" | "done"; startedAt: number | null }) {
-  const [elapsed, setElapsed] = useState("");
-  useEffect(() => {
-    if (!startedAt) return;
-    const tick = () => setElapsed(formatDuration(Math.floor((Date.now() - startedAt) / 1000)));
-    tick();
-    if (status === "compacting") {
-      const id = setInterval(tick, 1000);
-      return () => clearInterval(id);
-    }
-  }, [status, startedAt]);
-
-  return (
-    <div className={`cc-turn-divider cc-compact-divider ${status === "done" ? "cc-compact-divider--done" : ""}`}>
-      {status === "compacting" && <span className="cc-compact-spinner" />}
-      {status === "done" && <span className="cc-compact-check">&#x2713;</span>}
-      <span className="cc-turn-divider-text">
-        {status === "compacting" ? `Compacting context` : `Compacted`}
-        {elapsed && ` · ${elapsed}`}
-      </span>
-    </div>
-  );
-}
-
-/** Common shape for MCP servers displayed in the dropdown (union of live status and config) */
-type McpDisplayServer = McpServerStatus | McpServer;
 
 export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }: ClaudeChatProps) {
   // Shallow-compare selector that EXCLUDES streamingText — the streaming
@@ -476,25 +412,20 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const [scrollProgress, setScrollProgress] = useState(0);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [configMcpServers, setConfigMcpServers] = useState<McpServer[]>([]);
-  // Single source of truth for which topbar dropdown is open — guarantees
-  // only one is visible at a time without depending on Radix's internal state.
-  type TopMenu = "mcp" | "model" | "effort" | null;
-  const [openMenu, setOpenMenu] = useState<TopMenu>(null);
   // Provider dropdown — mirrors the session's persisted provider. Mid-session
   // switching is blocked with a toast; the choice is made up-front via
   // ClaudeDialog and locked for the lifetime of the session.
-  const selectedProvider = useClaudeStore((s) => s.sessions[sessionId]?.provider ?? "anthropic");
+  const selectedProvider = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).provider);
   const liveMcp = useClaudeStore((s) => s.sessions[sessionId]?.mcpServers);
-  const mcpServers: McpDisplayServer[] = (liveMcp && liveMcp.length > 0) ? liveMcp : configMcpServers;
   const [showFileTree, setShowFileTree] = useState(false);
   // Per-session model + effort persisted via the store. Falls back to the
   // settings-store global default when the session has nothing pinned yet
   // (typically a brand-new session pre-first-render). Writes go to BOTH the
   // session record (so the choice survives reloads + isolates per-chat) and
   // the global default (so the next new session inherits the user's habit).
-  const persistedSelectedModel = useClaudeStore((s) => s.sessions[sessionId]?.selectedModel ?? null);
-  const persistedSelectedEffort = useClaudeStore((s) => s.sessions[sessionId]?.selectedEffort ?? null);
-  const providerDefaults = PROVIDER_CONFIG[selectedProvider];
+  const persistedSelectedModel = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).selectedModel);
+  const persistedSelectedEffort = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).selectedEffort);
+  const providerDefaults = getProviderManifest(selectedProvider);
   const globalModel = useSettingsStore.getState().claudeModel;
   const globalEffort = useSettingsStore.getState().claudeEffort;
   const selectedModel = persistedSelectedModel
@@ -507,6 +438,14 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const setSelectedEffort = useCallback((id: string) => {
     useClaudeStore.getState().setSelectedEffort(sessionId, id);
   }, [sessionId]);
+  const handleSelectModel = useCallback((id: string) => {
+    setSelectedModel(id);
+    useSettingsStore.getState().set({ claudeModel: id });
+  }, [setSelectedModel]);
+  const handleSelectEffort = useCallback((id: string) => {
+    setSelectedEffort(id);
+    useSettingsStore.getState().set({ claudeEffort: id });
+  }, [setSelectedEffort]);
   const [permModeIdx, setPermModeIdx] = useState(() => {
     if (skipPermissions) return 4; // YOLO when skipPermissions is set
     const s = useSettingsStore.getState();
@@ -527,37 +466,61 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // workspace / full-auto / yolo) survives reloads. Cycled via the same
   // bottom-of-input "permLabel" affordance Anthropic uses.
   const persistedCodexPermission = useClaudeStore(
-    (s) => s.sessions[sessionId]?.selectedCodexPermission ?? null,
+    (s) => resolveSessionProviderState(s.sessions[sessionId]).openai?.selectedCodexPermission ?? null,
   );
-  const selectedCodexPermission = persistedCodexPermission ?? PROVIDER_CONFIG.openai.defaultPermission;
+  const selectedCodexPermission = persistedCodexPermission ?? getProviderManifest("openai").defaultPermission;
   const setSelectedCodexPermission = useCallback((id: string) => {
     useClaudeStore.getState().setSelectedCodexPermission(sessionId, id);
   }, [sessionId]);
   const cycleCodexPermission = useCallback(() => {
-    const list = PROVIDER_CONFIG.openai.permissions;
+    const list = getProviderManifest("openai").permissions;
     const idx = list.findIndex((p) => p.id === selectedCodexPermission);
     const next = list[(idx + 1) % list.length]!;
     setSelectedCodexPermission(next.id);
   }, [selectedCodexPermission, setSelectedCodexPermission]);
+  // Resolve CWD: use prop, fall back to stored session CWD
+  const effectiveCwd = (cwd && cwd !== ".") ? cwd : (session?.cwd || ".");
   const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
   const autoCompactThreshold = useSettingsStore((s) => s.autoCompactThreshold);
-  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
-  const [filePreviews, setFilePreviews] = useState<Record<string, string>>({});
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [planContent, setPlanContent] = useState<string | null>(null);
-  const [planFinished, setPlanFinished] = useState(false);
-  const [showPlanViewer, setShowPlanViewer] = useState(false);
+  const {
+    attachedFiles,
+    filePreviews,
+    isDragOver,
+    handleAttach,
+    handlePasteImage,
+    removeAttachedFile,
+    consumeAttachments,
+  } = useChatAttachments({ sessionId, isActive });
+  const {
+    planContent,
+    planFinished,
+    showPlanViewer,
+    hasPlan,
+    clearPlanContent,
+    resetPlan,
+    togglePlanViewer,
+  } = useChatPlanMode({
+    sessionId,
+    session,
+    provider: selectedProvider,
+    setPermModeIdx,
+  });
   const [sidePanelOpen, setSidePanelOpen] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
   const [rewindText, setRewindText] = useState<string | null>(null);
   const [rewindPrompt, setRewindPrompt] = useState<{ messageId: string; content: string; affectedFiles: AffectedFile[] } | null>(null);
   const [queueExpanded, setQueueExpanded] = useState(false);
-  const [editOverlay, setEditOverlay] = useState<{ tcId: string; filePath: string; fullContent: string; changedLines: Set<number> } | null>(null);
-  const editOverrides = useRef<Record<string, string>>({});
-  const savedScrollTop = useRef<number>(0);
-  const modifiedEditorRef = useRef<import("monaco-editor").editor.IStandaloneCodeEditor | null>(null);
-  const [editorDirty, setEditorDirty] = useState(false);
-  const editorSavedVersionId = useRef<number>(0);
+  const {
+    editOverlay,
+    openEditOverlay,
+    openFileOverlay,
+    rememberContent: rememberEditOverlayContent,
+    closeEditOverlay,
+  } = useChatEditOverlay({
+    effectiveCwd,
+    getScrollEl,
+    readFileContent: readFile,
+  });
   const [showHookLog, setShowHookLog] = useState(false);
   const panelColor = useCanvasStore((s) => s.terminals.find((t) => t.terminalId === sessionId)?.borderColor);
   const hookEventLog = useClaudeStore((s) => s.sessions[sessionId]?.hookEventLog ?? []);
@@ -566,6 +529,14 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const totalToolCalls = useMemo(() => Object.values(toolUsageStats).reduce((a, b) => a + b, 0), [toolUsageStats]);
 
   const permMode = PERMISSION_MODES[permModeIdx] ?? PERMISSION_MODES[0]!;
+  const cycleAnthropicPermission = useCallback(() => {
+    setPermModeIdx((i) => {
+      const next = (i + 1) % PERMISSION_MODES.length;
+      const s = useSettingsStore.getState();
+      if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next]!.id });
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     // Passing cwd to createSession lets the store kick off JSONL hydration
@@ -582,7 +553,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // don't resolve to anything in the codex models/efforts list and the request
   // would carry an invalid model string.
   useEffect(() => {
-    const cfg = PROVIDER_CONFIG[selectedProvider];
+    const cfg = getProviderManifest(selectedProvider);
     if (!cfg.models.find((m) => m.id === selectedModel)) {
       setSelectedModel(cfg.defaultModel);
     }
@@ -727,123 +698,19 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // / full-auto / yolo). Both are persisted per-session via the store.
   useEffect(() => {
     if (!isActive) return;
+    const cyclePermissionByProvider: Record<ProviderId, () => void> = {
+      anthropic: cycleAnthropicPermission,
+      openai: cycleCodexPermission,
+    };
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Tab" && e.shiftKey) {
         e.preventDefault();
-        if (selectedProvider === "anthropic") {
-          setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; const s = useSettingsStore.getState(); if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next]!.id }); return next; });
-        } else {
-          cycleCodexPermission();
-        }
+        cyclePermissionByProvider[selectedProvider]();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [isActive, selectedProvider, cycleCodexPermission]);
-
-  // React to plan mode changes from EnterPlanMode/ExitPlanMode
-  const wasPlanMode = useRef(false);
-  useEffect(() => {
-    if (!session) return;
-    if (session.planModeActive) {
-      wasPlanMode.current = true;
-      setPermModeIdx(1); // Plan is index 1
-    } else if (wasPlanMode.current) {
-      wasPlanMode.current = false;
-      setPlanFinished(true);
-      setPermModeIdx(0);
-    }
-  }, [session?.planModeActive]);
-
-  // If streaming ends while plan mode is still active, Claude didn't call ExitPlanMode —
-  // treat this as plan completion so the action bar appears.
-  // Also trigger planFinished if a plan file was written during THIS turn.
-  const wasStreaming = useRef(false);
-  const planShownThisTurn = useRef(false);
-  useEffect(() => {
-    if (!session) return;
-    if (session.isStreaming) {
-      wasStreaming.current = true;
-      planShownThisTurn.current = false;
-    } else if (wasStreaming.current) {
-      wasStreaming.current = false;
-      if (session.planModeActive) {
-        // Auto-exit plan mode since the turn ended
-        useClaudeStore.getState().setPlanMode(sessionId, false);
-      } else if (planContent && !planFinished && !planShownThisTurn.current) {
-        // Plan file was written this turn — show the action bar once
-        planShownThisTurn.current = true;
-        setPlanFinished(true);
-      }
-    }
-  }, [session?.isStreaming, session?.planModeActive, sessionId, planContent, planFinished]);
-
-  // Detect plan files from tool calls — only scan messages added since last user prompt
-  const planScanFrom = useRef(0);
-  useEffect(() => {
-    if (!session) return;
-    const msgs = session.messages;
-    // Find the last user message index to know where the current turn started
-    let turnStart = planScanFrom.current;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i]!.role === "user") { turnStart = i; break; }
-    }
-    planScanFrom.current = turnStart;
-    for (let i = msgs.length - 1; i >= turnStart; i--) {
-      const msg = msgs[i];
-      if (msg && msg.role === "assistant" && msg.toolCalls) {
-        for (const tc of msg.toolCalls) {
-          if ((tc.name === "Write" || tc.name === "Edit" || tc.name === "Read") && tc.input.file_path) {
-            const fp = String(tc.input.file_path);
-            if (fp.includes(".claude/plans/") || fp.includes(".claude\\plans\\")) {
-              if (tc.name === "Read" && tc.result) {
-                setPlanContent(tc.result);
-              } else if ((tc.name === "Write" || tc.name === "Edit") && tc.input.content) {
-                setPlanContent(String(tc.input.content));
-              }
-              return;
-            }
-          }
-        }
-      }
-    }
-  }, [session?.messages]);
-
-  // Tauri native drag-drop — only the active session handles drops
-  useEffect(() => {
-    if (!isActive) return;
-    let unlisten: (() => void) | null = null;
-    const appWindow = getCurrentWebviewWindow();
-    appWindow.onDragDropEvent((event) => {
-      const payload = event.payload;
-      if (payload.type === "enter" || payload.type === "over") {
-        setIsDragOver(true);
-      } else if (payload.type === "leave") {
-        setIsDragOver(false);
-      } else if (payload.type === "drop") {
-        setIsDragOver(false);
-        const paths: string[] = payload.paths.filter(
-          (p) => !p.toLowerCase().endsWith(".zip")
-        );
-        if (paths.length) {
-          setAttachedFiles((prev) => [...prev, ...paths]);
-          for (const p of paths) {
-            if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i.test(p)) {
-              readFileBase64(p).then((b64) => {
-                const ext = p.split(".").pop()?.toLowerCase() || "png";
-                const mime = ext === "svg" ? "image/svg+xml" : `image/${ext.replace("jpg", "jpeg")}`;
-                setFilePreviews((prev) => ({ ...prev, [p]: `data:${mime};base64,${b64}` }));
-              }).catch(() => {});
-            }
-          }
-        }
-      }
-    }).then((fn) => { unlisten = fn; }).catch((err) => console.warn('[drag-drop]', err));
-    return () => { if (unlisten) unlisten(); };
-  }, [isActive]);
-
-  // Resolve CWD: use prop, fall back to stored session CWD
-  const effectiveCwd = (cwd && cwd !== ".") ? cwd : (session?.cwd || ".");
+  }, [isActive, selectedProvider, cycleAnthropicPermission, cycleCodexPermission]);
 
   // Auto-drain queue: when streaming stops, send next queued prompt
   const prevStreaming = useRef(false);
@@ -1043,28 +910,18 @@ Rules:
       }
 
       if (planFinished || planContent) {
-        setPlanFinished(false);
-        setShowPlanViewer(false);
-        setPlanContent(null);
+        resetPlan();
       }
 
       let prompt = text;
       let displayPrompt = text;
       let codexCollaborationMode: "plan" | "default" | undefined;
-      const codexPlanMatch = text.match(/^\/plan(?:\s+([\s\S]*))?$/i);
-      if (sessionProviderFor(sessionId) === "openai" && codexPlanMatch) {
-        codexCollaborationMode = "plan";
-        prompt = codexPlanMatch[1]?.trim() || "Create a plan.";
+      const codexPlan = parseCodexPlanCommand(text, selectedProvider);
+      if (codexPlan) {
+        codexCollaborationMode = codexPlan.collaborationMode;
+        prompt = codexPlan.prompt;
       }
-      if (attachedFiles.length > 0) {
-        const fileList = attachedFiles.map((f) => `[Attached file: ${f}]`).join("\n");
-        prompt = fileList + "\n\n" + prompt;
-        displayPrompt = fileList + "\n\n" + text;
-        setAttachedFiles([]);
-        // Clean up preview URLs
-        Object.values(filePreviews).forEach((url) => URL.revokeObjectURL(url));
-        setFilePreviews({});
-      }
+      ({ prompt, displayPrompt } = consumeAttachments(prompt, displayPrompt));
 
       const isCurrentlyStreaming = useClaudeStore.getState().sessions[sessionId]?.isStreaming;
       if (isCurrentlyStreaming) {
@@ -1082,7 +939,7 @@ Rules:
       if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: displayPrompt }).catch(() => {});
       await actualSend(prompt, permissionOverride, codexCollaborationMode ? { codexCollaborationMode } : undefined);
     },
-    [sessionId, attachedFiles, addUserMessage, actualSend, reloadCommands, slashCommands, effectiveCwd]
+    [sessionId, consumeAttachments, addUserMessage, actualSend, reloadCommands, slashCommands, effectiveCwd, planFinished, planContent, resetPlan, selectedProvider]
   );
 
   // Keep ref current so the discord-prompt listener can call handleSend
@@ -1243,8 +1100,8 @@ Rules:
         useClaudeStore.getState().setError(sessionId, `Rewind failed: ${err}`);
         return;
       }
-      // Mutate the store immediately so the UI reflects the undo-send
-      // without blocking on findRewindUuid's whole-file parse.
+      // Mutate the store immediately so the UI reflects the undo-send after
+      // the on-disk JSONL has been truncated.
       useClaudeStore.getState().truncateFromMessage(sessionId, messageId);
       setRewindText(targetMsg!.content);
       console.log("[rewind] === UNDO-SEND COMPLETE ===", { prefill: targetMsg!.content.slice(0, 80) });
@@ -1311,9 +1168,7 @@ Rules:
       }
 
       // Disk is now authoritative — mirror the truncation into the store
-      // IMMEDIATELY so the UI reflects the rewind without waiting for
-      // findRewindUuid (which reads + parses the entire JSONL and can take
-      // multiple seconds on large sessions).
+      // immediately so the UI reflects the rewind.
       store.truncateFromMessage(sessionId, messageId);
       if (trailingUser) {
         store.truncateFromMessage(sessionId, trailingUser.id);
@@ -1321,10 +1176,10 @@ Rules:
       }
       const sess = preSess;
 
-      // Find the UUID of the last message we want to keep. The next --resume
-      // will pass --resume-session-at <uuid> so Claude CLI slices its own
-      // parentUuid chain correctly (matching how Claude's own /rewind works:
-      // append-only JSONL).
+      // The JSONL has already been physically truncated, so the next send uses
+      // normal session resume. Passing --resume-session-at here is fragile after
+      // rewriting the file because Claude's internal index can reject the kept
+      // UUID even though the truncated history reloads correctly.
       // Force-cancel any active delegation group AND collect modifiedFiles from
       // ALL groups ever spawned by this parent — parentToGroup only tracks the
       // most recent group, so previous completed delegations' child files would
@@ -1420,96 +1275,9 @@ Rules:
   }, [sessionId, effectiveCwd, rewindHistory]);
 
   const handleFork = useChatFork({ sessionId, effectiveCwd });
+  const handleEditClick = openEditOverlay;
+  const handleFileTreeOpen = openFileOverlay;
 
-  const handleEditClick = useCallback(async (tcId: string, filePath: string, _oldStr: string, newStr: string) => {
-    const resolvedFilePath = filePath && !isAbsolutePath(filePath) && effectiveCwd
-      ? joinPath(effectiveCwd, filePath)
-      : filePath;
-    // Save scroll position before opening overlay
-    const el = getScrollEl();
-    if (el) savedScrollTop.current = el.scrollTop;
-    // Use persisted full-file content if available
-    if (editOverrides.current[tcId]) {
-      const cached = editOverrides.current[tcId];
-      const idx = cached.indexOf(newStr);
-      const changed = new Set<number>();
-      if (idx >= 0) {
-        const startLine = cached.substring(0, idx).split("\n").length;
-        const numLines = newStr.split("\n").length;
-        for (let i = 0; i < numLines; i++) changed.add(startLine + i);
-      }
-      setEditOverlay({ tcId, filePath: resolvedFilePath, fullContent: cached, changedLines: changed });
-      return;
-    }
-    // Read full file from disk
-    try {
-      const content = await readFile(resolvedFilePath);
-      const idx = content.indexOf(newStr);
-      const changed = new Set<number>();
-      if (idx >= 0) {
-        const startLine = content.substring(0, idx).split("\n").length;
-        const numLines = newStr.split("\n").length;
-        for (let i = 0; i < numLines; i++) changed.add(startLine + i);
-      }
-      setEditOverlay({ tcId, filePath: resolvedFilePath, fullContent: content, changedLines: changed });
-    } catch {
-      // Fallback: show just the new string with all lines marked changed
-      const lines = newStr.split("\n");
-      const changed = new Set(lines.map((_, i) => i + 1));
-      setEditOverlay({ tcId, filePath: resolvedFilePath, fullContent: newStr, changedLines: changed });
-    }
-  }, [effectiveCwd, getScrollEl]);
-
-  const handleFileTreeOpen = useCallback(async (filePath: string) => {
-    const el = getScrollEl();
-    if (el) savedScrollTop.current = el.scrollTop;
-    try {
-      const content = await readFile(filePath);
-      setEditOverlay({ tcId: `file:${filePath}`, filePath, fullContent: content, changedLines: new Set() });
-    } catch (e) {
-      console.warn("[claude] Failed to read file for preview:", e);
-    }
-  }, []);
-
-  const handleAttach = useCallback(async () => {
-    try {
-      const selected = await open({ multiple: true, title: "Attach files" });
-      if (!selected) return;
-      const paths = Array.isArray(selected) ? selected : [selected];
-      setAttachedFiles((prev) => [...prev, ...paths]);
-      // Generate previews for image files
-      for (const p of paths) {
-        if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i.test(p) && !filePreviews[p]) {
-          readFileBase64(p).then((b64) => {
-            const ext = p.split(".").pop()?.toLowerCase() || "png";
-            const mime = ext === "svg" ? "image/svg+xml" : `image/${ext.replace("jpg", "jpeg")}`;
-            setFilePreviews((prev) => ({ ...prev, [p]: `data:${mime};base64,${b64}` }));
-          }).catch(() => {});
-        }
-      }
-    } catch (e) {
-      console.warn("[claude] File picker error:", e);
-    }
-  }, [filePreviews]);
-
-  const handlePasteImage = useCallback(async (file: File) => {
-    try {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
-      const base64 = btoa(binary);
-      const ext = file.name.split(".").pop() || file.type.split("/")[1] || "png";
-      const savedPath = await savePastedImage(base64, ext);
-      setAttachedFiles((prev) => [...prev, savedPath]);
-      const previewUrl = URL.createObjectURL(file);
-      setFilePreviews((prev) => ({ ...prev, [savedPath]: previewUrl }));
-    } catch (e) {
-      console.error("Failed to paste image:", e);
-    }
-  }, []);
-
-  const hasPlan = planContent !== null;
   const hasTasks = (session?.tasks.length ?? 0) > 0;
   const hasSideContent = hasPlan || hasTasks;
 
@@ -1549,199 +1317,13 @@ Rules:
 
   const activeTasks = useMemo(() => session?.tasks?.filter(t => t.status !== "deleted") ?? [], [session?.tasks]);
   const completedTasks = useMemo(() => activeTasks.filter(t => t.status === "completed"), [activeTasks]);
+  const { visualRows, visualLayoutSignature, userPrompts } = useChatRows(session, hasStreamingText);
 
   // Auto-open side panel when content appears (must be before any early return)
   useEffect(() => {
     if (hasSideContent && !sidePanelOpen) setSidePanelOpen(true);
   }, [hasSideContent]);
 
-  // Flat virtualized row descriptors — one entry per rendered line. Building a
-  // descriptor list (rather than pre-rendered React elements) lets LegendList
-  // reach in by index, map each entry to JSX on demand, and skip rendering
-  // off-screen rows entirely. Every row carries its own stable key via `kind`
-  // + a message id.
-  type VisualRow =
-    | { kind: "turnDivider"; key: string; dur: number }
-    | { kind: "group"; key: string; msgId: string; tcs: ToolCall[] }
-    | { kind: "message"; key: string; msg: ChatMessageData }
-    | { kind: "streaming"; key: string }
-    | {
-        kind: "compact";
-        key: string;
-        status: "compacting" | "done";
-        startedAt: number | null;
-      }
-    | { kind: "finishedTail"; key: string; dur: number };
-
-  const visualRows: VisualRow[] = useMemo(() => {
-    if (!session) return [];
-    const rows: VisualRow[] = [];
-    const msgs = session.messages;
-    let lastCompactUserIndex = -1;
-    for (let idx = msgs.length - 1; idx >= 0; idx--) {
-      const m = msgs[idx];
-      if (m?.role === "user" && /^\/compact\b/i.test(m.content || "")) {
-        lastCompactUserIndex = idx;
-        break;
-      }
-    }
-    let i = 0;
-    let lastUserTs: number | null = null;
-    while (i < msgs.length) {
-      const msg = msgs[i]!;
-      const prevMsg = msgs[i - 1];
-      if (
-        msg.role === "user" &&
-        lastUserTs !== null &&
-        i > 0 &&
-        prevMsg &&
-        prevMsg.role === "assistant"
-      ) {
-        const dur = prevMsg.timestamp - lastUserTs;
-        if (dur > 2000) {
-          rows.push({ kind: "turnDivider", key: `fin-${msg.id}`, dur });
-        }
-      }
-      if (msg.role === "user") lastUserTs = msg.timestamp;
-      if (
-        msg.role === "assistant" &&
-        !msg.content &&
-        msg.toolCalls?.length &&
-        msg.toolCalls.every((tc) => GROUPABLE_TOOLS.has(tc.name))
-      ) {
-        const groupTcs: ToolCall[] = [...msg.toolCalls];
-        let j = i + 1;
-        while (j < msgs.length) {
-          const next = msgs[j];
-          if (
-            next &&
-            next.role === "assistant" &&
-            !next.content &&
-            next.toolCalls?.length &&
-            next.toolCalls.every((tc) => GROUPABLE_TOOLS.has(tc.name))
-          ) {
-            groupTcs.push(...next.toolCalls);
-            j++;
-          } else break;
-        }
-        if (j > i + 1) {
-          rows.push({ kind: "group", key: `rg-${msg.id}:${toolLayoutSignature(groupTcs)}`, msgId: msg.id, tcs: groupTcs });
-          i = j;
-          continue;
-        }
-      }
-      rows.push({ kind: "message", key: messageLayoutKey(msg), msg });
-      if (msg.role === "user" && /^\/compact\b/i.test(msg.content || "")) {
-        const isLastCompact = i === lastCompactUserIndex;
-        if (isLastCompact && session.autoCompactStatus !== "idle") {
-          rows.push({
-            kind: "compact",
-            key: `compact-${msg.id}`,
-            // Narrowed by the `!== "idle"` guard above.
-            status: session.autoCompactStatus as "compacting" | "done",
-            startedAt: session.autoCompactStartedAt,
-          });
-        } else {
-          rows.push({ kind: "compact", key: `compact-${msg.id}`, status: "done", startedAt: null });
-        }
-      }
-      i++;
-    }
-    const lastMsg = msgs[msgs.length - 1];
-    if (
-      !session.isStreaming &&
-      lastUserTs !== null &&
-      lastMsg &&
-      lastMsg.role === "assistant"
-    ) {
-      const dur = lastMsg.timestamp - lastUserTs;
-      if (dur > 2000) {
-        rows.push({ kind: "finishedTail", key: `fin-tail-${messageLayoutKey(lastMsg)}`, dur });
-      }
-    }
-    // Streaming bubble rides as a terminal list item (not in the Footer).
-    // Growing footer content can make the list shrink scrollTop to keep the
-    // last item pinned — exactly the "snap up on every token" jitter users
-    // see. As a regular list item, its growth follows normal list layout.
-    // Keyed on `hasStreamingText` (boolean) rather than the live streamingText
-    // string so visualRows doesn't reallocate per token — StreamingBubbleBody
-    // subscribes to the text itself.
-    if (hasStreamingText) {
-      rows.push({ kind: "streaming", key: "__streaming__" });
-    }
-    // Bottom breathing room is now a LegendList ListFooterComponent
-    // (legendFooter) — no in-list spacer row needed.
-    return rows;
-  }, [
-    session?.messages,
-    session?.autoCompactStatus,
-    session?.autoCompactStartedAt,
-    session?.isStreaming,
-    hasStreamingText,
-  ]);
-
-  const renderRow = useCallback(
-    (_idx: number, row: VisualRow) => {
-      let inner: React.ReactNode;
-      switch (row.kind) {
-        case "turnDivider":
-        case "finishedTail":
-          inner = (
-            <div className="cc-turn-divider">
-              <span className="cc-turn-divider-text">
-                Finished after {formatDuration(Math.floor(row.dur / 1000))}
-              </span>
-            </div>
-          );
-          break;
-        case "group":
-          inner = (
-            <div data-msg-id={row.msgId} className="cc-message cc-message--assistant">
-              <div className="cc-tc-list">
-                <ToolGroupCard tcs={row.tcs} />
-              </div>
-            </div>
-          );
-          break;
-        case "message":
-          inner = (
-            <ChatMessage
-              message={row.msg}
-              provider={selectedProvider}
-              onRewind={onRewindClick}
-              onFork={handleFork}
-              onEditClick={handleEditClick}
-            />
-          );
-          break;
-        case "compact":
-          inner = <CompactDivider status={row.status} startedAt={row.startedAt} />;
-          break;
-        case "streaming":
-          // Streaming bubble keeps its own gutter via StreamingBubbleBody's
-          // .cc-row class; returning early skips the wrapper so the margin
-          // growth isn't part of the footer size measurement each tick.
-          return <StreamingBubbleBody sessionId={sessionId} onStreamUpdate={followStreamingToBottom} />;
-      }
-      // LegendList strips our old flex gap; wrap each row so the 10px rhythm
-      // can live on `.cc-row + .cc-row`.
-      return <div className="cc-row">{inner}</div>;
-    },
-    [onRewindClick, handleFork, handleEditClick, sessionId, followStreamingToBottom],
-  );
-
-  // ── LegendList adapters ────────────────────────────────────────────
-  // LegendList's API is data + keyExtractor + renderItem({item}). Forward to
-  // the existing renderRow.
-  const legendKey = useCallback((row: VisualRow) => row.key, []);
-  const legendRenderItem = useCallback(
-    ({ item, index }: { item: VisualRow; index: number }) => renderRow(index, item),
-    [renderRow],
-  );
-  const visualLayoutSignature = useMemo(
-    () => visualRows.map((row) => row.key).join("\n"),
-    [visualRows],
-  );
   // onScroll fires on every scroll tick. Treat it as visibility telemetry
   // only: user-intent handlers own stickyRef, because LegendList can emit
   // non-user scrolls while a streaming row grows and briefly reports not-at-end.
@@ -1820,34 +1402,11 @@ Rules:
     [sessionId, effectiveCwd, permMode.id, selectedModel, selectedEffort],
   );
 
-  // Indexed user prompts (includes /slash commands) for the prompt-island picker.
-  const userPrompts = useMemo(() => {
-    const out: { id: string; idx: number; content: string; timestamp: number; isCmd: boolean }[] = [];
-    const msgs = session?.messages ?? [];
-    let promptIdx = 0;
-    for (const m of msgs) {
-      if (m.role !== "user") continue;
-      if (!m.content) continue;
-      if (m.content.startsWith("All delegated tasks have finished")) continue; // merge results aren't prompts
-      promptIdx += 1;
-      out.push({
-        id: m.id,
-        idx: promptIdx,
-        content: m.content,
-        timestamp: m.timestamp,
-        isCmd: /^\//.test(m.content.trim()),
-      });
-    }
-    return out;
-  }, [session?.messages]);
-
   const jumpToPrompt = useCallback(
     (msgId: string) => {
       // Find the visual row index for this message. LegendList scrolls by row,
       // not by message id — the row kinds are a superset of messages.
-      const rowIdx = visualRows.findIndex(
-        (r) => (r.kind === "message" && r.msg.id === msgId) || (r.kind === "group" && r.msgId === msgId),
-      );
+      const rowIdx = findPromptVisualRowIndex(visualRows, msgId);
       if (rowIdx < 0) return;
       setIslandOpen(false);
       stickyRef.current = false;
@@ -1878,22 +1437,19 @@ Rules:
   if (!session) return <div className="cc-container cc-loading">Initializing...</div>;
 
   const hasMessages = session.messages.length > 0 || hasStreamingText;
-  // Provider-aware model/effort lists. When the provider dropdown switches
-  // (e.g. anthropic → openai) the topbar swaps in OpenAI's models/efforts
-  // and falls back to that provider's first option if the previously-selected
-  // id doesn't exist in the new list.
-  const providerCfg = PROVIDER_CONFIG[selectedProvider];
-  const activeModels = providerCfg.models;
-  const activeEfforts = providerCfg.efforts;
-  const currentModel =
-    activeModels.find((m) => m.id === selectedModel) || activeModels[0]!;
-  const currentEffort =
-    activeEfforts.find((e) => e.id === selectedEffort) || activeEfforts[2] || activeEfforts[0]!;
+  const providerPermissionInputProps = buildProviderPermissionInputProps({
+    provider: selectedProvider,
+    anthropicPermission: permMode,
+    codexPermissionId: selectedCodexPermission,
+    onCycleAnthropicPermission: cycleAnthropicPermission,
+    onCycleCodexPermission: cycleCodexPermission,
+  });
 
   return (
     <div
       className={`cc-container ${isDragOver ? "cc-container--dragover" : ""}`}
       ref={containerRef}
+      data-session-id={sessionId}
     >
       {/* Topbar */}
       <div className="cc-topbar">
@@ -1901,119 +1457,18 @@ Rules:
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 1L7 5L3 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </button>
         <div className="cc-topbar-center">
-          {/* MCP servers — t64 built-in excluded from count but shown in dropdown. */}
-          {(() => {
-            const userMcp = mcpServers.filter((s) => s.name !== "terminal-64");
-            const hasError = mcpServers.some((s) => "status" in s && ((s as McpServerStatus).status === "failed" || (s as McpServerStatus).status === "error"));
-            return (
-              <DropdownMenu open={openMenu === "mcp"} onOpenChange={(o) => {
-                setOpenMenu(o ? "mcp" : null);
-                if (o && effectiveCwd) listMcpServers(effectiveCwd).then(setConfigMcpServers).catch(() => {});
-              }}>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    className={`shadcn-trigger ${userMcp.length > 0 ? "cc-mcp-btn--active" : ""} ${hasError ? "cc-mcp-btn--error" : ""}`}
-                    aria-label="MCP servers"
-                  >
-                    MCP{userMcp.length > 0 ? ` (${userMcp.length})` : ""}
-                    <span className="shadcn-trigger-chev">▾</span>
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="cc-mcp-menu">
-                  <DropdownMenuLabel>MCP Servers</DropdownMenuLabel>
-                  {mcpServers.length === 0 ? (
-                    <div className="cc-mcp-empty" style={{ padding: "6px 10px", fontSize: 10, color: "var(--fg-muted, #6c7086)" }}>
-                      No MCP servers configured
-                    </div>
-                  ) : (
-                    mcpServers.map((s) => {
-                      const isLive = "status" in s;
-                      const status = (isLive ? (s as McpServerStatus).status : undefined) || "configured";
-                      const isError = status === "failed" || status === "error";
-                      const isConnected = status === "connected";
-                      const isBuiltIn = s.name === "terminal-64";
-                      const liveServer = isLive ? (s as McpServerStatus) : undefined;
-                      const toolCount = liveServer?.toolCount ?? liveServer?.tools?.length;
-                      return (
-                        <DropdownMenuItem
-                          key={s.name}
-                          className={`shadcn-menu-item--mcp ${isBuiltIn ? "cc-mcp-item--builtin" : ""}`}
-                          onSelect={(e) => e.preventDefault()}
-                        >
-                          <div className="shadcn-mcp-row">
-                            <span className={`shadcn-mcp-dot ${isError ? "shadcn-mcp-dot--error" : isConnected ? "shadcn-mcp-dot--ok" : "shadcn-mcp-dot--idle"}`} />
-                            <span className="shadcn-mcp-name">{isBuiltIn ? "T64" : s.name}</span>
-                          </div>
-                          <span className="shadcn-mcp-meta">
-                            {status}
-                            {isBuiltIn ? " · built-in" : ""}
-                            {s.transport ? ` · ${s.transport}` : ""}
-                            {s.scope ? ` · ${s.scope}` : ""}
-                            {toolCount != null ? ` · ${toolCount} tool${toolCount !== 1 ? "s" : ""}` : ""}
-                          </span>
-                          {isError && liveServer?.error && (
-                            <span className="shadcn-mcp-error">{liveServer.error}</span>
-                          )}
-                        </DropdownMenuItem>
-                      );
-                    })
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            );
-          })()}
-
-          {/* Model dropdown */}
-          <DropdownMenu open={openMenu === "model"} onOpenChange={(o) => setOpenMenu(o ? "model" : null)}>
-            <DropdownMenuTrigger asChild>
-              <button className="shadcn-trigger" aria-label="Model">
-                {currentModel.label}
-                <span className="shadcn-trigger-chev">▾</span>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuLabel>Model</DropdownMenuLabel>
-              {activeModels.map((m) => (
-                <DropdownMenuItem
-                  key={m.id}
-                  active={m.id === selectedModel}
-                  onSelect={() => {
-                    setSelectedModel(m.id);
-                    useSettingsStore.getState().set({ claudeModel: m.id });
-                  }}
-                >
-                  <span className="shadcn-menu-text">{m.label}</span>
-                  <span className="shadcn-menu-check">{m.id === selectedModel ? "✓" : ""}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          {/* Effort dropdown */}
-          <DropdownMenu open={openMenu === "effort"} onOpenChange={(o) => setOpenMenu(o ? "effort" : null)}>
-            <DropdownMenuTrigger asChild>
-              <button className="shadcn-trigger" aria-label="Reasoning effort">
-                {currentEffort.label}
-                <span className="shadcn-trigger-chev">▾</span>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuLabel>Effort</DropdownMenuLabel>
-              {activeEfforts.map((e) => (
-                <DropdownMenuItem
-                  key={e.id}
-                  active={e.id === selectedEffort}
-                  onSelect={() => {
-                    setSelectedEffort(e.id);
-                    useSettingsStore.getState().set({ claudeEffort: e.id });
-                  }}
-                >
-                  <span className="shadcn-menu-text">{e.label}</span>
-                  <span className="shadcn-menu-check">{e.id === selectedEffort ? "✓" : ""}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <ProviderControls
+            configuredMcpServers={configMcpServers}
+            liveMcpServers={liveMcp}
+            provider={selectedProvider}
+            selectedModel={selectedModel}
+            selectedEffort={selectedEffort}
+            onSelectModel={handleSelectModel}
+            onSelectEffort={handleSelectEffort}
+            onMcpOpen={() => {
+              if (effectiveCwd) listMcpServers(effectiveCwd).then(setConfigMcpServers).catch(() => {});
+            }}
+          />
         </div>
 
         <div className="cc-topbar-right">
@@ -2028,7 +1483,7 @@ Rules:
             </span>
           )}
           {/* Context % moved to bottom-right status line in ChatInput */}
-          {selectedProvider === "anthropic" && (
+          {providerSupports(selectedProvider, "hookLog") && (
             <button
               className={`ch-log-toggle ${showHookLog ? "ch-log-toggle--active" : ""}`}
               onClick={() => setShowHookLog((v) => !v)}
@@ -2052,11 +1507,8 @@ Rules:
           <button
             className="cc-refresh-btn"
             onClick={() => {
-              // Cancel running process + reset UI state, then pull just the
-              // last slice of JSONL and merge in any new messages we missed.
-              // Loading the full history on every click re-parses the entire
-              // file and pumps thousands of messages over IPC; we only need
-              // the tail to catch up.
+              // Cancel running process + reset UI state, then ask the active
+              // provider runtime to hydrate any messages we missed.
               {
                 const rp = sessionProviderFor(sessionId);
                 cancelByProvider(sessionId, rp).catch(() => {});
@@ -2066,22 +1518,19 @@ Rules:
               store.setStreaming(sessionId, false);
               store.setError(sessionId, null);
               store.clearStreamingText(sessionId);
-              if (sessionProviderFor(sessionId) === "openai") {
-                const tid = useClaudeStore.getState().sessions[sessionId]?.codexThreadId;
-                if (tid) {
-                  loadCodexSessionHistory(tid).then((history) => {
-                    if (history?.length) {
-                      store.mergeFromDisk(sessionId, mapHistoryMessages(history) as ChatMessageData[]);
-                    }
-                  }).catch(() => {});
+              const refreshedSession = store.sessions[sessionId];
+              if (!refreshedSession || !effectiveCwd) return;
+              const providerState = resolveSessionProviderState(refreshedSession);
+              hydrateProviderHistory({
+                provider: providerState.provider,
+                sessionId,
+                cwd: effectiveCwd,
+                codexThreadId: providerState.openai?.codexThreadId ?? null,
+              }).then((result) => {
+                if (result.status === "messages" && result.messages.length) {
+                  store.mergeFromDisk(sessionId, result.messages);
                 }
-              } else if (effectiveCwd) {
-                loadSessionHistoryTail(sessionId, effectiveCwd, 50).then((history) => {
-                  if (history?.length) {
-                    store.mergeFromDisk(sessionId, mapHistoryMessages(history) as ChatMessageData[]);
-                  }
-                }).catch(() => {});
-              }
+              }).catch(() => {});
             }}
             title="Refresh chat (cancel in-flight request, merge recent JSONL)"
           >
@@ -2128,168 +1577,41 @@ Rules:
       <div className="cc-main">
         <div className="cc-chat-col">
           {editOverlay ? (
-            <div className="cc-messages cc-edit-overlay">
-              <div className="cc-edit-overlay-header">
-                <span className="cc-edit-overlay-path">{editOverlay.filePath}</span>
-                <div className="cc-edit-overlay-actions">
-                  <span className={`cc-edit-overlay-tag ${editorDirty ? "cc-edit-overlay-tag--unsaved" : "cc-edit-overlay-tag--saved"}`}>{editorDirty ? "Unsaved" : "Saved"}</span>
-                  <button className="cc-edit-overlay-btn cc-edit-overlay-save" onClick={() => {
-                    if (modifiedEditorRef.current && editorDirty) {
-                      const content = modifiedEditorRef.current.getValue();
-                      writeFile(editOverlay.filePath, content).catch(() => {});
-                      editOverrides.current[editOverlay.tcId] = content;
-                      editorSavedVersionId.current = modifiedEditorRef.current.getModel()!.getAlternativeVersionId();
-                      setEditorDirty(false);
-                    }
-                  }}><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M12.5 2H3.5C2.67 2 2 2.67 2 3.5V12.5C2 13.33 2.67 14 3.5 14H12.5C13.33 14 14 13.33 14 12.5V3.5C14 2.67 13.33 2 12.5 2ZM8 12C6.9 12 6 11.1 6 10S6.9 8 8 8S10 8.9 10 10S9.1 12 8 12ZM11 6H4V3H11V6Z" fill="currentColor"/></svg></button>
-                  <button className="cc-edit-overlay-btn cc-edit-overlay-close" onClick={() => {
-                    if (modifiedEditorRef.current) {
-                      editOverrides.current[editOverlay.tcId] = modifiedEditorRef.current.getValue();
-                    }
-                    setEditOverlay(null);
-                    requestAnimationFrame(() => {
-                      const el = getScrollEl();
-                      if (el) el.scrollTop = savedScrollTop.current;
-                    });
-                  }}>Close</button>
-                </div>
-              </div>
-              <div className="cc-edit-overlay-editor">
-                <Editor
-                  value={editOverlay.fullContent}
-                  language={guessLanguage(editOverlay.filePath)}
-                  theme="terminal64"
-                  beforeMount={(monaco) => {
-                    const ui = useThemeStore.getState().currentTheme.ui;
-                    if (monacoThemeForBg !== ui.bg) {
-                      monaco.editor.defineTheme("terminal64", {
-                        base: "vs-dark",
-                        inherit: true,
-                        rules: [],
-                        colors: {
-                          "editor.background": ui.bg,
-                          "editor.foreground": ui.fg,
-                          "editorLineNumber.foreground": ui.fgMuted,
-                          "editor.selectionBackground": ui.accent + "44",
-                          "editor.lineHighlightBackground": ui.bgSecondary,
-                          "editorWidget.background": ui.bgSecondary,
-                          "editorWidget.border": ui.border,
-                        },
-                      });
-                      monacoThemeForBg = ui.bg;
-                    }
-                  }}
-                  onMount={(editor, monaco) => {
-                    modifiedEditorRef.current = editor;
-                    editorSavedVersionId.current = editor.getModel()!.getAlternativeVersionId();
-                    setEditorDirty(false);
-                    const changed = editOverlay!.changedLines;
-                    // Green decorations on changed lines
-                    if (changed.size > 0) {
-                      editor.createDecorationsCollection(
-                        [...changed].map((line) => ({
-                          range: new monaco.Range(line, 1, line, 1),
-                          options: {
-                            isWholeLine: true,
-                            className: "cc-editor-changed-line",
-                            glyphMarginClassName: "cc-editor-changed-gutter",
-                          },
-                        }))
-                      );
-                      // Auto-scroll to center of changed region
-                      const sorted = [...changed].sort((a, b) => a - b);
-                      const mid = sorted[Math.floor(sorted.length / 2)];
-                      if (mid !== undefined) editor.revealLineInCenter(mid);
-                    }
-                    // Track dirty state
-                    editor.onDidChangeModelContent(() => {
-                      setEditorDirty(editor.getModel()!.getAlternativeVersionId() !== editorSavedVersionId.current);
-                    });
-                  }}
-                  options={{
-                    minimap: { enabled: false },
-                    fontSize: 12,
-                    fontFamily: "'Cascadia Code', Consolas, monospace",
-                    scrollBeyondLastLine: false,
-                    lineNumbers: "on",
-                    wordWrap: "on",
-                    glyphMargin: true,
-                    folding: false,
-                    lineDecorationsWidth: 0,
-                    renderLineHighlight: "none",
-                    padding: { top: 8, bottom: 8 },
-                  }}
-                />
-              </div>
-            </div>
+            <ChatEditOverlay
+              overlay={editOverlay}
+              saveFileContent={writeFile}
+              rememberContent={rememberEditOverlayContent}
+              onClose={closeEditOverlay}
+            />
           ) : showPlanViewer && planContent ? (
-            <div className="cc-messages cc-plan-viewer">
-              <div className="cc-bubble cc-bubble--assistant">
-                {renderContent(planContent)}
-              </div>
-            </div>
+            <PlanViewer content={planContent} variant="main" />
           ) : (
-          <div className="cc-scroll-frame">
-          {!hasMessages ? (
-            <div className="cc-messages">
-              <div className="cc-empty">
-                <div className="cc-empty-icon">
-                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                    <path d="M5 24L13 8L21 18L27 10" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </div>
-                <span className="cc-empty-text">{selectedProvider === "openai" ? "Codex" : "Claude Code"}</span>
-                <span className="cc-empty-sub">Send a message, type / for commands, or drop files</span>
-              </div>
-            </div>
-          ) : (
-          <LegendList<VisualRow>
-            ref={virtuosoRef}
-            className="cc-messages"
-            data={visualRows}
-            keyExtractor={legendKey}
-            renderItem={legendRenderItem}
-            recycleItems={false}
-            estimatedItemSize={120}
-            initialScrollAtEnd
-            maintainScrollAtEnd
-            maintainScrollAtEndThreshold={0.1}
-            maintainVisibleContentPosition
-            onScroll={onLegendScroll}
-            onWheel={handleUserWheel}
-            onTouchStart={handleUserTouchStart}
-            onTouchMove={handleUserTouchMove}
-            onKeyDown={handleListKeyDown}
-            onPointerDown={handleListPointerDown}
-            ListFooterComponent={legendFooter}
-          />
-          )}
-          {/* Prompt island + jump-to-bottom live inside `.cc-scroll-frame`
-              (a position:relative sibling of `.cc-messages`) so they anchor
-              to the scroll viewport's rect, not the full chat column. Island
-              fades in/out via the --hidden class on PromptIsland; jump
-              button is vertically centered in the frame so it doesn't
-              drift with scroll position. */}
-          <PromptIsland
-            prompts={userPrompts}
-            isScrolledUp={isScrolledUp}
-            progress={scrollProgress}
-            open={islandOpen}
-            onOpen={() => setIslandOpen(true)}
-            onClose={() => setIslandOpen(false)}
-            onJump={jumpToPrompt}
-          />
-          <button
-            className={`cc-jump-bottom${isScrolledUp && userPrompts.length > 0 ? "" : " cc-jump-bottom--hidden"}`}
-            onClick={() => scrollToBottom()}
-            aria-label="Scroll to bottom"
-            title="Scroll to bottom"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M7 2V11M7 11L3 7M7 11L11 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </button>
-          </div>
+            <ChatMessageList
+              listRef={virtuosoRef}
+              rows={visualRows}
+              footer={legendFooter}
+              sessionId={sessionId}
+              provider={selectedProvider}
+              hasMessages={hasMessages}
+              prompts={userPrompts}
+              isScrolledUp={isScrolledUp}
+              scrollProgress={scrollProgress}
+              islandOpen={islandOpen}
+              onIslandOpen={() => setIslandOpen(true)}
+              onIslandClose={() => setIslandOpen(false)}
+              onJumpToPrompt={jumpToPrompt}
+              onScrollToBottom={scrollToBottom}
+              onLegendScroll={onLegendScroll}
+              onWheel={handleUserWheel}
+              onTouchStart={handleUserTouchStart}
+              onTouchMove={handleUserTouchMove}
+              onKeyDown={handleListKeyDown}
+              onPointerDown={handleListPointerDown}
+              onStreamUpdate={followStreamingToBottom}
+              onRewind={onRewindClick}
+              onFork={handleFork}
+              onEditClick={handleEditClick}
+            />
           )}
 
           <div className="cc-footer">
@@ -2316,48 +1638,37 @@ Rules:
             {planFinished && !session.isStreaming && (() => {
               const ctxPct = session.contextMax > 0 ? Math.min(100, Math.round((session.contextUsed / session.contextMax) * 100)) : 0;
               return (
-              <div className="cc-plan-finished">
-                <span className="cc-plan-finished-text">Plan complete</span>
-                {ctxPct > 0 && <span className={`cc-plan-ctx ${ctxPct >= 80 ? "cc-plan-ctx--warn" : ""}`}>{ctxPct}% context</span>}
-                <div className="cc-plan-finished-actions">
-                  <button className="cc-plan-finished-btn cc-plan-finished-btn--accept" onClick={() => {
-                    setPlanFinished(false);
-                    setShowPlanViewer(false);
-                    setPlanContent(null);
+                <PlanFinishedActions
+                  content={planContent}
+                  contextPercent={ctxPct}
+                  showViewer={showPlanViewer}
+                  onCompactBuild={() => {
+                    resetPlan();
                     setPermModeIdx(4); // YOLO
                     // Queue the build prompt so it fires automatically after /compact finishes
                     useClaudeStore.getState().enqueuePrompt(sessionId,
                       "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about."
                     );
                     handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
-                  }}>Compact &amp; Build</button>
-                  <button className="cc-plan-finished-btn cc-plan-finished-btn--compact" onClick={() => {
-                    setPlanFinished(false);
-                    setShowPlanViewer(false);
-                    setPlanContent(null);
+                  }}
+                  onBuildNow={() => {
+                    resetPlan();
                     setPermModeIdx(4); // YOLO
                     handleSend(
                       "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.",
                       "bypass_all"
                     );
-                  }}>Build Now</button>
-                  {planContent && (
-                    <button className="cc-plan-finished-btn cc-plan-finished-btn--view" onClick={() => setShowPlanViewer((v) => !v)}>
-                      {showPlanViewer ? "Close Plan" : "View Plan"}
-                    </button>
-                  )}
-                  <button className="cc-plan-finished-btn cc-plan-finished-btn--delegate" onClick={() => {
-                    setPlanFinished(false);
-                    setShowPlanViewer(false);
+                  }}
+                  onToggleViewer={togglePlanViewer}
+                  onDelegate={() => {
                     const delegatePrompt = planContent
                       ? `Based on this plan, break it into parallel tasks for delegation. Analyze the plan and output a delegation block:\n\n${planContent}`
                       : "Break the plan you just created into parallel tasks for delegation.";
-                    setPlanContent(null);
+                    resetPlan();
                     handleSend(`/delegate ${delegatePrompt}`, "bypass_all");
-                  }}>Delegate</button>
-                  <button className="cc-plan-finished-btn cc-plan-finished-btn--dismiss" onClick={() => { setPlanFinished(false); setShowPlanViewer(false); setPlanContent(null); }}>Dismiss</button>
-                </div>
-              </div>
+                  }}
+                  onDismiss={resetPlan}
+                />
               );
             })()}
             {session.pendingPermission ? (() => {
@@ -2392,10 +1703,7 @@ Rules:
                     {attachedFiles.map((f, i) => {
                       const isImage = /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i.test(f);
                       const preview = filePreviews[f];
-                      const remove = () => {
-                        setAttachedFiles((p) => p.filter((_, j) => j !== i));
-                        if (preview) { URL.revokeObjectURL(preview); setFilePreviews((p) => { const n = { ...p }; delete n[f]; return n; }); }
-                      };
+                      const remove = () => removeAttachedFile(i);
                       return (
                         <div key={`${i}-${f}`} className={`cc-file-chip ${isImage && preview ? "cc-file-chip--image" : ""}`} onClick={remove} title="Click to remove">
                           {isImage && preview ? (
@@ -2443,25 +1751,14 @@ Rules:
                   slashCommands={slashCommands}
                   initialText={rewindText}
                   onInitialTextConsumed={() => setRewindText(null)}
-                  {...(selectedProvider === "anthropic" ? {
-                    permLabel: `${permMode.id === "default" ? "ask permissions" : permMode.id === "bypass_all" ? "bypass permissions" : permMode.id === "accept_edits" ? "auto-accept edits" : permMode.id === "auto" ? "auto-approve" : "plan mode"} on`,
-                    permColor: permMode.color,
-                    onCyclePerm: () => setPermModeIdx((i) => { const next = (i + 1) % PERMISSION_MODES.length; const s = useSettingsStore.getState(); if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next]!.id }); return next; }),
-                  } : (() => {
-                    const list = PROVIDER_CONFIG.openai.permissions;
-                    const current = list.find((p) => p.id === selectedCodexPermission) ?? list[0]!;
-                    return {
-                      permLabel: `${current.label.toLowerCase()} sandbox`,
-                      permColor: current.color,
-                      onCyclePerm: cycleCodexPermission,
-                    };
-                  })())}
+                  {...providerPermissionInputProps}
                   {...(session.name ? { sessionName: session.name } : {})}
                   cwd={effectiveCwd}
                   queueCount={session.promptQueue.length}
                   draftPrompt={session.draftPrompt}
                   onDraftChange={(t) => setDraftPrompt(sessionId, t)}
                   onPasteImage={handlePasteImage}
+                  supportsImages={providerSupports(selectedProvider, "images")}
                   contextPct={session.contextMax > 0 ? Math.min(100, Math.max(0, Math.round((session.contextUsed / session.contextMax) * 100))) : 0}
                   autoCompactAt={autoCompactEnabled ? autoCompactThreshold : 0}
                   {...(isActive ? { onRegisterVoiceActions: handleRegisterVoiceActions } : {})}
@@ -2501,30 +1798,19 @@ Rules:
 
             {/* Plan section */}
             {hasPlan && (
-              <div className="cc-plan-section">
-                <div className="cc-side-header">
-                  <span>Plan</span>
-                  <div className="cc-plan-actions">
-                    <button
-                      className="cc-plan-build"
-                      onClick={() => {
-                        setPermModeIdx(3);
-                        handleSend(
-                          "Plan mode is over. You have full permissions now. Build the plan — execute every step described in the plan file. Do not skip anything.",
-                          "bypass_all"
-                        );
-                      }}
-                      disabled={session.isStreaming}
-                    >
-                      Build
-                    </button>
-                    <button className="cc-plan-close" onClick={() => setPlanContent(null)}>×</button>
-                  </div>
-                </div>
-                <div className="cc-plan-body">
-                  <pre className="cc-plan-content">{planContent}</pre>
-                </div>
-              </div>
+              <PlanViewer
+                content={planContent ?? ""}
+                variant="side"
+                isStreaming={session.isStreaming}
+                onBuild={() => {
+                  setPermModeIdx(3);
+                  handleSend(
+                    "Plan mode is over. You have full permissions now. Build the plan — execute every step described in the plan file. Do not skip anything.",
+                    "bypass_all"
+                  );
+                }}
+                onClose={clearPlanContent}
+              />
             )}
             <button className="cc-side-close" onClick={() => setSidePanelOpen(false)}>×</button>
           </div>

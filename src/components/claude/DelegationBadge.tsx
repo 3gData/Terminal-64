@@ -1,12 +1,44 @@
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useClaudeStore } from "../../stores/claudeStore";
-import { createCodexSession, sendClaudePrompt, sendCodexPrompt } from "../../lib/tauriApi";
-import { decodeCodexPermission } from "../../lib/providers";
+import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
+import { runProviderTurn } from "../../lib/providerRuntime";
+import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 import "./Delegation.css";
 
 interface DelegationBadgeProps {
   sessionId: string;
+}
+
+function providerTurnForSession(
+  sessionId: string,
+  session: ClaudeSession,
+  prompt: string,
+): ProviderTurnInput {
+  const providerState = resolveSessionProviderState(session);
+  return {
+    provider: providerState.provider,
+    sessionId,
+    cwd: session.cwd || ".",
+    prompt,
+    started: session.hasBeenStarted,
+    threadId: providerState.openai?.codexThreadId ?? null,
+    selectedModel: providerState.selectedModel,
+    selectedEffort: providerState.selectedEffort,
+    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? "workspace",
+    permissionMode: "auto",
+    permissionOverride: "bypass_all",
+    skipOpenwolf: session.skipOpenwolf,
+    seedTranscript: providerState.seedTranscript,
+    resumeAtUuid: session.resumeAtUuid ?? null,
+    forkParentSessionId: session.forkParentSessionId ?? null,
+  };
+}
+
+function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
+  const store = useClaudeStore.getState();
+  if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
+  if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
+  if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
 }
 
 export default function DelegationBadge({ sessionId }: DelegationBadgeProps) {
@@ -47,28 +79,9 @@ export default function DelegationBadge({ sessionId }: DelegationBadgeProps) {
       if (sibSession.isStreaming) {
         useClaudeStore.getState().enqueuePrompt(sibId, forwardMsg);
       } else {
-        if (sibSession.provider === "openai") {
-          const baseReq = {
-            session_id: sibId,
-            cwd: sibSession.cwd || ".",
-            prompt: forwardMsg,
-            ...(sibSession.selectedModel ? { model: sibSession.selectedModel } : {}),
-            ...(sibSession.selectedEffort ? { effort: sibSession.selectedEffort } : {}),
-            ...decodeCodexPermission("yolo"),
-          };
-          const req = sibSession.codexThreadId
-            ? { ...baseReq, thread_id: sibSession.codexThreadId }
-            : baseReq;
-          const op = sibSession.codexThreadId ? sendCodexPrompt(req) : createCodexSession(baseReq);
-          op.catch((err) => console.warn(`[delegation] Manual Codex forward failed:`, err));
-        } else {
-          sendClaudePrompt({
-            session_id: sibId,
-            cwd: sibSession.cwd || ".",
-            prompt: forwardMsg,
-            permission_mode: "bypass_all",
-          }, sibSession.skipOpenwolf).catch((err) => console.warn(`[delegation] Manual forward failed:`, err));
-        }
+        runProviderTurn(providerTurnForSession(sibId, sibSession, forwardMsg))
+          .then((result) => applyProviderTurnResult(sibId, result))
+          .catch((err) => console.warn("[delegation] Manual forward failed:", err));
       }
     }
   };

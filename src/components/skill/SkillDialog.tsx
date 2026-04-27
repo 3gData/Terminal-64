@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnClaudeWithPrompt, syncClaudeSkills, generateSkillMetadata } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
 import type { SkillInfo } from "../../lib/types";
@@ -200,7 +200,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
       const prompt = buildSkillPrompt(skillFolderPath, skillCreatorPath);
       const activeId = useCanvasStore.getState().activeTerminalId;
       const activeProvider = activeId
-        ? useClaudeStore.getState().sessions[activeId]?.provider
+        ? resolveSessionProviderState(useClaudeStore.getState().sessions[activeId]).provider
         : undefined;
       spawnClaudeWithPrompt(projectDir, `Skill: ${skillName}`, prompt, () => ({
         canvasStore: useCanvasStore,

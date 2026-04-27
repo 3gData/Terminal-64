@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { getWidgetServerPort, widgetFileModified, widgetGetState, widgetSetState, widgetClearState, proxyFetch, createBrowser, setBrowserBounds, setBrowserZoom, setBrowserVisible, closeBrowser, navigateBrowser, browserEval, shellExec, readFile, writeFile, listDirectory, searchFiles, deleteFiles, createTerminal, closeTerminal, writeTerminal, createClaudeSession, sendClaudePrompt, createCodexSession, sendCodexPrompt, onTerminalOutput, openwolfDaemonSwitch, openwolfDaemonInfo, openwolfDaemonStopAll } from "../../lib/tauriApi";
-import { decodeCodexPermission, type ProviderId } from "../../lib/providers";
+import { getWidgetServerPort, widgetFileModified, widgetGetState, widgetSetState, widgetClearState, proxyFetch, createBrowser, setBrowserBounds, setBrowserZoom, setBrowserVisible, closeBrowser, navigateBrowser, browserEval, shellExec, readFile, writeFile, listDirectory, searchFiles, deleteFiles, createTerminal, closeTerminal, writeTerminal, onTerminalOutput, openwolfDaemonSwitch, openwolfDaemonInfo, openwolfDaemonStopAll } from "../../lib/tauriApi";
+import { type ProviderId } from "../../lib/providers";
+import { runProviderTurn } from "../../lib/providerRuntime";
+import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { pushToast } from "../../lib/notifications";
-import { useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useVoiceStore } from "../../stores/voiceStore";
@@ -42,11 +44,12 @@ function buildStateSnapshot() {
   }> = {};
 
   for (const [sid, s] of Object.entries(claude.sessions)) {
+    const providerState = resolveSessionProviderState(s);
     sessions[sid] = {
       sessionId: sid,
       name: s.name,
       cwd: s.cwd,
-      provider: s.provider,
+      provider: providerState.provider,
       model: s.model,
       isStreaming: s.isStreaming,
       promptCount: s.promptCount,
@@ -74,14 +77,47 @@ function buildStateSnapshot() {
   };
 }
 
+function providerTurnForSession(
+  sessionId: string,
+  session: ClaudeSession,
+  prompt: string,
+  opts?: { started?: boolean; defaultCodexPermission?: string },
+): ProviderTurnInput {
+  const providerState = resolveSessionProviderState(session);
+  return {
+    provider: providerState.provider,
+    sessionId,
+    cwd: session.cwd || ".",
+    prompt,
+    started: opts?.started ?? session.hasBeenStarted,
+    threadId: providerState.openai?.codexThreadId ?? null,
+    selectedModel: providerState.selectedModel,
+    selectedEffort: providerState.selectedEffort,
+    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? opts?.defaultCodexPermission ?? "full-auto",
+    permissionMode: "auto",
+    skipOpenwolf: session.skipOpenwolf,
+    seedTranscript: providerState.seedTranscript,
+    resumeAtUuid: session.resumeAtUuid ?? null,
+    forkParentSessionId: session.forkParentSessionId ?? null,
+  };
+}
+
+function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
+  const store = useClaudeStore.getState();
+  if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
+  if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
+  if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
+}
+
 export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   const [widgetUrl, setWidgetUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const lastModifiedRef = useRef(0);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollInFlightRef = useRef(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const disposedRef = useRef(false);
   const reloadCounterRef = useRef(0);
 
   // Embedded browser state — native webview overlaid on the widget panel
@@ -96,17 +132,31 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   // Active plugin SSE subscriptions opened by the iframe via `t64:plugin`.
   // Keyed by the subscription id the iframe supplied so it can unsubscribe later.
   const pluginSubscriptionsRef = useRef<Map<string, PluginStreamHandle>>(new Map());
+  const terminalReadyCleanupsRef = useRef<Set<() => void>>(new Set());
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setWidgetUrl(null);
+    lastModifiedRef.current = 0;
+    reloadCounterRef.current = 0;
+
     getWidgetServerPort()
       .then((port) => {
+        if (cancelled) return;
         setWidgetUrl(`http://127.0.0.1:${port}/widgets/${widgetId}/index.html`);
         setLoading(false);
       })
       .catch((err) => {
+        if (cancelled) return;
         setError(`Widget server not available: ${err}`);
         setLoading(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [widgetId]);
 
   const lastZoomRef = useRef(0);
@@ -133,36 +183,65 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
     }
   }, []);
 
-  // RAF loop for embedded browser
+  // Embedded browser bounds sync. Native webviews sit outside the DOM, so sync
+  // on canvas/layout changes and coalesce bursts into one animation frame.
   useEffect(() => {
     if (!browserActive) return;
-    const loop = () => {
-      syncBrowserBounds();
-      browserRafRef.current = requestAnimationFrame(loop);
+    const el = panelRef.current;
+    if (!el) return;
+
+    const scheduleSync = () => {
+      if (browserRafRef.current) return;
+      browserRafRef.current = requestAnimationFrame(() => {
+        browserRafRef.current = 0;
+        syncBrowserBounds();
+      });
     };
-    browserRafRef.current = requestAnimationFrame(loop);
+
+    scheduleSync();
+    const unsubscribeCanvas = useCanvasStore.subscribe(scheduleSync);
+    const observer = new ResizeObserver(scheduleSync);
+    observer.observe(el);
+    window.addEventListener("resize", scheduleSync);
+
     return () => {
-      if (browserRafRef.current) cancelAnimationFrame(browserRafRef.current);
+      unsubscribeCanvas();
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleSync);
+      if (browserRafRef.current) {
+        cancelAnimationFrame(browserRafRef.current);
+        browserRafRef.current = 0;
+      }
     };
   }, [browserActive, syncBrowserBounds]);
 
   // Cleanup embedded browser on unmount
   useEffect(() => {
+    disposedRef.current = false;
     return () => {
+      disposedRef.current = true;
       if (embeddedBrowserId.current) {
         closeBrowser(embeddedBrowserId.current).catch(() => {});
         embeddedBrowserId.current = null;
-        setBrowserActive(false);
       }
     };
   }, []);
 
   // Poll for file changes (hot-reload any file in the widget dir)
   useEffect(() => {
-    pollRef.current = setInterval(async () => {
+    let stopped = false;
+
+    const poll = async () => {
+      if (stopped || document.hidden || pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
       try {
         const modified = await widgetFileModified(widgetId);
+        if (stopped) return;
         if (modified > 0 && modified !== lastModifiedRef.current) {
+          if (lastModifiedRef.current === 0) {
+            lastModifiedRef.current = modified;
+            return;
+          }
           lastModifiedRef.current = modified;
           // Bump a cache-buster to force iframe reload
           reloadCounterRef.current += 1;
@@ -174,19 +253,31 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
         }
       } catch (e) {
         console.warn("[widget] Poll for file changes failed:", e);
+      } finally {
+        pollInFlightRef.current = false;
       }
-    }, POLL_INTERVAL);
+    };
+
+    void poll();
+    const interval = setInterval(() => { void poll(); }, POLL_INTERVAL);
+    const onVisibilityChange = () => {
+      if (!document.hidden) void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      stopped = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [widgetId]);
 
   // ---- Event bridge: forward Claude store changes into the iframe ----
   useEffect(() => {
     const iframe = iframeRef.current;
+    let bridgeDisposed = false;
     const post = (msg: unknown) => {
-      try { iframe?.contentWindow?.postMessage(msg, "*"); } catch {}
+      try { iframeRef.current?.contentWindow?.postMessage(msg, "*"); } catch {}
     };
 
     const onLoad = () => {
@@ -275,7 +366,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
 
     // Listen for requests FROM the widget iframe
     const handleMessage = (e: MessageEvent) => {
-      if (e.source !== iframe?.contentWindow) return;
+      if (e.source !== iframeRef.current?.contentWindow) return;
       const msg = e.data;
       if (!msg || typeof msg.type !== "string") return;
 
@@ -309,6 +400,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           if (action === "subscribe") {
             const topic = typeof msg.payload?.topic === "string" ? msg.payload.topic : "*";
             const subId = typeof reqId === "string" ? reqId : Math.random().toString(36).slice(2);
+            const existing = pluginSubscriptionsRef.current.get(subId);
+            if (existing) {
+              existing.close();
+            }
             const handle = onPluginEvent(targetPlugin, topic, (frame) => {
               post({ type: "t64:plugin-event", payload: { id: subId, pluginId: targetPlugin, frame } });
             });
@@ -372,8 +467,16 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           } else {
             embeddedBrowserId.current = bid;
             createBrowser(bid, url, rect.x + inset, rect.y, rect.width - inset * 2, rect.height - inset)
-              .then(() => setBrowserActive(true))
+              .then(() => {
+                if (disposedRef.current || embeddedBrowserId.current !== bid) {
+                  closeBrowser(bid).catch(() => {});
+                  return;
+                }
+                setBrowserActive(true);
+                syncBrowserBounds();
+              })
               .catch((err) => {
+                if (disposedRef.current) return;
                 console.warn("[widget] Failed to create embedded browser:", err);
                 embeddedBrowserId.current = null;
               });
@@ -520,14 +623,29 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
             responded = true;
             post({ type: "t64:terminal-created", payload: { id: ctId, terminalId: tid } });
           };
+          let finished = false;
+          let unlisten: (() => void) | null = null;
+          let timeout: ReturnType<typeof setTimeout> | null = null;
+          const finish = (shouldRespond: boolean) => {
+            if (finished) return;
+            finished = true;
+            if (timeout) clearTimeout(timeout);
+            if (unlisten) unlisten();
+            terminalReadyCleanupsRef.current.delete(cancel);
+            if (shouldRespond) respond();
+          };
+          const cancel = () => finish(false);
+          terminalReadyCleanupsRef.current.add(cancel);
+          timeout = setTimeout(() => finish(true), 3000);
           onTerminalOutput((out) => {
-            if (out.id === tid) respond();
-          }).then((unlisten) => {
-            // Clean up listener once we've responded (or after timeout)
-            const cleanup = () => { unlisten(); respond(); };
-            if (responded) { unlisten(); return; }
-            setTimeout(cleanup, 3000);
-          });
+            if (out.id === tid) finish(true);
+          }).then((stopListening) => {
+            if (finished) {
+              stopListening();
+              return;
+            }
+            unlisten = stopListening;
+          }).catch(() => finish(true));
           return;
         }
 
@@ -547,36 +665,18 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           return;
         }
 
-        // ---- Claude Sessions ----
+        // ---- Provider Sessions ----
 
         case "t64:send-prompt": {
           const { sessionId, prompt, id: spId } = msg.payload || {};
           if (!sessionId || !prompt) return;
           const sess = useClaudeStore.getState().sessions[sessionId];
           if (!sess) { post({ type: "t64:prompt-sent", payload: { id: spId, error: "Session not found" } }); return; }
-          const op = sess.provider === "openai"
-            ? (sess.codexThreadId
-              ? sendCodexPrompt({
-                session_id: sessionId,
-                thread_id: sess.codexThreadId,
-                cwd: sess.cwd,
-                prompt,
-                ...decodeCodexPermission(sess.selectedCodexPermission || "full-auto"),
-              })
-              : createCodexSession({
-                session_id: sessionId,
-                cwd: sess.cwd,
-                prompt,
-                ...decodeCodexPermission(sess.selectedCodexPermission || "full-auto"),
-              }))
-            : sendClaudePrompt({
-              session_id: sessionId,
-              cwd: sess.cwd,
-              prompt,
-              permission_mode: "auto",
-            }, sess.skipOpenwolf);
-          op
-            .then(() => post({ type: "t64:prompt-sent", payload: { id: spId, error: null } }))
+          runProviderTurn(providerTurnForSession(sessionId, sess, prompt, { defaultCodexPermission: "full-auto" }))
+            .then((result) => {
+              applyProviderTurnResult(sessionId, result);
+              post({ type: "t64:prompt-sent", payload: { id: spId, error: null } });
+            })
             .catch((err) => post({ type: "t64:prompt-sent", payload: { id: spId, error: String(err) } }));
           return;
         }
@@ -591,22 +691,17 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           useClaudeStore.getState().createSession(sid, sessName || "Widget Session", false, true, sessCwd || ".", provider);
           if (sessPrompt) {
             setTimeout(() => {
-              useClaudeStore.getState().addUserMessage(sid, sessPrompt);
-              useClaudeStore.getState().incrementPromptCount(sid);
-              const op = provider === "openai"
-                ? createCodexSession({
-                  session_id: sid,
-                  cwd: sessCwd || ".",
-                  prompt: sessPrompt,
-                  ...decodeCodexPermission("full-auto"),
-                })
-                : createClaudeSession({
-                  session_id: sid,
-                  cwd: sessCwd || ".",
-                  prompt: sessPrompt,
-                  permission_mode: "auto",
-                }, true);
-              op.catch((err) => {
+              const store = useClaudeStore.getState();
+              const createdSession = store.sessions[sid];
+              if (!createdSession) return;
+              store.addUserMessage(sid, sessPrompt);
+              store.incrementPromptCount(sid);
+              runProviderTurn(providerTurnForSession(sid, createdSession, sessPrompt, {
+                started: false,
+                defaultCodexPermission: "full-auto",
+              })).then((result) => {
+                applyProviderTurnResult(sid, result);
+              }).catch((err) => {
                 useClaudeStore.getState().setError(sid, `Failed to start session: ${err}`);
               });
             }, 300);
@@ -761,7 +856,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           if (voiceUnlistenersRef.current.intent) return;
           onVoiceIntent((payload) => {
             post({ type: "t64:voice:intent", payload });
-          }).then((un) => { voiceUnlistenersRef.current.intent = un; }).catch(() => {});
+          }).then((un) => {
+            if (bridgeDisposed) { un(); return; }
+            voiceUnlistenersRef.current.intent = un;
+          }).catch(() => {});
           return;
         }
 
@@ -769,7 +867,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           if (voiceUnlistenersRef.current.partial) return;
           onVoicePartial((payload) => {
             post({ type: "t64:voice:partial", payload });
-          }).then((un) => { voiceUnlistenersRef.current.partial = un; }).catch(() => {});
+          }).then((un) => {
+            if (bridgeDisposed) { un(); return; }
+            voiceUnlistenersRef.current.partial = un;
+          }).catch(() => {});
           return;
         }
 
@@ -777,7 +878,10 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           if (voiceUnlistenersRef.current.final) return;
           onVoiceFinal((payload) => {
             post({ type: "t64:voice:final", payload });
-          }).then((un) => { voiceUnlistenersRef.current.final = un; }).catch(() => {});
+          }).then((un) => {
+            if (bridgeDisposed) { un(); return; }
+            voiceUnlistenersRef.current.final = un;
+          }).catch(() => {});
           return;
         }
 
@@ -813,10 +917,15 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
     window.addEventListener("message", handleMessage);
 
     return () => {
+      bridgeDisposed = true;
       unsub();
       iframe?.removeEventListener("load", onLoad);
       window.removeEventListener("message", handleMessage);
       widgetBus.unsubscribeAll(widgetId);
+      for (const cleanup of terminalReadyCleanupsRef.current) {
+        cleanup();
+      }
+      terminalReadyCleanupsRef.current.clear();
       const vu = voiceUnlistenersRef.current;
       try { vu.intent?.(); } catch { /* ignore */ }
       try { vu.partial?.(); } catch { /* ignore */ }
@@ -827,7 +936,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
       }
       pluginSubscriptionsRef.current.clear();
     };
-  }, [widgetUrl, widgetId]);
+  }, [widgetUrl, widgetId, syncBrowserBounds]);
 
   if (error) {
     return (

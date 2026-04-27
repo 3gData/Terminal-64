@@ -2,7 +2,7 @@ import { memo, useCallback, useRef, useState, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
 import { closeTerminal, writeTerminal, closeClaudeSession, closeCodexSession, renameDiscordSession, closeBrowser, createWidgetFolder } from "../../lib/tauriApi";
 import type { ProviderId } from "../../lib/providers";
 import { AnthropicLogo, OpenAILogo } from "../ui/BrandLogos";
@@ -204,7 +204,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
   const handleClose = useCallback(() => {
     if (term.panelType === "claude") {
       const sess = useClaudeStore.getState().sessions[term.terminalId];
-      if (sess?.provider === "openai") {
+      if (resolveSessionProviderState(sess).provider === "openai") {
         closeCodexSession(term.terminalId).catch(() => {});
       } else {
         closeClaudeSession(term.terminalId).catch(() => {});
@@ -268,7 +268,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
     return {
       claudeSessionName: sess?.name,
       claudeCwd: sess?.cwd,
-      claudeProvider: (sess?.provider ?? "anthropic") as ProviderId,
+      claudeProvider: resolveSessionProviderState(sess).provider,
     };
   }));
 

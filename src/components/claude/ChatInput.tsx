@@ -63,13 +63,14 @@ interface ChatInputProps {
   draftPrompt?: string;
   onDraftChange?: (text: string) => void;
   onPasteImage?: (file: File) => void;
+  supportsImages?: boolean;
   contextPct?: number;
   autoCompactAt?: number;
   onRegisterVoiceActions?: (actions: ChatInputVoiceActions | null) => void;
   sessionId?: string;
 }
 
-function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, accentColor, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, onPasteImage, contextPct, autoCompactAt, onRegisterVoiceActions, sessionId }: ChatInputProps) {
+function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isStreaming, accentColor, streamingStartedAt, disabled, slashCommands, initialText, onInitialTextConsumed, permLabel, permColor, onCyclePerm, sessionName, cwd, queueCount, draftPrompt, onDraftChange, onPasteImage, supportsImages = true, contextPct, autoCompactAt, onRegisterVoiceActions, sessionId }: ChatInputProps) {
   const [text, setText] = useState(draftPrompt || "");
   const [elapsed, setElapsed] = useState("");
   const [inlineFiles, setInlineFiles] = useState<Set<string>>(new Set());
@@ -218,6 +219,7 @@ function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isS
 
   // Load image previews for @-mentioned image files
   useEffect(() => {
+    if (!supportsImages) return;
     for (const file of inlineFiles) {
       if (IMAGE_EXTS.test(file) && !imagePreviews[file]) {
         const fullPath = cwd ? (isAbsolutePath(file) ? file : joinPath(cwd, file)) : file;
@@ -236,7 +238,11 @@ function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isS
       }
       return Object.keys(next).length === Object.keys(prev).length ? prev : next;
     });
-  }, [inlineFiles, cwd]);
+  }, [inlineFiles, cwd, supportsImages]);
+
+  useEffect(() => {
+    if (!supportsImages) setImagePreviews({});
+  }, [supportsImages]);
 
   // Thinking timer
   useEffect(() => {
@@ -560,7 +566,7 @@ function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isS
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
-      if (!onPasteImage) return;
+      if (!supportsImages || !onPasteImage) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
@@ -572,7 +578,7 @@ function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isS
         }
       }
     },
-    [onPasteImage]
+    [onPasteImage, supportsImages]
   );
 
   const selectCommand = useCallback(
@@ -739,8 +745,9 @@ function ChatInputImpl({ onSend, onCancel, onAttach, onRewrite, isRewriting, isS
 
   // Image thumbnails for @-mentioned images
   const imageFiles = useMemo(() => {
+    if (!supportsImages) return [];
     return [...inlineFiles].filter((f) => IMAGE_EXTS.test(f) && imagePreviews[f]);
-  }, [inlineFiles, imagePreviews]);
+  }, [inlineFiles, imagePreviews, supportsImages]);
 
   return (
     <div className="cc-input-container">

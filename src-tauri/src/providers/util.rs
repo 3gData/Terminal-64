@@ -363,3 +363,53 @@ pub fn sanitize_dangling_tool_uses(cwd: &str, session_id: &str) -> Result<(), St
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_event_size_truncates_json_strings_without_breaking_utf8_or_json() {
+        let big = "ø".repeat(MAX_EVENT_LINE_BYTES);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    { "type": "text", "text": big }
+                ]
+            }
+        })
+        .to_string();
+
+        let capped = cap_event_size(line);
+        assert!(
+            capped.len() < MAX_EVENT_LINE_BYTES,
+            "capped event should be small enough for renderer hot paths"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&capped).unwrap();
+        let text = parsed
+            .pointer("/message/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap();
+
+        assert!(text.contains("Terminal 64: truncated"));
+        assert!(text.starts_with('ø'));
+        assert!(text.ends_with('ø'));
+    }
+
+    #[test]
+    fn cap_event_size_wraps_oversized_non_json_as_parseable_event() {
+        let line = "x".repeat(MAX_EVENT_LINE_BYTES + 1);
+
+        let capped = cap_event_size(line);
+        let parsed: serde_json::Value = serde_json::from_str(&capped).unwrap();
+
+        assert_eq!(
+            parsed["type"].as_str(),
+            Some("Terminal64TruncatedNonJsonEvent")
+        );
+        assert!(parsed["preview"].as_str().unwrap().len() <= TRUNCATE_HEAD_BYTES);
+    }
+}

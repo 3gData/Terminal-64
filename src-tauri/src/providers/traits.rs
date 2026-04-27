@@ -1,7 +1,6 @@
-// Step 1 wires the Claude adapter only; Codex / Cursor / OpenCode arrive
-// later and will exercise the trait's full surface. Until then, the
-// trait method set, type aliases, and snapshot types are intentionally
-// unconsumed — allow dead code at the file level rather than per-item.
+// The synchronous command adapter is live for Claude and Codex. The broader
+// async provider trait remains ahead of the current UI surface, so keep the
+// unused contract pieces available without per-item allowances.
 #![allow(dead_code)]
 
 //! `ProviderAdapter` trait — Rust port of
@@ -15,13 +14,17 @@
 //! - Branded `ThreadId`/`TurnId`/`ApprovalRequestId` → `String` for Step 1.
 //!
 //! The trait is `Send + Sync` and lives behind `Arc<dyn ProviderAdapter>`
-//! in `AppState`, matching the current `Arc<ClaudeManager>` pattern.
+//! in `AppState`, matching the registry-owned adapter pattern.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 use crate::providers::events::ProviderEvent;
+use crate::types::{
+    CreateClaudeRequest, CreateCodexRequest, SendClaudePromptRequest, SendCodexPromptRequest,
+};
 
 /// Error type surfaced by every adapter method. Kept as `String` for Step 1
 /// to avoid a premature error taxonomy; Step 2 will replace this with a
@@ -54,17 +57,65 @@ pub struct ProviderAdapterCapabilities {
     pub session_model_switch: ProviderSessionModelSwitchMode,
 }
 
-// Step 1 placeholders — the exact field layouts for these payloads live in
-// `packages/contracts/src/providerRuntime.ts` (t3code) and will be bound to
-// typed Rust structs in Step 2. Keeping them as `serde_json::Value` means
-// Agent 2 can wire `claude_manager.rs` into the trait without blocking on
-// the contract binding work.
+// Future normalized payloads can replace these `serde_json::Value` aliases
+// once the full async provider adapter surface is wired end to end.
 pub type ProviderSessionStartInput = serde_json::Value;
 pub type ProviderSendTurnInput = serde_json::Value;
 pub type ProviderApprovalDecision = serde_json::Value;
 pub type ProviderUserInputAnswers = serde_json::Value;
 pub type ProviderSession = serde_json::Value;
 pub type ProviderTurnStartResult = serde_json::Value;
+
+/// Existing Tauri IPC create-session payloads, grouped behind one backend
+/// provider command boundary. The enum preserves today's public command
+/// contracts while giving `ProviderRegistry` one shape to dispatch.
+pub enum ProviderCreateSessionRequest {
+    Claude {
+        req: CreateClaudeRequest,
+        settings_path: Option<String>,
+        approver_mcp_config: Option<String>,
+        channel_server: Option<String>,
+    },
+    Codex {
+        req: CreateCodexRequest,
+    },
+}
+
+/// Existing Tauri IPC send-prompt payloads, grouped behind one backend
+/// provider command boundary.
+pub enum ProviderSendPromptRequest {
+    Claude {
+        req: SendClaudePromptRequest,
+        settings_path: Option<String>,
+        approver_mcp_config: Option<String>,
+        channel_server: Option<String>,
+    },
+    Codex {
+        req: SendCodexPromptRequest,
+    },
+}
+
+/// Synchronous command surface used by the current Tauri IPC wrappers. This
+/// is intentionally smaller than the future normalized `ProviderAdapter`
+/// contract below: it only covers the common Claude/Codex lifecycle commands
+/// that already exist today.
+pub trait ProviderCommandAdapter: Send + Sync {
+    fn create_session(
+        &self,
+        app_handle: &AppHandle,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<String, ProviderAdapterError>;
+
+    fn send_prompt(
+        &self,
+        app_handle: &AppHandle,
+        req: ProviderSendPromptRequest,
+    ) -> Result<(), ProviderAdapterError>;
+
+    fn cancel_session(&self, session_id: &str) -> Result<(), ProviderAdapterError>;
+
+    fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError>;
+}
 
 /// Matches `ProviderThreadTurnSnapshot` in ProviderAdapter.ts — one turn
 /// inside a thread snapshot returned by [`ProviderAdapter::read_thread`].
@@ -98,7 +149,7 @@ pub struct ProviderThreadSnapshot {
 /// `respondToUserInput`, `stopSession`, `listSessions`, `hasSession`,
 /// `readThread`, `rollbackThread`, `stopAll`, `streamEvents`.
 #[async_trait]
-pub trait ProviderAdapter: Send + Sync {
+pub trait ProviderAdapter: ProviderCommandAdapter + Send + Sync {
     /// `provider` discriminator — ProviderAdapter.ts:48.
     fn provider(&self) -> ProviderKind;
 

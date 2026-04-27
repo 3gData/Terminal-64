@@ -10,6 +10,8 @@ import {
 } from "../lib/constants";
 import type { SnapGuide } from "../lib/snapUtils";
 
+const CANVAS_STORAGE_KEY = "terminal64-session";
+
 export type PanelType = "terminal" | "claude" | "shared-chat" | "widget" | "browser";
 
 export interface CanvasTerminal {
@@ -128,6 +130,15 @@ interface SerializedTerminal {
   browserUrl?: string;
 }
 
+interface SerializedCanvasSession {
+  terminals: SerializedTerminal[];
+  panX: number;
+  panY: number;
+  zoom: number;
+}
+
+let lastSavedSessionJson: string | null = null;
+
 function deserializeTerminals(items: SerializedTerminal[]): CanvasTerminal[] {
   return items.map((t, i) => {
     const panelType: PanelType = t.panelType ?? "terminal";
@@ -174,8 +185,9 @@ function makeTerminal(zIndex: number, overrides: Partial<CanvasTerminal> = {}): 
 // Load saved session at init time (before any components mount)
 function getInitialState() {
   try {
-    const raw = localStorage.getItem("terminal64-session");
+    const raw = localStorage.getItem(CANVAS_STORAGE_KEY);
     if (raw) {
+      lastSavedSessionJson = raw;
       const session = JSON.parse(raw);
       if (session.terminals?.length) {
         const terminals = deserializeTerminals(session.terminals);
@@ -207,28 +219,38 @@ function getInitialState() {
 }
 
 let dirty = false;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useCanvasStore = create<CanvasState>((set, get) => {
   const initial = getInitialState();
 
-  // Auto-save only when dirty
-  const saveIntervalId = setInterval(() => {
-    if (dirty) {
-      try {
-        useCanvasStore.getState().saveSession();
-        dirty = false;
-      } catch (e) {
-        console.warn("[canvasStore] Auto-save failed:", e);
-      }
+  const flushScheduledSave = () => {
+    saveTimer = null;
+    if (!dirty) return;
+    try {
+      useCanvasStore.getState().saveSession();
+      dirty = false;
+    } catch (e) {
+      console.warn("[canvasStore] Auto-save failed:", e);
     }
-  }, AUTO_SAVE_INTERVAL_MS);
+  };
 
   // Clean up on HMR to avoid stacking intervals
   if (import.meta.hot) {
-    import.meta.hot.dispose(() => clearInterval(saveIntervalId));
+    import.meta.hot.dispose(() => {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+    });
   }
 
-  const markDirty = () => { dirty = true; };
+  const markDirty = () => {
+    dirty = true;
+    if (!saveTimer) {
+      saveTimer = setTimeout(flushScheduledSave, AUTO_SAVE_INTERVAL_MS);
+    }
+  };
 
   /** Shared helper: position a new panel, add it to state, mark dirty. */
   function addPanel(
@@ -476,10 +498,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
 
     pan: (dx: number, dy: number) => {
       set((s) => ({ panX: s.panX + dx, panY: s.panY + dy }));
+      markDirty();
     },
 
     setZoom: (zoom: number) => {
       set({ zoom: Math.max(0.1, Math.min(5, zoom)) });
+      markDirty();
     },
 
     zoomAtPoint: (newZoom: number, cx: number, cy: number) => {
@@ -491,6 +515,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         panX: cx - (cx - s.panX) * ratio,
         panY: cy - (cy - s.panY) * ratio,
       });
+      markDirty();
     },
 
     centerView: (viewportW: number, viewportH: number) => {
@@ -515,11 +540,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       const panX = (viewportW - contentW * zoom) / 2 - minX * zoom;
       const panY = (viewportH - contentH * zoom) / 2 - minY * zoom;
       set({ panX, panY, zoom });
+      markDirty();
     },
 
     saveSession: () => {
       const s = get();
-      const session = {
+      const session: SerializedCanvasSession = {
         terminals: s.terminals
           .filter((t) => !t.poppedOut)
           .map((t) => ({
@@ -541,7 +567,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         zoom: s.zoom,
       };
       try {
-        localStorage.setItem("terminal64-session", JSON.stringify(session));
+        const json = JSON.stringify(session);
+        if (json === lastSavedSessionJson) return;
+        localStorage.setItem(CANVAS_STORAGE_KEY, json);
+        lastSavedSessionJson = json;
       } catch (e) {
         console.warn("[canvasStore] Failed to save session:", e);
       }

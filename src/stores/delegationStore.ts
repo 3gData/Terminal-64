@@ -3,6 +3,11 @@ import { v4 as uuidv4 } from "uuid";
 import type { DelegateTaskStatus, DelegationGroup, DelegationStatus } from "../lib/types";
 
 const STORAGE_KEY = "terminal64-delegations";
+const COMPLETED_GROUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_PERSISTED_GROUPS = 40;
+const MAX_PERSISTED_RESULT_CHARS = 200_000;
+const MAX_PERSISTED_ACTION_CHARS = 1_000;
+const MAX_PERSISTED_CONTEXT_CHARS = 100_000;
 
 interface DelegationState {
   groups: Record<string, DelegationGroup>;
@@ -28,24 +33,126 @@ interface DelegationState {
   getSiblingSessionIds: (sessionId: string) => string[];
 }
 
+type IdleDeadlineLike = { didTimeout: boolean; timeRemaining: () => number };
+type WindowWithIdleCallback = Window & typeof globalThis & {
+  requestIdleCallback?: (callback: (deadline: IdleDeadlineLike) => void, options?: { timeout: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+let lastSavedGroupsJson: string | null = null;
+
+function scheduleIdle(callback: () => void): number {
+  const w = window as WindowWithIdleCallback;
+  if (typeof w.requestIdleCallback === "function") {
+    return w.requestIdleCallback(() => callback(), { timeout: 2000 });
+  }
+  return window.setTimeout(callback, 0);
+}
+
+function cancelIdle(handle: number) {
+  const w = window as WindowWithIdleCallback;
+  if (typeof w.cancelIdleCallback === "function") {
+    w.cancelIdleCallback(handle);
+  } else {
+    window.clearTimeout(handle);
+  }
+}
+
+function truncateForStorage(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[truncated for Terminal 64 metadata persistence; full task history remains in session logs]`;
+}
+
+function groupLastActivity(group: DelegationGroup): number {
+  let last = group.createdAt;
+  for (const task of group.tasks) {
+    last = Math.max(last, task.completedAt ?? 0, task.startedAt ?? 0, task.lastActionAt ?? 0);
+  }
+  return last;
+}
+
+function compactGroupForStorage(group: DelegationGroup): DelegationGroup {
+  return {
+    ...group,
+    ...(group.sharedContext !== undefined
+      ? { sharedContext: truncateForStorage(group.sharedContext, MAX_PERSISTED_CONTEXT_CHARS) }
+      : {}),
+    tasks: group.tasks.map((task) => ({
+      ...task,
+      ...(task.result !== undefined
+        ? { result: truncateForStorage(task.result, MAX_PERSISTED_RESULT_CHARS) }
+        : {}),
+      ...(task.lastAction !== undefined
+        ? { lastAction: truncateForStorage(task.lastAction, MAX_PERSISTED_ACTION_CHARS) }
+        : {}),
+    })),
+  };
+}
+
+function pruneGroups(groups: Record<string, DelegationGroup>): Record<string, DelegationGroup> {
+  const now = Date.now();
+  const entries = Object.entries(groups)
+    .filter(([, group]) => {
+      if (group.status === "active" || group.status === "merging") return true;
+      return now - groupLastActivity(group) <= COMPLETED_GROUP_RETENTION_MS;
+    })
+    .sort((a, b) => groupLastActivity(b[1]) - groupLastActivity(a[1]));
+
+  const kept: Record<string, DelegationGroup> = {};
+  let completedKept = 0;
+  for (const [id, group] of entries) {
+    const active = group.status === "active" || group.status === "merging";
+    if (!active) {
+      if (completedKept >= MAX_PERSISTED_GROUPS) continue;
+      completedKept++;
+    }
+    kept[id] = compactGroupForStorage(group);
+  }
+  return kept;
+}
+
 function saveToStorage(groups: Record<string, DelegationGroup>) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(groups));
+    const json = JSON.stringify(pruneGroups(groups));
+    if (json === lastSavedGroupsJson) return;
+    localStorage.setItem(STORAGE_KEY, json);
+    lastSavedGroupsJson = json;
   } catch (e) {
     console.warn("[delegation] Failed to save to localStorage:", e);
   }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-function debouncedSave(groups: Record<string, DelegationGroup>) {
+let idleSaveHandle: number | null = null;
+let savePending = false;
+
+function flushPendingSave() {
+  if (idleSaveHandle !== null) return;
+  idleSaveHandle = scheduleIdle(() => {
+    idleSaveHandle = null;
+    if (!savePending) return;
+    savePending = false;
+    saveToStorage(useDelegationStore.getState().groups);
+    if (savePending) flushPendingSave();
+  });
+}
+
+function debouncedSave() {
+  savePending = true;
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveToStorage(groups), 1000);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    flushPendingSave();
+  }, 1000);
 }
 
 function loadFromStorage(): Record<string, DelegationGroup> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      lastSavedGroupsJson = raw;
+      return pruneGroups(JSON.parse(raw) as Record<string, DelegationGroup>);
+    }
   } catch (e) {
     console.warn("[delegation] Failed to load from localStorage:", e);
   }
@@ -66,7 +173,7 @@ function buildSessionIndex(groups: Record<string, DelegationGroup>): Record<stri
 function buildParentIndex(groups: Record<string, DelegationGroup>): Record<string, string> {
   const idx: Record<string, string> = {};
   for (const [gid, group] of Object.entries(groups)) {
-    idx[group.parentSessionId] = gid;
+    if (!idx[group.parentSessionId]) idx[group.parentSessionId] = gid;
   }
   return idx;
 }
@@ -98,7 +205,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
     set((s) => {
       const groups = { ...s.groups, [group.id]: group };
       const parentToGroup = { ...s.parentToGroup, [parentSessionId]: group.id };
-      debouncedSave(groups);
+      debouncedSave();
       return { groups, parentToGroup };
     });
     return group;
@@ -111,7 +218,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       const tasks = group.tasks.map((t) => (t.id === taskId ? { ...t, sessionId } : t));
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
       const sessionToGroup = { ...s.sessionToGroup, [sessionId]: groupId };
-      debouncedSave(groups);
+      debouncedSave();
       return { groups, sessionToGroup };
     });
   },
@@ -133,7 +240,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
           : t,
       );
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
-      debouncedSave(groups);
+      debouncedSave();
       return { groups };
     });
   },
@@ -146,7 +253,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
         t.id === taskId ? { ...t, lastForwardedMessageId: messageId } : t,
       );
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
-      debouncedSave(groups);
+      debouncedSave();
       return { groups };
     });
   },
@@ -161,7 +268,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
         t.id === taskId ? { ...t, lastAction: action, lastActionAt: Date.now() } : t,
       );
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
-      debouncedSave(groups);
+      debouncedSave();
       return { groups };
     });
   },
@@ -171,7 +278,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       const group = s.groups[groupId];
       if (!group) return s;
       const groups = { ...s.groups, [groupId]: { ...group, status } };
-      debouncedSave(groups);
+      debouncedSave();
       return { groups };
     });
   },
@@ -186,7 +293,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       }
       const parentToGroup = { ...s.parentToGroup };
       delete parentToGroup[removed.parentSessionId];
-      debouncedSave(rest);
+      debouncedSave();
       return { groups: rest, sessionToGroup, parentToGroup };
     });
   },
@@ -217,3 +324,16 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       .map((t) => t.sessionId);
   },
 }));
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (idleSaveHandle !== null) {
+      cancelIdle(idleSaveHandle);
+      idleSaveHandle = null;
+    }
+  });
+}

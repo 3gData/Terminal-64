@@ -28,13 +28,15 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderKind, ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
+    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderSendPromptRequest,
+    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
     ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
     ProviderUserInputAnswers,
 };
@@ -120,6 +122,8 @@ struct CodexInstance {
 }
 
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const APP_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const APP_SERVER_TURN_START_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Copy)]
 enum InvokeMode<'a> {
@@ -313,6 +317,12 @@ fn app_server_thread_params(
         params.insert("approvalPolicy".to_string(), json!(policy));
     }
     params.insert("serviceName".to_string(), json!("terminal-64"));
+    // Codex app-server 0.125+ generated contracts require these booleans on
+    // thread/start and thread/resume. Omitting them can make the request fail
+    // before the server returns a thread id, which leaves Terminal 64 waiting
+    // forever to issue turn/start.
+    params.insert("experimentalRawEvents".to_string(), json!(false));
+    params.insert("persistExtendedHistory".to_string(), json!(true));
     JsonValue::Object(params)
 }
 
@@ -344,8 +354,11 @@ fn app_server_turn_params(
     params.insert("threadId".to_string(), json!(thread_id));
     params.insert(
         "input".to_string(),
-        json!([{ "type": "text", "text": prompt }]),
+        json!([{ "type": "text", "text": prompt, "text_elements": [] }]),
     );
+    if let Some(effort) = effort.as_ref().filter(|e| !e.is_empty()) {
+        params.insert("effort".to_string(), json!(effort));
+    }
     if let Some(mode) = collaboration_mode
         .as_ref()
         .map(|s| s.trim())
@@ -378,6 +391,146 @@ fn write_json_rpc(stdin: &mut std::process::ChildStdin, value: &JsonValue) -> Re
         .and_then(|_| stdin.write_all(b"\n"))
         .and_then(|_| stdin.flush())
         .map_err(|e| format!("codex app-server write: {}", e))
+}
+
+fn app_server_stderr_excerpt(stderr_buf: &Arc<Mutex<String>>) -> String {
+    stderr_buf.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+fn app_server_timeout_message(
+    phase: &str,
+    timeout: Duration,
+    stderr_buf: &Arc<Mutex<String>>,
+) -> String {
+    let stderr_msg = app_server_stderr_excerpt(stderr_buf);
+    let mut msg = format!(
+        "Codex app-server timed out during {} after {}s.",
+        phase,
+        timeout.as_secs()
+    );
+    if !stderr_msg.is_empty() {
+        msg.push_str(" Stderr: ");
+        msg.push_str(&stderr_msg);
+    } else {
+        msg.push_str(
+            " Install a recent OpenAI Codex CLI or set T64_CODEX_TRANSPORT=exec to use the legacy transport.",
+        );
+    }
+    msg
+}
+
+fn app_server_remaining_timeout(
+    phase: &str,
+    deadline: Instant,
+    total_timeout: Duration,
+    stderr_buf: &Arc<Mutex<String>>,
+) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| app_server_timeout_message(phase, total_timeout, stderr_buf))
+}
+
+fn read_app_server_message(
+    rx: &std::sync::mpsc::Receiver<Result<Option<String>, String>>,
+    phase: &str,
+    timeout: Option<Duration>,
+    stderr_buf: &Arc<Mutex<String>>,
+) -> Result<Option<JsonValue>, String> {
+    loop {
+        let received = match timeout {
+            Some(timeout) => match rx.recv_timeout(timeout) {
+                Ok(v) => v,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(app_server_timeout_message(phase, timeout, stderr_buf));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Ok(None);
+                }
+            },
+            None => match rx.recv() {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            },
+        };
+        let Some(line) = received.map_err(|e| format!("codex app-server read: {}", e))? else {
+            return Ok(None);
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed: JsonValue = serde_json::from_str(trimmed).map_err(|e| {
+            format!(
+                "codex app-server JSON parse during {}: {} (line: {})",
+                phase,
+                e,
+                &trimmed[..trimmed.len().min(240)]
+            )
+        })?;
+        return Ok(Some(parsed));
+    }
+}
+
+fn app_server_error_from_response(method: &str, parsed: &JsonValue) -> String {
+    let message = get_json_str(parsed, &["error", "message"])
+        .or_else(|| get_json_str(parsed, &["error", "data", "message"]))
+        .unwrap_or("Codex app-server request failed");
+    let code = parsed
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .map(|v| format!(" code={}", v))
+        .unwrap_or_default();
+    format!("Codex app-server {} failed{}: {}", method, code, message)
+}
+
+fn app_server_protocol_diagnostics(value: &JsonValue) -> JsonValue {
+    let result = value.get("result").unwrap_or(value);
+    let server_info = result
+        .get("serverInfo")
+        .or_else(|| result.get("server_info"));
+    let server_name = server_info
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let server_version = server_info
+        .and_then(|s| s.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let protocol_version = result
+        .get("protocolVersion")
+        .or_else(|| result.get("protocol_version"))
+        .or_else(|| result.get("appServerProtocolVersion"))
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    json!({
+        "serverName": server_name,
+        "serverVersion": server_version,
+        "protocolVersion": protocol_version,
+    })
+}
+
+fn emit_app_server_diagnostic(
+    app_handle: &AppHandle,
+    session_id: &str,
+    phase: &str,
+    details: JsonValue,
+) {
+    safe_eprintln!(
+        "[codex:app-server] diagnostics session={} phase={} details={}",
+        session_id,
+        phase,
+        details
+    );
+    emit_codex_json(
+        app_handle,
+        session_id,
+        json!({
+            "type": "app_server.diagnostic",
+            "phase": phase,
+            "details": details,
+        }),
+    );
 }
 
 fn emit_codex_json(app_handle: &AppHandle, session_id: &str, value: JsonValue) {
@@ -496,6 +649,26 @@ fn app_server_notification_to_exec_event(method: &str, params: &JsonValue) -> Op
                 },
             }))
         }
+        "mcpServer/startupStatus/updated" => {
+            let name = get_json_str(params, &["name"])?;
+            let status = match get_json_str(params, &["status"]).unwrap_or("unknown") {
+                "ready" => "connected",
+                other => other,
+            };
+            let mut server = json!({
+                "name": name,
+                "status": status,
+            });
+            if let Some(error) = params.get("error") {
+                if !error.is_null() {
+                    server["error"] = error.clone();
+                }
+            }
+            Some(json!({
+                "type": "mcp.status.updated",
+                "server": server,
+            }))
+        }
         "error" => {
             let message = get_json_str(params, &["error", "message"])
                 .or_else(|| get_json_str(params, &["message"]))
@@ -587,7 +760,11 @@ fn app_server_notification_to_exec_event(method: &str, params: &JsonValue) -> Op
 }
 
 fn app_server_thread_id_from_response(value: &JsonValue) -> Option<String> {
-    get_json_str(value, &["result", "thread", "id"]).map(|s| s.to_string())
+    get_json_str(value, &["result", "thread", "id"])
+        .or_else(|| get_json_str(value, &["result", "threadId"]))
+        .or_else(|| get_json_str(value, &["result", "thread_id"]))
+        .or_else(|| get_json_str(value, &["result", "id"]))
+        .map(|s| s.to_string())
 }
 
 fn codex_content_text(payload: &JsonValue) -> String {
@@ -1145,12 +1322,12 @@ fn spawn_app_server_turn(
     mcp_env: &Option<HashMap<String, String>>,
 ) -> Result<(), String> {
     {
-        let mut inst = instances.lock().map_err(|e| e.to_string())?;
-        if let Some(mut old) = inst.remove(&session_id) {
-            let _ = old.child.kill();
-            let _ = old.child.wait();
-            drop(inst);
-            std::thread::sleep(std::time::Duration::from_millis(150));
+        let inst = instances.lock().map_err(|e| e.to_string())?;
+        if inst.contains_key(&session_id) {
+            return Err(format!(
+                "Codex session {} already has an active turn. Wait for it to finish or cancel it before sending another prompt.",
+                session_id
+            ));
         }
     }
 
@@ -1211,13 +1388,24 @@ fn spawn_app_server_turn(
     }
 
     let gen = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    instances.lock().map_err(|e| e.to_string())?.insert(
-        session_id.clone(),
-        CodexInstance {
-            child,
-            generation: gen,
-        },
-    );
+    {
+        let mut inst = instances.lock().map_err(|e| e.to_string())?;
+        if inst.contains_key(&session_id) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Codex session {} already has an active turn. Wait for it to finish or cancel it before sending another prompt.",
+                session_id
+            ));
+        }
+        inst.insert(
+            session_id.clone(),
+            CodexInstance {
+                child,
+                generation: gen,
+            },
+        );
+    }
 
     let sid = session_id.clone();
     let handle = app_handle.clone();
@@ -1240,7 +1428,29 @@ fn spawn_app_server_turn(
             sid,
             gen
         );
-        let mut reader = std::io::BufReader::new(stdout);
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<Result<Option<String>, String>>();
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = line_tx.send(Ok(None));
+                        break;
+                    }
+                    Ok(_) => {
+                        if line_tx.send(Ok(Some(line.clone()))).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = line_tx.send(Err(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
 
         let initialize = json!({
             "id": 1,
@@ -1306,48 +1516,95 @@ fn spawn_app_server_turn(
         }
 
         let mut thread_id: Option<String> = None;
+        let mut turn_requested = false;
         let mut turn_started = false;
         let mut saw_output = false;
-        let mut line = String::new();
+        let startup_deadline = Instant::now() + APP_SERVER_STARTUP_TIMEOUT;
+        let mut turn_start_deadline: Option<Instant> = None;
         loop {
-            line.clear();
-            let read = match reader.read_line(&mut line) {
-                Ok(n) => n,
+            let (phase, timeout) = if !turn_requested {
+                let phase = format!("{} response", thread_method);
+                match app_server_remaining_timeout(
+                    &phase,
+                    startup_deadline,
+                    APP_SERVER_STARTUP_TIMEOUT,
+                    &stderr_buf,
+                ) {
+                    Ok(timeout) => (phase, Some(timeout)),
+                    Err(e) => {
+                        emit_codex_error(&handle, &sid, e);
+                        break;
+                    }
+                }
+            } else if !turn_started {
+                let phase = "turn/start response".to_string();
+                let deadline = turn_start_deadline
+                    .unwrap_or_else(|| Instant::now() + APP_SERVER_TURN_START_TIMEOUT);
+                match app_server_remaining_timeout(
+                    &phase,
+                    deadline,
+                    APP_SERVER_TURN_START_TIMEOUT,
+                    &stderr_buf,
+                ) {
+                    Ok(timeout) => (phase, Some(timeout)),
+                    Err(e) => {
+                        emit_codex_error(&handle, &sid, e);
+                        break;
+                    }
+                }
+            } else {
+                ("turn stream".to_string(), None)
+            };
+            let parsed = match read_app_server_message(&line_rx, &phase, timeout, &stderr_buf) {
+                Ok(Some(parsed)) => parsed,
+                Ok(None) => {
+                    if !saw_output {
+                        let stderr_msg = app_server_stderr_excerpt(&stderr_buf);
+                        let msg = if stderr_msg.is_empty() {
+                            "Codex app-server exited without output. Install a recent OpenAI Codex CLI or set T64_CODEX_TRANSPORT=exec to use the legacy transport.".to_string()
+                        } else {
+                            stderr_msg
+                        };
+                        emit_codex_error(&handle, &sid, msg);
+                    } else if !turn_started {
+                        emit_codex_error(
+                            &handle,
+                            &sid,
+                            format!("Codex app-server exited before {}", phase),
+                        );
+                    }
+                    break;
+                }
                 Err(e) => {
-                    emit_codex_error(&handle, &sid, format!("codex app-server read: {}", e));
+                    emit_codex_error(&handle, &sid, e);
                     break;
                 }
             };
-            if read == 0 {
-                if !saw_output {
-                    let stderr_msg = stderr_buf.lock().map(|s| s.clone()).unwrap_or_default();
-                    let msg = if stderr_msg.is_empty() {
-                        "Codex app-server exited without output. Install a recent OpenAI Codex CLI or set T64_CODEX_TRANSPORT=exec to use the legacy transport.".to_string()
-                    } else {
-                        stderr_msg
-                    };
-                    emit_codex_error(&handle, &sid, msg);
-                }
-                break;
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
             saw_output = true;
-            let parsed: JsonValue = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(e) => {
-                    safe_eprintln!("[codex:app-server] JSON parse error for {}: {}", sid, e);
-                    continue;
-                }
-            };
 
             if parsed.get("error").is_some() && parsed.get("id").is_some() {
-                let msg = get_json_str(&parsed, &["error", "message"])
-                    .unwrap_or("Codex app-server request failed");
-                emit_codex_error(&handle, &sid, msg);
+                let method = match parsed.get("id").and_then(|v| v.as_i64()) {
+                    Some(1) => "initialize",
+                    Some(2) => thread_method,
+                    Some(3) => "turn/start",
+                    _ => "request",
+                };
+                emit_codex_error(
+                    &handle,
+                    &sid,
+                    app_server_error_from_response(method, &parsed),
+                );
                 break;
+            }
+
+            if parsed.get("id").and_then(|v| v.as_i64()) == Some(1) {
+                emit_app_server_diagnostic(
+                    &handle,
+                    &sid,
+                    "initialize",
+                    app_server_protocol_diagnostics(&parsed),
+                );
+                continue;
             }
 
             if parsed.get("id").and_then(|v| v.as_i64()) == Some(2) {
@@ -1381,11 +1638,24 @@ fn spawn_app_server_turn(
                         emit_codex_error(&handle, &sid, e);
                         break;
                     }
-                    turn_started = true;
+                    turn_requested = true;
+                    turn_start_deadline = Some(Instant::now() + APP_SERVER_TURN_START_TIMEOUT);
                 } else {
-                    emit_codex_error(&handle, &sid, "Codex app-server did not return a thread id");
+                    emit_codex_error(
+                        &handle,
+                        &sid,
+                        format!(
+                            "Codex app-server {} did not return a thread id",
+                            thread_method
+                        ),
+                    );
                     break;
                 }
+                continue;
+            }
+
+            if parsed.get("id").and_then(|v| v.as_i64()) == Some(3) {
+                turn_started = true;
                 continue;
             }
 
@@ -1412,14 +1682,31 @@ fn spawn_app_server_turn(
                 if let Some(event) = app_server_notification_to_exec_event(method, &params) {
                     emit_codex_json(&handle, &sid, event);
                 }
+                if matches!(
+                    method,
+                    "turn/started"
+                        | "item/started"
+                        | "item/agentMessage/delta"
+                        | "item/plan/delta"
+                        | "item/commandExecution/outputDelta"
+                        | "item/fileChange/outputDelta"
+                        | "item/fileChange/patchUpdated"
+                ) {
+                    turn_started = true;
+                }
                 if method == "turn/completed" {
                     break;
                 }
             }
         }
 
-        if !turn_started && thread_id.is_none() {
-            safe_eprintln!("[codex:app-server] Turn never started for {}", sid);
+        if !turn_started {
+            safe_eprintln!(
+                "[codex:app-server] Turn never started for {} (thread_id={:?}, turn_requested={})",
+                sid,
+                thread_id,
+                turn_requested
+            );
         }
         finish_app_server_turn(&instances_clone, &handle, &sid, gen, false);
     });
@@ -1616,7 +1903,17 @@ impl CodexAdapter {
     }
 
     pub fn close(&self, session_id: &str) -> Result<(), String> {
-        self.cancel(session_id)
+        let instance = self
+            .instances
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(session_id);
+        if let Some(mut instance) = instance {
+            let _ = instance.child.kill();
+            let _ = instance.child.wait();
+            safe_eprintln!("[codex] Closed session {}", session_id);
+        }
+        Ok(())
     }
 
     pub fn rollback_thread(
@@ -1679,6 +1976,46 @@ impl CodexAdapter {
 impl Default for CodexAdapter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ProviderCommandAdapter for CodexAdapter {
+    fn create_session(
+        &self,
+        app_handle: &AppHandle,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<String, ProviderAdapterError> {
+        match req {
+            ProviderCreateSessionRequest::Codex { req } => {
+                CodexAdapter::create_session(self, app_handle, req)
+            }
+            ProviderCreateSessionRequest::Claude { .. } => {
+                Err("CodexAdapter received Claude create-session request".to_string())
+            }
+        }
+    }
+
+    fn send_prompt(
+        &self,
+        app_handle: &AppHandle,
+        req: ProviderSendPromptRequest,
+    ) -> Result<(), ProviderAdapterError> {
+        match req {
+            ProviderSendPromptRequest::Codex { req } => {
+                CodexAdapter::send_prompt(self, app_handle, req)
+            }
+            ProviderSendPromptRequest::Claude { .. } => {
+                Err("CodexAdapter received Claude send-prompt request".to_string())
+            }
+        }
+    }
+
+    fn cancel_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
+        self.cancel(session_id)
+    }
+
+    fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
+        self.close(session_id)
     }
 }
 

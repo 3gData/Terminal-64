@@ -2,6 +2,12 @@ import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from "re
 import { createPortal } from "react-dom";
 import type { ChatMessage as ChatMessageType, ToolCall } from "../../lib/types";
 import type { ProviderId } from "../../lib/providers";
+import {
+  getProviderToolChanges,
+  getProviderToolDiff,
+  getProviderToolFilePath,
+  getProviderToolPaths,
+} from "../../contracts/providerEvents";
 import { readFileBase64 } from "../../lib/tauriApi";
 
 const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
@@ -387,13 +393,13 @@ export function toolHeader(tc: ToolCall): { icon: string; title: string; detail:
     case "Bash":
       return { icon: "$", title: "Bash", detail: String(i.command || "").slice(0, 80) };
     case "Read":
-      return { icon: "◉", title: "Read", detail: shortPath(i.file_path) };
+      return { icon: "◉", title: "Read", detail: shortPath(getProviderToolFilePath(i)) };
     case "Edit":
-      return { icon: "✎", title: "Edit", detail: shortPath(i.file_path || i.path) };
+      return { icon: "✎", title: "Edit", detail: shortPath(getProviderToolFilePath(i)) };
     case "Write":
-      return { icon: "+", title: "Write", detail: shortPath(i.file_path) };
+      return { icon: "+", title: "Write", detail: shortPath(getProviderToolFilePath(i)) };
     case "MultiEdit":
-      return { icon: "✎", title: "MultiEdit", detail: shortPath(i.file_path || i.path) };
+      return { icon: "✎", title: "MultiEdit", detail: shortPath(getProviderToolFilePath(i)) };
     case "Glob":
       return { icon: "⊛", title: "Glob", detail: String(i.pattern || "") };
     case "Grep":
@@ -407,7 +413,7 @@ export function toolHeader(tc: ToolCall): { icon: string; title: string; detail:
     case "Skill":
       return { icon: "/", title: String(i.skill || "Skill"), detail: String(i.args || "") };
     case "NotebookEdit":
-      return { icon: "✎", title: "Notebook", detail: shortPath(i.file_path) };
+      return { icon: "✎", title: "Notebook", detail: shortPath(getProviderToolFilePath(i)) };
     case "AskUserQuestion":
       return { icon: "?", title: "Question", detail: "" };
     default:
@@ -455,7 +461,7 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
   if (tc.name === "Edit" && i.old_string !== undefined) {
     return (
       <div className="cc-tc-body">
-        <div className="cc-tc-diff" onClick={() => onEditClick?.(tc.id, String(i.file_path || ""), String(i.old_string), String(i.new_string))} style={{ cursor: onEditClick ? "pointer" : undefined }}>
+        <div className="cc-tc-diff" onClick={() => onEditClick?.(tc.id, getProviderToolFilePath(i), String(i.old_string), String(i.new_string))} style={{ cursor: onEditClick ? "pointer" : undefined }}>
           <div className="cc-tc-diff-add">{String(i.new_string)}</div>
           <div className="cc-tc-diff-del">{String(i.old_string)}</div>
         </div>
@@ -464,31 +470,22 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     );
   }
 
-  // Codex file_change — Codex often reports path/change/result rather than
-  // Claude-style old_string/new_string. Render it as an edit card, not raw JSON.
-  if (tc.name === "Edit" && (i.file_path || i.path || i.change || i.changes || i.paths)) {
-    const paths = Array.isArray(i.paths)
-      ? i.paths.filter((path): path is string => typeof path === "string" && path.length > 0)
-      : [];
-    const rawChanges = Array.isArray(i.changes)
-      ? i.changes.filter((change): change is Record<string, unknown> => Boolean(change) && typeof change === "object")
-      : [];
+  // Normalized edit shape without old_string/new_string still renders as an edit card.
+  if (tc.name === "Edit" && (getProviderToolFilePath(i) || i.change || i.changes || i.paths)) {
+    const paths = getProviderToolPaths(i);
+    const rawChanges = getProviderToolChanges(i);
     const changes = rawChanges
       .map((change) => {
-        const rawPath = typeof change.path === "string"
-          ? change.path
-          : typeof change.file_path === "string"
-            ? change.file_path
-            : "";
+        const rawPath = change.path || change.file_path || "";
         const path = rawPath ? shortPath(rawPath) : "";
-        const kind = typeof change.kind === "string" ? change.kind : "update";
+        const kind = change.kind || "update";
         return path ? `${kind}: ${path}` : kind;
       });
-    const path = String(i.file_path || i.path || paths[0] || rawChanges[0]?.file_path || rawChanges[0]?.path || "");
+    const path = getProviderToolFilePath(i) || paths[0] || rawChanges[0]?.file_path || rawChanges[0]?.path || "";
     const short = shortPath(path);
     const change = i.change ? String(i.change) : "";
     const summary = changes.length > 0 ? changes.join("\n") : short ? `File: ${short}` : "File changed";
-    const previewDiff = rawChanges.find((entry) => typeof entry.diff === "string" && entry.diff.trim())?.diff || i.diff;
+    const previewDiff = getProviderToolDiff(i);
     const previewLines = diffLines(previewDiff);
     return (
       <div className="cc-tc-body">
@@ -521,17 +518,13 @@ function ToolBody({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: stri
     );
   }
 
-  // MultiEdit-style Codex file_change with multiple paths but no primary path.
+  // Normalized multi-file edit shape.
   if (tc.name === "MultiEdit" && Array.isArray(i.changes)) {
-    const rawChanges = i.changes.filter((change): change is Record<string, unknown> => Boolean(change) && typeof change === "object");
+    const rawChanges = getProviderToolChanges(i);
     return (
       <div className="cc-tc-body">
         {rawChanges.map((change, idx) => {
-          const path = typeof change.path === "string"
-            ? change.path
-            : typeof change.file_path === "string"
-              ? change.file_path
-              : "";
+          const path = change.path || change.file_path || "";
           const lines = diffLines(change.diff);
           return (
             <div
@@ -643,7 +636,7 @@ function groupLabel(tcs: ToolCall[]): { icon: string; name: string; details: str
         };
       }
       case "Read":
-        return { icon: "◉", name: `Read ${tcs.length} files`, details: tcs.map((tc) => shortPath(tc.input.file_path)).join(", ") };
+        return { icon: "◉", name: `Read ${tcs.length} files`, details: tcs.map((tc) => shortPath(getProviderToolFilePath(tc.input))).join(", ") };
       case "Grep":
         return { icon: "⊛", name: `${tcs.length} searches`, details: tcs.map((tc) => `/${tc.input.pattern || ""}/`).join(", ") };
       case "Glob":

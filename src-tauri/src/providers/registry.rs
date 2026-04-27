@@ -1,21 +1,24 @@
-// Step 1 only registers the Claude adapter and reaches for it via the
-// typed handle on `AppState`. The trait-object lookup methods (`get`,
-// `claude`, `codex`, `all`, `iter`, `kinds`, `stop_all`) come online when a
-// second adapter (Codex) lands. Allow dead code until then.
+// The registry already owns Claude and Codex command dispatch. Some typed
+// lookup helpers are kept ahead of deeper provider-adapter migration work.
 #![allow(dead_code)]
 
 //! Provider registry — thin wrapper around a
 //! `HashMap<ProviderKind, Arc<dyn ProviderAdapter>>`.
 //!
-//! Replaces the direct `Arc<ClaudeManager>` field on `AppState`. Call sites
-//! use `registry.get(ProviderKind::ClaudeAgent)` instead of hard-coding a
-//! concrete manager, so adding Codex is a `register(...)` call rather than a
-//! call-site rewrite.
+//! Replaces direct manager fields on `AppState` for common lifecycle
+//! commands. Call sites dispatch by `ProviderKind` instead of hard-coding a
+//! concrete manager, so new CLI providers can register an adapter instead of
+//! rewriting every command path.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::providers::traits::{ProviderAdapter, ProviderAdapterError, ProviderKind};
+use tauri::AppHandle;
+
+use crate::providers::traits::{
+    ProviderAdapter, ProviderAdapterError, ProviderCreateSessionRequest, ProviderKind,
+    ProviderSendPromptRequest,
+};
 
 pub struct ProviderRegistry {
     adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>>,
@@ -37,6 +40,52 @@ impl ProviderRegistry {
     /// Look up an adapter by kind.
     pub fn get(&self, kind: ProviderKind) -> Option<Arc<dyn ProviderAdapter>> {
         self.adapters.get(&kind).cloned()
+    }
+
+    fn require(
+        &self,
+        kind: ProviderKind,
+    ) -> Result<Arc<dyn ProviderAdapter>, ProviderAdapterError> {
+        self.get(kind)
+            .ok_or_else(|| format!("No provider adapter registered for {:?}", kind))
+    }
+
+    /// Dispatch today's create-session IPC command through the registered
+    /// provider adapter without changing the public Tauri command contract.
+    pub fn create_session(
+        &self,
+        kind: ProviderKind,
+        app_handle: &AppHandle,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<String, ProviderAdapterError> {
+        self.require(kind)?.create_session(app_handle, req)
+    }
+
+    /// Dispatch today's send-prompt IPC command through the registered
+    /// provider adapter without changing the public Tauri command contract.
+    pub fn send_prompt(
+        &self,
+        kind: ProviderKind,
+        app_handle: &AppHandle,
+        req: ProviderSendPromptRequest,
+    ) -> Result<(), ProviderAdapterError> {
+        self.require(kind)?.send_prompt(app_handle, req)
+    }
+
+    pub fn cancel_session(
+        &self,
+        kind: ProviderKind,
+        session_id: &str,
+    ) -> Result<(), ProviderAdapterError> {
+        self.require(kind)?.cancel_session(session_id)
+    }
+
+    pub fn close_session(
+        &self,
+        kind: ProviderKind,
+        session_id: &str,
+    ) -> Result<(), ProviderAdapterError> {
+        self.require(kind)?.close_session(session_id)
     }
 
     /// Typed accessor for the Claude adapter.

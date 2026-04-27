@@ -97,7 +97,12 @@ pub struct DelegationMessage {
     pub msg_type: String, // "chat" | "complete"
 }
 
-type PendingMap = Arc<Mutex<HashMap<String, mpsc::SyncSender<(bool, String)>>>>;
+struct PendingPermission {
+    session_id: String,
+    tx: mpsc::SyncSender<(bool, String)>,
+}
+
+type PendingMap = Arc<Mutex<HashMap<String, PendingPermission>>>;
 
 pub struct PermissionServer {
     port: AtomicU16,
@@ -411,7 +416,8 @@ impl PermissionServer {
 
     /// Unregister a session: remove mapping, delete temp files, drop pending requests.
     pub fn unregister_session(&self, run_token: &str) {
-        self.session_map
+        let session_id = self
+            .session_map
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(run_token);
@@ -435,17 +441,34 @@ impl PermissionServer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(run_token);
+        if let Some(session_id) = session_id {
+            let pending_for_session: Vec<mpsc::SyncSender<(bool, String)>> = {
+                let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+                let request_ids: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, entry)| entry.session_id == session_id)
+                    .map(|(request_id, _)| request_id.clone())
+                    .collect();
+                request_ids
+                    .into_iter()
+                    .filter_map(|request_id| pending.remove(&request_id).map(|entry| entry.tx))
+                    .collect()
+            };
+            for tx in pending_for_session {
+                let _ = tx.send((false, "Session closed".to_string()));
+            }
+        }
     }
 
     /// Resolve a pending permission request.
     pub fn resolve(&self, request_id: &str, allow: bool, reason: &str) {
-        if let Some(tx) = self
+        if let Some(entry) = self
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(request_id)
         {
-            let _ = tx.send((allow, reason.to_string()));
+            let _ = entry.tx.send((allow, reason.to_string()));
         }
     }
 }
@@ -705,10 +728,13 @@ fn handle_connection(
             &session_id[..session_id.len().min(8)]
         );
         let (tx, rx) = mpsc::sync_channel(1);
-        pending
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(request_id.clone(), tx);
+        pending.lock().map_err(|e| e.to_string())?.insert(
+            request_id.clone(),
+            PendingPermission {
+                session_id: session_id.clone(),
+                tx,
+            },
+        );
 
         let _ = app_handle.emit(
             "permission-request",
@@ -912,10 +938,13 @@ fn handle_connection(
             );
 
             let (tx, rx) = mpsc::sync_channel(1);
-            pending
-                .lock()
-                .map_err(|e| e.to_string())?
-                .insert(request_id.clone(), tx);
+            pending.lock().map_err(|e| e.to_string())?.insert(
+                request_id.clone(),
+                PendingPermission {
+                    session_id: session_id.clone(),
+                    tx,
+                },
+            );
 
             let _ = app_handle.emit(
                 "permission-request",

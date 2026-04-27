@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useClaudeStore, STORAGE_KEY } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore, STORAGE_KEY } from "../../stores/claudeStore";
 import { listDiskSessions, listCodexDiskSessions } from "../../lib/tauriApi";
 import type { DiskSession } from "../../lib/types";
 import type { ProviderId } from "../../lib/providers";
@@ -252,11 +252,11 @@ function getNamedSessions(
 ): { id: string; name: string; messageCount: number }[] {
   const results: { id: string; name: string; messageCount: number }[] = [];
   const seen = new Set<string>();
-  const providerMatch = (p: string | undefined) => (p ?? "anthropic") === provider;
+  const providerMatch = (session: any) => resolveSessionProviderState(session).provider === provider;
 
   // Live sessions
   for (const [id, s] of Object.entries(liveSessions)) {
-    if (s.name && cwdMatch(s.cwd, cwd) && providerMatch(s.provider)) {
+    if (s.name && cwdMatch(s.cwd, cwd) && providerMatch(s)) {
       results.push({ id, name: s.name, messageCount: s.messages?.length || 0 });
       seen.add(id);
     }
@@ -272,7 +272,7 @@ function getNamedSessions(
           session.name &&
           !seen.has(id) &&
           cwdMatch(session.cwd, cwd) &&
-          providerMatch(session.provider)
+          providerMatch(session)
         ) {
           results.push({ id, name: session.name, messageCount: session.messages?.length || 0 });
         }

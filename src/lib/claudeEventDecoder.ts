@@ -1,3 +1,10 @@
+import {
+  buildProviderToolCall,
+  buildProviderToolResult,
+  type ProviderToolCall,
+  type ProviderToolResult,
+} from "../contracts/providerEvents";
+
 export interface ClaudeUsage {
   input_tokens?: number;
   cache_creation_input_tokens?: number;
@@ -93,4 +100,36 @@ export interface ClaudeStreamEvent {
 export function getClaudeContextWindowForModel(model: string): number {
   if (/\[1m\]|-1m\b|:1m\b/i.test(model)) return 1_000_000;
   return 200_000;
+}
+
+export function claudeBlockToProviderToolCall(
+  block: ClaudeContentBlock,
+  parentToolUseId?: string,
+): ProviderToolCall | null {
+  if (block.type !== "tool_use" || !block.id) return null;
+  return buildProviderToolCall({
+    id: block.id,
+    name: block.name ?? "",
+    input: block.input ?? {},
+    ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
+  });
+}
+
+export function claudeToolResultText(block: ClaudeContentBlock): string {
+  if (typeof block.content === "string") return block.content;
+  if (Array.isArray(block.content)) {
+    return block.content
+      .map((contentBlock) => contentBlock.type === "text" ? contentBlock.text : JSON.stringify(contentBlock))
+      .join("\n");
+  }
+  return JSON.stringify(block.content);
+}
+
+export function claudeBlockToProviderToolResult(block: ClaudeContentBlock): ProviderToolResult | null {
+  if (block.type !== "tool_result" || !block.tool_use_id) return null;
+  return buildProviderToolResult({
+    id: block.tool_use_id,
+    result: claudeToolResultText(block),
+    isError: block.is_error || false,
+  });
 }

@@ -5,10 +5,10 @@
 //! CLI backend (Claude Agent CLI, Codex app-server, …) implements
 //! [`ProviderAdapter`] so call sites in `lib.rs` stay provider-agnostic.
 
-// Step 1 ports the Claude side only; Codex / Cursor / OpenCode adapters
-// land later. The infra types and re-exports below are part of the public
-// surface those adapters will consume — silencing the unused warnings now
-// keeps the scaffolding intact without polluting CI output.
+// Claude and Codex both implement the current command adapter surface. The
+// broader infra types and re-exports below are part of the public surface
+// future adapters will consume, so silence unused warnings at the module
+// boundary instead of sprinkling per-item allowances.
 #![allow(unused_imports)]
 
 pub mod claude;
@@ -24,7 +24,8 @@ pub use events::{ProviderEvent, ProviderEventBase};
 pub use registry::ProviderRegistry;
 pub use traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderKind, ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
+    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderSendPromptRequest,
+    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
     ProviderSessionStartInput, ProviderThreadSnapshot, ProviderThreadTurnSnapshot,
     ProviderTurnStartResult, ProviderUserInputAnswers,
 };

@@ -1,8 +1,8 @@
 import { useCallback } from "react";
 import { useCanvasStore } from "../stores/canvasStore";
-import { useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import { prepareProviderFork } from "../lib/providerRuntime";
-import { forkCodexThread } from "../lib/tauriApi";
+import type { ProviderForkInput, ProviderForkResult } from "../contracts/providerRuntime";
 
 interface UseChatForkOptions {
   sessionId: string;
@@ -14,6 +14,9 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     const store = useClaudeStore.getState();
     const sess = store.sessions[sessionId];
     if (!sess) return;
+    const providerState = resolveSessionProviderState(sess);
+    const provider = providerState.provider;
+    const codexThreadId = providerState.openai?.codexThreadId ?? null;
 
     const msgIdx = sess.messages.findIndex((m) => m.id === messageId);
     if (msgIdx < 0) return;
@@ -30,39 +33,45 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
       effectiveCwd, false, undefined, undefined, x, y, w, h,
     );
 
-    let forkedCodexThreadId: string | null = null;
-    let shouldSeedCodexTranscript = false;
+    // Seed the child store row before any async fork work. The new panel mounts
+    // immediately after addClaudeTerminalAt; if ClaudeChat wins that race it will
+    // create the session with the default Anthropic provider.
+    store.createSession(newPanel.terminalId, undefined, false, undefined, effectiveCwd, provider);
+    store.setSelectedModel(newPanel.terminalId, providerState.selectedModel);
+    store.setSelectedEffort(newPanel.terminalId, providerState.selectedEffort);
+    store.setSelectedCodexPermission(newPanel.terminalId, providerState.openai?.selectedCodexPermission ?? null);
 
-    if (forkedMessages.length > 0 && sess.provider === "anthropic") {
+    let forkResult: ProviderForkResult = {};
+    if (forkedMessages.length > 0) {
+      const forkInput: ProviderForkInput = {
+        provider,
+        parentSessionId: sessionId,
+        newSessionId: newPanel.terminalId,
+        cwd: effectiveCwd,
+        keepMessages: msgIdx,
+        preMessages: sess.messages,
+      };
+      if (codexThreadId !== undefined) {
+        forkInput.codexThreadId = codexThreadId;
+      }
       try {
-        await prepareProviderFork(sess.provider, sessionId, newPanel.terminalId, effectiveCwd, msgIdx);
+        forkResult = await prepareProviderFork(forkInput);
       } catch (err) {
         console.warn("[fork] provider fork preparation failed; falling back to first-turn fork handling:", err);
+        if (provider === "openai") {
+          forkResult = { seedTranscript: true };
+        }
       }
-    } else if (forkedMessages.length > 0 && sess.provider === "openai" && sess.codexThreadId) {
-      const totalTurns = sess.messages.filter((m) => m.role === "user").length;
-      const keepTurns = forkedMessages.filter((m) => m.role === "user").length;
-      const dropTurns = Math.max(0, totalTurns - keepTurns);
-      try {
-        forkedCodexThreadId = await forkCodexThread(sess.codexThreadId, effectiveCwd, dropTurns);
-      } catch (err) {
-        console.warn("[fork] Codex app-server fork failed; falling back to seeded transcript:", err);
-        shouldSeedCodexTranscript = true;
-      }
-    } else if (forkedMessages.length > 0 && sess.provider === "openai") {
-      shouldSeedCodexTranscript = true;
     }
 
-    store.createSession(newPanel.terminalId, undefined, false, undefined, sess.cwd, sess.provider);
-    if (forkedCodexThreadId) {
-      store.setCodexThreadId(newPanel.terminalId, forkedCodexThreadId);
+    if (forkResult.codexThreadId) {
+      store.setCodexThreadId(newPanel.terminalId, forkResult.codexThreadId);
     }
     if (forkedMessages.length > 0) {
       store.loadFromDisk(newPanel.terminalId, forkedMessages);
-      if (sess.provider === "openai" && shouldSeedCodexTranscript) {
+      if (provider === "openai" && forkResult.seedTranscript) {
         store.setSeedTranscript(newPanel.terminalId, forkedMessages);
       }
     }
-    store.setCwd(newPanel.terminalId, effectiveCwd);
   }, [sessionId, effectiveCwd]);
 }

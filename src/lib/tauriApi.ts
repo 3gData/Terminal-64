@@ -10,6 +10,8 @@ import type {
   ClaudeDone,
   CreateCodexRequest,
   SendCodexPromptRequest,
+  ProviderCreateRequest,
+  ProviderSendRequest,
   CodexEvent,
   CodexDone,
   SlashCommand,
@@ -174,31 +176,19 @@ function resolveOpenwolf(skipOpenwolf?: boolean) {
 /// JSONL path is known immediately — no wait on the first `system/init`
 /// stream event.
 export async function createClaudeSession(req: CreateClaudeRequest, skipOpenwolf?: boolean): Promise<string> {
-  const ow = resolveOpenwolf(skipOpenwolf);
-  return invoke<string>("create_claude_session", {
-    req,
-    openwolfEnabled: ow.enabled,
-    openwolfAutoInit: ow.autoInit,
-    openwolfDesignQc: ow.designQc,
-  });
+  return providerCreate({ provider: "anthropic", req }, skipOpenwolf);
 }
 
 export async function sendClaudePrompt(req: SendClaudePromptRequest, skipOpenwolf?: boolean): Promise<void> {
-  const ow = resolveOpenwolf(skipOpenwolf);
-  return invoke("send_claude_prompt", {
-    req,
-    openwolfEnabled: ow.enabled,
-    openwolfAutoInit: ow.autoInit,
-    openwolfDesignQc: ow.designQc,
-  });
+  return providerSend({ provider: "anthropic", req }, skipOpenwolf);
 }
 
 export async function cancelClaude(sessionId: string): Promise<void> {
-  return invoke("cancel_claude", { sessionId });
+  return providerCancel("anthropic", sessionId);
 }
 
 export async function closeClaudeSession(sessionId: string): Promise<void> {
-  return invoke("close_claude_session", { sessionId });
+  return providerClose("anthropic", sessionId);
 }
 
 export function onClaudeEvent(callback: (payload: ClaudeEvent) => void): Promise<UnlistenFn> {
@@ -212,31 +202,49 @@ export function onClaudeDone(callback: (payload: ClaudeDone) => void): Promise<U
 // ── Codex (OpenAI Codex CLI) ──────────────────────────────
 
 export async function createCodexSession(req: CreateCodexRequest, skipOpenwolf?: boolean): Promise<string> {
-  const ow = resolveOpenwolf(skipOpenwolf);
-  return invoke<string>("create_codex_session", {
-    req,
-    openwolfEnabled: ow.enabled,
-    openwolfAutoInit: ow.autoInit,
-    openwolfDesignQc: ow.designQc,
-  });
+  return providerCreate({ provider: "openai", req }, skipOpenwolf);
 }
 
 export async function sendCodexPrompt(req: SendCodexPromptRequest, skipOpenwolf?: boolean): Promise<void> {
+  return providerSend({ provider: "openai", req }, skipOpenwolf);
+}
+
+export async function providerCreate(input: ProviderCreateRequest, skipOpenwolf?: boolean): Promise<string> {
   const ow = resolveOpenwolf(skipOpenwolf);
-  return invoke("send_codex_prompt", {
-    req,
+  return invoke<string>("provider_create", {
+    provider: input.provider,
+    req: input.req,
     openwolfEnabled: ow.enabled,
     openwolfAutoInit: ow.autoInit,
     openwolfDesignQc: ow.designQc,
   });
 }
 
+export async function providerSend(input: ProviderSendRequest, skipOpenwolf?: boolean): Promise<void> {
+  const ow = resolveOpenwolf(skipOpenwolf);
+  return invoke("provider_send", {
+    provider: input.provider,
+    req: input.req,
+    openwolfEnabled: ow.enabled,
+    openwolfAutoInit: ow.autoInit,
+    openwolfDesignQc: ow.designQc,
+  });
+}
+
+export async function providerCancel(provider: ProviderId, sessionId: string): Promise<void> {
+  return invoke("provider_cancel", { provider, sessionId });
+}
+
+export async function providerClose(provider: ProviderId, sessionId: string): Promise<void> {
+  return invoke("provider_close", { provider, sessionId });
+}
+
 export async function cancelCodex(sessionId: string): Promise<void> {
-  return invoke("cancel_codex", { sessionId });
+  return providerCancel("openai", sessionId);
 }
 
 export async function closeCodexSession(sessionId: string): Promise<void> {
-  return invoke("close_codex_session", { sessionId });
+  return providerClose("openai", sessionId);
 }
 
 export async function rollbackCodexThread(threadId: string, cwd: string, numTurns: number): Promise<void> {

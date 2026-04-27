@@ -1,11 +1,12 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 import { useCanvasStore } from "../stores/canvasStore";
-import { cancelClaude, cancelCodex, createCodexSession, sendClaudePrompt, sendCodexPrompt, cleanupDelegationGroup, clearT64DelegationEnv, deleteSessionJsonl, closeClaudeSession, closeCodexSession } from "../lib/tauriApi";
-import { decodeCodexPermission } from "../lib/providers";
-import type { ChatMessage, ToolCall, HookEventPayload } from "../lib/types";
+import { cleanupDelegationGroup, clearT64DelegationEnv, deleteSessionJsonl } from "../lib/tauriApi";
+import { cancelProviderSession, closeProviderSession, runProviderTurn } from "../lib/providerRuntime";
+import type { ChatMessage, PermissionMode, ToolCall, HookEventPayload } from "../lib/types";
+import type { ProviderTurnInput, ProviderTurnResult } from "../contracts/providerRuntime";
 
 const FORWARDING_PREFIX = "[Update from";
 const MAX_SUMMARY_LENGTH = 800;
@@ -33,6 +34,51 @@ function closeSharedChatPanel(groupId: string) {
   }
 }
 
+function providerTurnForSession({
+  sessionId,
+  session,
+  prompt,
+  permissionMode,
+  permissionOverride,
+  defaultCodexPermission = "full-auto",
+}: {
+  sessionId: string;
+  session: ClaudeSession;
+  prompt: string;
+  permissionMode: PermissionMode;
+  permissionOverride?: PermissionMode;
+  defaultCodexPermission?: string;
+}): ProviderTurnInput {
+  const providerState = resolveSessionProviderState(session);
+  const input: ProviderTurnInput = {
+    provider: providerState.provider,
+    sessionId,
+    cwd: session.cwd || ".",
+    prompt,
+    started: session.hasBeenStarted,
+    threadId: providerState.openai?.codexThreadId ?? null,
+    selectedModel: providerState.selectedModel,
+    selectedEffort: providerState.selectedEffort,
+    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? defaultCodexPermission,
+    permissionMode,
+    skipOpenwolf: session.skipOpenwolf,
+    seedTranscript: providerState.seedTranscript,
+    resumeAtUuid: session.resumeAtUuid ?? null,
+    forkParentSessionId: session.forkParentSessionId ?? null,
+  };
+  if (permissionOverride !== undefined) {
+    input.permissionOverride = permissionOverride;
+  }
+  return input;
+}
+
+function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
+  const store = useClaudeStore.getState();
+  if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
+  if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
+  if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
+}
+
 /**
  * Tear down every child session for a delegation group. Delegation children
  * are ephemeral by contract — they must leave no trace in localStorage, in
@@ -53,14 +99,12 @@ function purgeDelegationChildren(groupId: string) {
     if (!childId) continue;
     clearIdleTimer(childId);
     // Kill the CLI subprocess if still alive
-    const childProvider = claudeStore.sessions[childId]?.provider ?? parentSession?.provider ?? "anthropic";
-    if (childProvider === "openai") {
-      cancelCodex(childId).catch(() => {});
-      closeCodexSession(childId).catch(() => {});
-    } else {
-      cancelClaude(childId).catch(() => {});
-      closeClaudeSession(childId).catch(() => {});
-    }
+    const childSession = claudeStore.sessions[childId];
+    const childProvider = childSession
+      ? resolveSessionProviderState(childSession).provider
+      : resolveSessionProviderState(parentSession).provider;
+    cancelProviderSession(childId, childProvider).catch(() => {});
+    closeProviderSession(childId, childProvider).catch(() => {});
     // Drop from the store (ephemeral sessions are already skipped by
     // saveToStorage — this just frees memory and removes the canvas-less entry)
     claudeStore.removeSession(childId);
@@ -330,28 +374,14 @@ export async function performMerge(groupId: string) {
   } else {
     useClaudeStore.getState().addUserMessage(group.parentSessionId, mergePrompt);
     try {
-      if (parentSession.provider === "openai") {
-        const baseReq = {
-          session_id: group.parentSessionId,
-          cwd: parentSession.cwd || ".",
-          prompt: mergePrompt,
-          ...(parentSession.selectedModel ? { model: parentSession.selectedModel } : {}),
-          ...(parentSession.selectedEffort ? { effort: parentSession.selectedEffort } : {}),
-          ...decodeCodexPermission(parentSession.selectedCodexPermission || "full-auto"),
-        };
-        if (parentSession.codexThreadId) {
-          await sendCodexPrompt({ ...baseReq, thread_id: parentSession.codexThreadId });
-        } else {
-          await createCodexSession(baseReq);
-        }
-      } else {
-        await sendClaudePrompt({
-          session_id: group.parentSessionId,
-          cwd: parentSession.cwd || ".",
-          prompt: mergePrompt,
-          permission_mode: group.parentPermissionMode || "auto",
-        }, parentSession.skipOpenwolf);
-      }
+      const result = await runProviderTurn(providerTurnForSession({
+        sessionId: group.parentSessionId,
+        session: parentSession,
+        prompt: mergePrompt,
+        permissionMode: group.parentPermissionMode || "auto",
+        defaultCodexPermission: "full-auto",
+      }));
+      applyProviderTurnResult(group.parentSessionId, result);
       mergeSucceeded = true;
     } catch (err) {
       console.warn("[delegation] Failed to merge to parent:", err);
@@ -364,7 +394,7 @@ export async function performMerge(groupId: string) {
     delStore.setGroupStatus(groupId, "merged");
     closeSharedChatPanel(groupId);
     cleanupDelegationGroup(groupId).catch(() => {});
-    if (parentSession?.provider !== "openai" && parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
+    if (resolveSessionProviderState(parentSession).provider !== "openai" && parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
     purgeDelegationChildren(groupId);
   }
 }
@@ -395,7 +425,7 @@ export function endDelegation(groupId: string, forceCancel = false) {
     closeSharedChatPanel(groupId);
     cleanupDelegationGroup(groupId).catch(() => {});
     const parentSession = useClaudeStore.getState().sessions[group.parentSessionId];
-    if (parentSession?.provider !== "openai" && parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
+    if (resolveSessionProviderState(parentSession).provider !== "openai" && parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
     purgeDelegationChildren(groupId);
   }
 }
