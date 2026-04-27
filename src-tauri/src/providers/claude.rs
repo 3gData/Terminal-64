@@ -1,18 +1,17 @@
 //! `ClaudeAdapter` — the Claude-CLI-backed implementation of `ProviderAdapter`.
 //!
-//! Step 1 port: the CLI spawning / JSONL streaming / cancel / close code was
-//! lifted verbatim from the former `ClaudeManager` (`claude_manager.rs`) so
-//! the frontend IPC stays byte-identical (`claude-event`, `claude-done` are
-//! still emitted by `spawn_and_stream`).
+//! The CLI spawning / JSONL streaming / cancel / close code moved here from
+//! the former `ClaudeManager` (`claude_manager.rs`) so Claude participates in
+//! the same provider registry as Codex while preserving the existing
+//! `claude-event` / `claude-done` stream shape.
 //!
 //! The trait impl covers the methods that map 1:1 to today's behaviour
 //! (`interrupt_turn`, `stop_session`, `has_session`, `list_sessions`,
 //! `stop_all`, `stream_events`); the normalized `start_session` /
 //! `send_turn` / `read_thread` / `rollback_thread` / `respond_to_*`
-//! surfaces return an error string until Step 2 splits the
-//! `CreateClaudeRequest` fields into a generic `ProviderSessionStartInput` +
-//! `ClaudeSessionStartOptions` pair. The Tauri command layer keeps using
-//! the inherent `create_session` / `send_prompt` / `cancel` / `close`
+//! surfaces return an error string until the normalized async provider
+//! contract is wired end to end. The Tauri command layer keeps using the
+//! command-adapter `create_session` / `send_prompt` / `cancel` / `close`
 //! methods so the IPC surface is unchanged.
 //!
 //! Shared helpers (`shim_command`, `cap_event_size`,
@@ -688,17 +687,17 @@ impl ProviderCommandAdapter for ClaudeAdapter {
 
 // ── ProviderAdapter trait impl ─────────────────────────────
 //
-// Step 1: the inherent methods above are what the Tauri command layer calls
-// (preserving IPC byte-for-byte). The trait methods below cover cases that
-// map cleanly to today's behaviour; anything requiring a new request-shape
-// split (`start_session`, `send_turn`, `read_thread`, `rollback_thread`,
-// `respond_to_*`) returns an error string until Step 2.
+// The command-adapter methods above are what the Tauri command layer calls
+// today. The normalized async trait methods below cover cases that map cleanly
+// to current behavior; anything requiring a new request-shape split
+// (`start_session`, `send_turn`, `read_thread`, `rollback_thread`,
+// `respond_to_*`) returns an error string until that surface is wired.
 //
 // `stream_events` returns a fresh empty channel for now — no producer is
-// wired in Step 1 because nothing consumes the normalized stream yet
+// wired because nothing consumes the normalized Rust stream yet
 // (`useClaudeEvents.ts` still listens for the legacy `claude-event` topic).
-// Step 2 hooks `spawn_and_stream` into a broadcast channel and converts to
-// per-call mpsc here.
+// A later pass can hook `spawn_and_stream` into a broadcast channel and
+// convert to per-call mpsc here.
 
 #[async_trait]
 impl ProviderAdapter for ClaudeAdapter {
@@ -714,17 +713,14 @@ impl ProviderAdapter for ClaudeAdapter {
         &self,
         _input: ProviderSessionStartInput,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err(
-            "ClaudeAdapter::start_session not wired in Step 1 — call inherent create_session"
-                .to_string(),
-        )
+        Err("ClaudeAdapter::start_session not wired into normalized provider surface; call create_session through ProviderCommandAdapter".to_string())
     }
 
     async fn send_turn(
         &self,
         _input: ProviderSendTurnInput,
     ) -> Result<ProviderTurnStartResult, ProviderAdapterError> {
-        Err("ClaudeAdapter::send_turn not wired in Step 1 — call inherent send_prompt".to_string())
+        Err("ClaudeAdapter::send_turn not wired into normalized provider surface; call send_prompt through ProviderCommandAdapter".to_string())
     }
 
     async fn interrupt_turn(
@@ -742,12 +738,9 @@ impl ProviderAdapter for ClaudeAdapter {
         _decision: ProviderApprovalDecision,
     ) -> Result<(), ProviderAdapterError> {
         // Claude routes approvals via the MCP permission-prompt tool
-        // (see `build_command` / permission_server.rs). The trait method
-        // will be wired when Codex arrives and needs a shared surface.
-        Err(
-            "ClaudeAdapter::respond_to_request: approvals flow through the MCP shim in Step 1"
-                .to_string(),
-        )
+        // (see `build_command` / permission_server.rs). This normalized
+        // approval surface is not wired to the current command adapter.
+        Err("ClaudeAdapter::respond_to_request: approvals flow through the MCP shim".to_string())
     }
 
     async fn respond_to_user_input(
@@ -817,10 +810,9 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     async fn stream_events(&self) -> mpsc::Receiver<ProviderEvent> {
-        // Step 1: producer not wired (legacy `claude-event` channel still
-        // carries events). Hand callers an empty receiver so the trait
-        // contract holds. Step 2 swaps this for a broadcast→mpsc bridge fed
-        // by `spawn_and_stream`.
+        // Producer not wired: the legacy `claude-event` channel still carries
+        // events. Hand callers an empty receiver so the trait contract holds
+        // until a broadcast-to-mpsc bridge is added around `spawn_and_stream`.
         let (_tx, rx) = mpsc::channel(1);
         rx
     }

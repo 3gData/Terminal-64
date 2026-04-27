@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnClaudeWithPrompt, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
+import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnProviderSessionWithPrompt, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -99,7 +99,7 @@ window.parent.postMessage({ type: "t64:write-terminal", payload: { terminalId: t
 
 ---
 
-### 4. CLAUDE SESSIONS — Create sessions and send prompts
+### 4. AI SESSIONS — Create sessions and send prompts
 
 | Request | Payload | Response event | Response payload |
 |---|---|---|---|
@@ -110,7 +110,7 @@ window.parent.postMessage({ type: "t64:write-terminal", payload: { terminalId: t
 
 ---
 
-### 5. REAL-TIME EVENTS — Listen to Claude activity
+### 5. REAL-TIME EVENTS — Listen to AI session activity
 
 Events pushed FROM Terminal 64 (listen with \`window.addEventListener("message", handler)\`):
 
@@ -118,7 +118,7 @@ Events pushed FROM Terminal 64 (listen with \`window.addEventListener("message",
 |---|---|---|
 | \`t64:init\` | \`{ sessions, activeTerminals, theme }\` | On iframe load — full app state snapshot |
 | \`t64:state\` | Same as init | Response to \`t64:request-state\` |
-| \`t64:message\` | \`{ sessionId, messageId, role, content, toolCalls[] }\` | New message in any Claude session |
+| \`t64:message\` | \`{ sessionId, messageId, role, content, toolCalls[] }\` | New message in any AI session |
 | \`t64:tool-result\` | \`{ sessionId, toolCallId, toolName, input, result, isError }\` | Tool call completed |
 | \`t64:streaming\` | \`{ sessionId, isStreaming }\` | A specific session starts/stops streaming |
 | \`t64:any-streaming\` | \`{ isStreaming }\` | True if ANY session is currently streaming |
@@ -178,7 +178,7 @@ const saved = await t64("t64:get-state", { key: "lastQuery" });
 
 | Request | Payload | Response |
 |---|---|---|
-| \`t64:open-file\` | \`{ path }\` | — (opens in first available Claude session's editor) |
+| \`t64:open-file\` | \`{ path }\` | — (opens in first available AI session's editor) |
 
 \`\`\`js
 window.parent.postMessage({ type: "t64:open-file", payload: { path: "/Users/me/project/src/main.ts" } }, "*");
@@ -348,13 +348,13 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
       const widgetName = name.trim();
       // Open widget panel on canvas
       useCanvasStore.getState().addWidgetTerminal(id, widgetName);
-      // Open a Claude session pointed at the widget folder with system prompt
+      // Open a provider-backed session pointed at the widget folder with the system prompt.
       const fullPrompt = WIDGET_SYSTEM_PROMPT + "\n\n" + buildWidgetContext();
       const activeId = useCanvasStore.getState().activeTerminalId;
       const activeProvider = activeId
         ? resolveSessionProviderState(useClaudeStore.getState().sessions[activeId]).provider
         : undefined;
-      spawnClaudeWithPrompt(folderPath, `Widget: ${widgetName}`, fullPrompt, () => ({
+      spawnProviderSessionWithPrompt(folderPath, `Widget: ${widgetName}`, fullPrompt, () => ({
         canvasStore: useCanvasStore,
         claudeStore: useClaudeStore,
         settingsStore: useSettingsStore,

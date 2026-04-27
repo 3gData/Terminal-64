@@ -269,7 +269,7 @@ input.ft-title--editing {
   pointer-events: none !important;
 }
 
-/* ---- Border Beam (streaming Claude session) ---- */
+/* ---- Border Beam (streaming AI session) ---- */
 
 @property --ft-beam-angle {
   syntax: "<angle>";

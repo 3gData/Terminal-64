@@ -3,7 +3,7 @@ import { useShallow } from "zustand/react/shallow";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";
 import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
-import { closeTerminal, writeTerminal, closeClaudeSession, closeCodexSession, renameDiscordSession, closeBrowser, createWidgetFolder } from "../../lib/tauriApi";
+import { closeTerminal, writeTerminal, closeProviderSession, renameDiscordSession, closeBrowser, createWidgetFolder } from "../../lib/tauriApi";
 import type { ProviderId } from "../../lib/providers";
 import { AnthropicLogo, OpenAILogo } from "../ui/BrandLogos";
 import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
@@ -204,11 +204,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
   const handleClose = useCallback(() => {
     if (term.panelType === "claude") {
       const sess = useClaudeStore.getState().sessions[term.terminalId];
-      if (resolveSessionProviderState(sess).provider === "openai") {
-        closeCodexSession(term.terminalId).catch(() => {});
-      } else {
-        closeClaudeSession(term.terminalId).catch(() => {});
-      }
+      closeProviderSession(term.terminalId, resolveSessionProviderState(sess).provider).catch(() => {});
     } else if (term.panelType === "browser") {
       closeBrowser(term.terminalId).catch(() => {});
     } else if (term.panelType !== "widget" && term.panelType !== "shared-chat") {
@@ -262,20 +258,20 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
   const isSharedChat = term.panelType === "shared-chat";
   const isWidget = term.panelType === "widget";
   const isBrowser = term.panelType === "browser";
-  const { claudeSessionName, claudeCwd, claudeProvider } = useClaudeStore(useShallow((s) => {
-    if (!isClaude) return { claudeSessionName: undefined, claudeCwd: undefined, claudeProvider: undefined };
+  const { providerSessionName, providerCwd, providerId } = useClaudeStore(useShallow((s) => {
+    if (!isClaude) return { providerSessionName: undefined, providerCwd: undefined, providerId: undefined };
     const sess = s.sessions[term.terminalId];
     return {
-      claudeSessionName: sess?.name,
-      claudeCwd: sess?.cwd,
-      claudeProvider: resolveSessionProviderState(sess).provider,
+      providerSessionName: sess?.name,
+      providerCwd: sess?.cwd,
+      providerId: resolveSessionProviderState(sess).provider,
     };
   }));
 
-  const claudeTitle = (() => {
-    const name = claudeSessionName || "Unnamed Session";
-    if (!claudeCwd) return name;
-    const parts = claudeCwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
+  const sessionTitle = (() => {
+    const name = providerSessionName || "Unnamed Session";
+    if (!providerCwd) return name;
+    const parts = providerCwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
     const short = parts.slice(-2).join("/");
     return short ? `${short}: ${name}` : name;
   })();
@@ -356,13 +352,13 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
             </>
           ) : (
             <>
-              <span className="ft-provider-badge" title={claudeProvider === "openai" ? "OpenAI Codex" : "Anthropic Claude"}>
-                {claudeProvider === "openai" ? <OpenAILogo size={11} /> : <AnthropicLogo size={11} />}
+              <span className="ft-provider-badge" title={providerId === "openai" ? "OpenAI Codex" : "Anthropic Claude"}>
+                {providerId === "openai" ? <OpenAILogo size={11} /> : <AnthropicLogo size={11} />}
               </span>
-              <span className="ft-title">{claudeTitle}</span>
+              <span className="ft-title">{sessionTitle}</span>
               <button className="ft-btn ft-btn--edit" onClick={(e) => {
                 e.stopPropagation();
-                setNameDraft(claudeSessionName || "");
+                setNameDraft(providerSessionName || "");
                 setEditingName(true);
               }} title="Rename">
                 <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M5.5 1.5L7.5 3.5M1 8L1.5 6L6.5 1L8 2.5L3 7.5L1 8Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round"/></svg>

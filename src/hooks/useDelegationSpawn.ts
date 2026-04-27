@@ -1,11 +1,16 @@
 import { useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { createMcpConfigFile, getDelegationPort, getDelegationSecret } from "../lib/tauriApi";
+import { getDelegationPort, getDelegationSecret } from "../lib/tauriApi";
 import type { PermissionMode } from "../lib/types";
-import { PROVIDER_CONFIG, type ProviderId } from "../lib/providers";
+import type { ProviderId } from "../lib/providers";
 import { runProviderTurn } from "../lib/providerRuntime";
+import {
+  buildDelegationChildRuntimeMetadata,
+  prepareDelegationChildProviderTurnInput,
+  resolveDelegationChildRuntimeSettings,
+} from "../lib/delegationChildRuntime";
 import { useCanvasStore } from "../stores/canvasStore";
-import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
+import { useClaudeStore } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 
 interface UseDelegationSpawnOptions {
@@ -62,20 +67,25 @@ export function useDelegationSpawn({
         : (sessCwd && sessCwd !== "." && sessCwd !== "/")
           ? sessCwd
           : "";
-      const inheritSkipOpenwolf = !!parentSess?.skipOpenwolf;
-      const parentProviderState = resolveSessionProviderState(parentSess);
-      const childProvider = parentSess ? parentProviderState.provider : selectedProvider;
-      const childModel = parentProviderState.selectedModel ?? selectedModel;
-      const childEffort = parentProviderState.selectedEffort ?? selectedEffort;
-      const childCodexPermission = parentProviderState.openai?.selectedCodexPermission
-        ?? selectedCodexPermission
-        ?? PROVIDER_CONFIG.openai.defaultPermission;
+      const childRuntime = resolveDelegationChildRuntimeSettings({
+        parentSession: parentSess,
+        selectedProvider,
+        selectedModel,
+        selectedEffort,
+        selectedCodexPermission,
+      });
 
       group.tasks.forEach((task, i) => {
         const childSessionId = uuidv4();
         const childName = `[D] ${task.description.slice(0, 30)}`;
+        const agentLabel = `Agent ${i + 1}`;
 
-        delStore.setTaskSessionId(group.id, task.id, childSessionId);
+        delStore.setTaskSessionId(
+          group.id,
+          task.id,
+          childSessionId,
+          buildDelegationChildRuntimeMetadata(childRuntime, appDir),
+        );
         delStore.updateTaskStatus(group.id, task.id, "running");
 
         const channelNote = delegationPort > 0
@@ -93,52 +103,38 @@ You are part of a team of ${tasks.length} agents working in the same codebase. Y
 Coordinate actively. If another agent is working on a file you need, mention it in team chat and work around it. Communication prevents conflicts.`
           : "";
 
-        const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are agent "Agent ${i + 1}" — one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, call report_done (if available) or state your task is complete.`;
+        const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are agent "${agentLabel}" — one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, call report_done (if available) or state your task is complete.`;
 
-        const mcpEnv = delegationPort > 0 && delegationSecret
-          ? {
-            T64_DELEGATION_PORT: String(delegationPort),
-            T64_DELEGATION_SECRET: delegationSecret,
-            T64_GROUP_ID: group.id,
-            T64_AGENT_LABEL: `Agent ${i + 1}`,
-          }
-          : undefined;
-
-        useClaudeStore.getState().createSession(childSessionId, childName, true, inheritSkipOpenwolf, appDir, childProvider);
-        useClaudeStore.getState().setSelectedModel(childSessionId, childModel);
-        useClaudeStore.getState().setSelectedEffort(childSessionId, childEffort);
-        if (childProvider === "openai") {
-          useClaudeStore.getState().setSelectedCodexPermission(childSessionId, childCodexPermission);
+        useClaudeStore.getState().createSession(
+          childSessionId,
+          childName,
+          true,
+          childRuntime.inheritSkipOpenwolf,
+          appDir,
+          childRuntime.provider,
+        );
+        useClaudeStore.getState().setSelectedModel(childSessionId, childRuntime.selectedModel);
+        useClaudeStore.getState().setSelectedEffort(childSessionId, childRuntime.selectedEffort);
+        if (childRuntime.provider === "openai") {
+          useClaudeStore.getState().setSelectedCodexPermission(childSessionId, childRuntime.selectedCodexPermission);
         }
         addUserMessage(childSessionId, initialPrompt);
 
         setTimeout(() => {
           const startChild = async () => {
-            let mcpConfigPath = "";
-            if (childProvider === "anthropic" && delegationPort > 0 && delegationSecret) {
-              mcpConfigPath = await createMcpConfigFile(
-                delegationPort,
-                delegationSecret,
-                group.id,
-                `Agent ${i + 1}`,
-              );
-            }
-            await runProviderTurn({
-              provider: childProvider,
+            const turnInput = await prepareDelegationChildProviderTurnInput({
+              ...childRuntime,
               sessionId: childSessionId,
               cwd: appDir,
               prompt: initialPrompt,
-              started: false,
-              selectedModel: childModel,
-              selectedEffort: childEffort,
-              selectedCodexPermission: childCodexPermission,
-              permissionOverride: "bypass_all",
-              skipOpenwolf: childProvider === "openai" ? true : inheritSkipOpenwolf,
-              ...(mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
-              ...(mcpEnv ? { mcpEnv } : {}),
-              noSessionPersistence: childProvider === "anthropic",
-              skipGitRepoCheck: childProvider === "openai",
+              mcp: {
+                delegationPort,
+                delegationSecret,
+                groupId: group.id,
+                agentLabel,
+              },
             });
+            await runProviderTurn(turnInput);
           };
 
           startChild().catch((err) => {

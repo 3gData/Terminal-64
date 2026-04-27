@@ -50,6 +50,10 @@ const AUTO_ALLOW_TOOLS: &[&str] = &[
     "SlashCommand",
 ];
 
+const MAX_HTTP_BODY: usize = 1024 * 1024;
+const MAX_DELEGATION_MESSAGES_PER_GROUP: usize = 500;
+const MAX_DELEGATION_READ_MESSAGES: usize = 100;
+
 /// Build a complete hooks settings JSON registering HTTP hooks for all lifecycle events.
 fn build_hook_settings(port: u16, secret: &str, run_token: &str) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
@@ -86,6 +90,20 @@ fn random_token() -> String {
     let mut rng = rand::thread_rng();
     let bytes: [u8; 32] = rng.gen();
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn content_length(headers: &str) -> Result<usize, String> {
+    let len = headers
+        .lines()
+        .find(|l| l.to_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if len > MAX_HTTP_BODY {
+        Err(format!("body too large: {} bytes", len))
+    } else {
+        Ok(len)
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -532,15 +550,14 @@ fn handle_connection(
             return Ok(());
         }
 
-        // Parse Content-Length (cap at 1MB to prevent DoS)
-        const MAX_BODY: usize = 1024 * 1024;
-        let content_length: usize = headers
-            .lines()
-            .find(|l| l.to_lowercase().starts_with("content-length:"))
-            .and_then(|l| l.split(':').nth(1))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0)
-            .min(MAX_BODY);
+        let content_length = match content_length(&headers) {
+            Ok(len) => len,
+            Err(e) => {
+                safe_eprintln!("[delegation] Rejected request body: {}", e);
+                send_http(&mut stream, 413, r#"{"error":"payload too large"}"#);
+                return Ok(());
+            }
+        };
 
         if method == "POST" && (path == "/delegation/message" || path == "/delegation/complete") {
             let mut body = vec![0u8; content_length];
@@ -554,7 +571,8 @@ fn handle_connection(
                 Ok(v) => v,
                 Err(e) => {
                     safe_eprintln!("[delegation] Failed to parse request body: {}", e);
-                    serde_json::Value::default()
+                    send_http(&mut stream, 400, r#"{"error":"invalid json"}"#);
+                    return Ok(());
                 }
             };
             let group_id = parsed["group_id"].as_str().unwrap_or("").to_string();
@@ -569,6 +587,10 @@ fn handle_connection(
             } else {
                 "chat"
             };
+            if group_id.is_empty() {
+                send_http(&mut stream, 400, r#"{"error":"group_id is required"}"#);
+                return Ok(());
+            }
 
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -586,10 +608,12 @@ fn handle_connection(
             // Store message
             match delegation_messages.lock() {
                 Ok(mut store) => {
-                    store
-                        .entry(group_id.clone())
-                        .or_default()
-                        .push(del_msg.clone());
+                    let messages = store.entry(group_id.clone()).or_default();
+                    messages.push(del_msg.clone());
+                    if messages.len() > MAX_DELEGATION_MESSAGES_PER_GROUP {
+                        let remove_count = messages.len() - MAX_DELEGATION_MESSAGES_PER_GROUP;
+                        messages.drain(0..remove_count);
+                    }
                 }
                 Err(e) => safe_eprintln!("[delegation] Lock poisoned storing message: {}", e),
             }
@@ -616,7 +640,8 @@ fn handle_connection(
             let last_n: usize = params
                 .get("last")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20);
+                .unwrap_or(20)
+                .min(MAX_DELEGATION_READ_MESSAGES);
 
             let recent: Vec<DelegationMessage> = match delegation_messages.lock() {
                 Ok(store) => {
@@ -660,14 +685,14 @@ fn handle_connection(
         }
         let run_token = parts[3].to_string();
 
-        const MAX_BODY: usize = 1024 * 1024;
-        let content_length: usize = headers
-            .lines()
-            .find(|l| l.to_lowercase().starts_with("content-length:"))
-            .and_then(|l| l.split(':').nth(1))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0)
-            .min(MAX_BODY);
+        let content_length = match content_length(&headers) {
+            Ok(len) => len,
+            Err(e) => {
+                safe_eprintln!("[perm-server] Rejected MCP approval body: {}", e);
+                send_http(&mut stream, 413, r#"{"error":"payload too large"}"#);
+                return Ok(());
+            }
+        };
         let mut body = vec![0u8; content_length];
         if content_length > 0 {
             reader
@@ -788,15 +813,14 @@ fn handle_connection(
         "PermissionRequest"
     };
 
-    // Parse Content-Length (cap at 1MB to prevent DoS)
-    const MAX_BODY: usize = 1024 * 1024;
-    let content_length: usize = headers
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-length:"))
-        .and_then(|l| l.split(':').nth(1))
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0)
-        .min(MAX_BODY);
+    let content_length = match content_length(&headers) {
+        Ok(len) => len,
+        Err(e) => {
+            safe_eprintln!("[perm-server] Rejected hook body: {}", e);
+            send_http(&mut stream, 413, r#"{"error":"payload too large"}"#);
+            return Ok(());
+        }
+    };
 
     // Read body
     let mut body = vec![0u8; content_length];
@@ -1006,8 +1030,10 @@ fn handle_connection(
 fn send_http(stream: &mut TcpStream, status: u16, body: &str) {
     let status_text = match status {
         200 => "OK",
+        400 => "Bad Request",
         403 => "Forbidden",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
         _ => "Error",
     };
     let response = format!(

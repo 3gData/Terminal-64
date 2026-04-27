@@ -11,7 +11,7 @@
 //! - `Effect.Effect<T, E>`                → `async fn(..) -> Result<T, ProviderAdapterError>`
 //! - `Stream.Stream<ProviderRuntimeEvent>` → `tokio::sync::mpsc::Receiver<ProviderEvent>`
 //! - `ReadonlyArray<T>`                    → `Vec<T>`
-//! - Branded `ThreadId`/`TurnId`/`ApprovalRequestId` → `String` for Step 1.
+//! - Branded `ThreadId`/`TurnId`/`ApprovalRequestId` → `String` at the Tauri boundary.
 //!
 //! The trait is `Send + Sync` and lives behind `Arc<dyn ProviderAdapter>`
 //! in `AppState`, matching the registry-owned adapter pattern.
@@ -26,10 +26,9 @@ use crate::types::{
     CreateClaudeRequest, CreateCodexRequest, SendClaudePromptRequest, SendCodexPromptRequest,
 };
 
-/// Error type surfaced by every adapter method. Kept as `String` for Step 1
-/// to avoid a premature error taxonomy; Step 2 will replace this with a
-/// structured enum mirroring t3code's `ProviderAdapterError` union in
-/// `apps/server/src/provider/Services/Errors.ts`.
+/// Error type surfaced by every adapter method. The live command adapters
+/// still surface user-facing strings; the normalized async surface can grow a
+/// structured enum when the UI starts consuming typed provider errors.
 pub type ProviderAdapterError = String;
 
 /// Discriminator for registered adapters. Matches `ProviderKind` in

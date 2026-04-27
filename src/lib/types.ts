@@ -93,7 +93,7 @@ export interface Command {
   execute: (...args: unknown[]) => void;
 }
 
-// Claude session types
+// Provider-backed session types
 
 export type PermissionMode = "default" | "accept_edits" | "bypass_all" | "plan" | "auto";
 
@@ -141,6 +141,13 @@ export interface ClaudeDone {
 export type {
   CreateCodexRequest,
   ProviderCreateRequest,
+  ProviderHistoryDeleteIpcResult,
+  ProviderHistoryDeleteRequest,
+  ProviderHistoryForkIpcResult,
+  ProviderHistoryForkRequest,
+  ProviderHistoryHydrateRequest,
+  ProviderHistoryTruncateIpcResult,
+  ProviderHistoryTruncateRequest,
   ProviderSendRequest,
   ProviderSessionRequest,
   SendCodexPromptRequest,
@@ -203,12 +210,29 @@ export interface ChatMessage {
 // Delegation types
 
 export type DelegateTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type DelegationChildCleanupState =
+  | "active"
+  | "closing"
+  | "closed"
+  | "history_cleanup_requested"
+  | "purged";
+
+export interface DelegationChildRuntimeMetadata {
+  providerId: string;
+  model?: string;
+  effort?: string;
+  permissionPreset?: string;
+  cwd: string;
+  cleanupState: DelegationChildCleanupState;
+  cleanupUpdatedAt?: number;
+}
 
 export interface DelegateTask {
   id: string;
   description: string;
   sessionId: string;
   status: DelegateTaskStatus;
+  childRuntime?: DelegationChildRuntimeMetadata;
   result?: string;
   startedAt?: number;
   completedAt?: number;

@@ -39,6 +39,10 @@ export function useChatSend({
       const codexThreadId = providerState.openai?.codexThreadId ?? null;
       const seedTranscript = providerState.seedTranscript;
       try {
+        if (!started && (!effectiveCwd || effectiveCwd === ".")) {
+          store.setError(sessionId, "No working directory set. Create a new session.");
+          return;
+        }
         store.setStreaming(sessionId, true);
         if (sess && sess.modifiedFiles.length > 0) {
           const snapshotBase = sess.cwd || effectiveCwd;
@@ -53,10 +57,6 @@ export function useChatSend({
           );
           const snapshots = results.map((r) => (r as PromiseFulfilledResult<{ path: string; content: string }>).value);
           createCheckpoint(sessionId, sess.promptCount + 1, snapshots).catch(() => {});
-        }
-        if (!started && (!effectiveCwd || effectiveCwd === ".")) {
-          store.setError(sessionId, "No working directory set. Create a new session.");
-          return;
         }
         if (effectiveCwd && effectiveCwd !== "." && (!sess?.cwd || sess.cwd !== effectiveCwd)) {
           store.setCwd(sessionId, effectiveCwd);

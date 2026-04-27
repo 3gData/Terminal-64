@@ -1234,7 +1234,7 @@
         "bug-053",
         "bug-060"
       ],
-      "occurrences": 1,
+      "occurrences": 3,
       "last_seen": "2026-04-28"
     },
     {
@@ -1356,7 +1356,113 @@
         "buglog"
       ],
       "related_bugs": [],
+      "occurrences": 3,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-069",
+      "timestamp": "2026-04-28T01:00:58+02:00",
+      "error_message": "Codex sessions could surface Claude-native slash commands and compact controls, and auto-compact still used Claude-only send IPC.",
+      "file": "src/components/claude/ClaudeChat.tsx, src/hooks/useClaudeEvents.ts",
+      "root_cause": "Compact and native slash-command behavior was keyed off hardcoded Claude UI assumptions instead of provider manifest capabilities; the auto-compact callback called sendClaudePrompt directly.",
+      "fix": "Added provider manifest capabilities for native slash commands and compact, filtered Claude built-ins for unsupported providers while keeping skills, gated compact UI/status rows/hints, and routed auto-compact through runProviderTurn.",
+      "tags": [
+        "provider",
+        "codex",
+        "compact",
+        "slash-commands",
+        "capabilities"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-070",
+      "timestamp": "2026-04-28T01:02:36+02:00",
+      "error_message": "cargo fmt --check failed after adding provider_history_* Rust commands.",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "New generic provider history command implementation had rustfmt drift in chained call wrapping.",
+      "fix": "Ran cargo fmt from src-tauri and re-ran cargo fmt --check successfully.",
+      "tags": [
+        "verification",
+        "rustfmt",
+        "provider-history"
+      ],
+      "related_bugs": [],
       "occurrences": 2,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-071",
+      "timestamp": "2026-04-28T01:13:21+02:00",
+      "error_message": "npm run typecheck failed with TS2740: partial providerState fixture was missing full ClaudeSession fields after delegation child runtime extraction.",
+      "file": "src/lib/delegationChildRuntime.ts",
+      "root_cause": "The new helper typed parentSession as ClaudeSession even though it only needs provider metadata and skipOpenwolf; the verification fixture correctly passed a minimal metadata source.",
+      "fix": "Narrow the helper input type to the exact metadata fields consumed instead of requiring a full store session.",
+      "tags": [
+        "typescript",
+        "exactOptionalPropertyTypes",
+        "delegation",
+        "provider-runtime"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-072",
+      "timestamp": "2026-04-28T01:14:15+02:00",
+      "error_message": "Verification command `node mcp/delegation-server.mjs; test $? -eq 1` exited 1 because the current agent process inherited active T64_DELEGATION_* environment variables.",
+      "file": "mcp/delegation-server.mjs",
+      "root_cause": "The negative-path verification assumed delegation env vars were absent, but the Terminal 64 MCP session itself exports them.",
+      "fix": "Reran the negative-path check with T64_DELEGATION_PORT, T64_DELEGATION_SECRET, T64_GROUP_ID, and T64_AGENT_LABEL explicitly unset.",
+      "tags": [
+        "verification",
+        "mcp",
+        "delegation"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-073",
+      "timestamp": "2026-04-28T01:22:33+02:00",
+      "error_message": "First-turn send with no working directory can leave the chat stuck streaming.",
+      "file": "src/hooks/useChatSend.ts",
+      "root_cause": "useChatSend set isStreaming=true before validating the first-turn working directory. The no-CWD guard then returned after setting an error without clearing streaming state.",
+      "fix": "Moved the first-turn working-directory validation before setStreaming(true), so the validation error exits without marking the session busy.",
+      "tags": [
+        "chat-send",
+        "streaming",
+        "prompt-queue",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-061"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-074",
+      "timestamp": "2026-04-28T01:23:05+02:00",
+      "error_message": "Backend delegation MCP config writers used forward-slash string joins, and delegation HTTP routes accepted malformed or oversized bodies into the team-chat store.",
+      "file": "src-tauri/src/lib.rs, src-tauri/src/permission_server.rs, mcp/delegation-common.mjs",
+      "root_cause": "create_mcp_config_file, ensure_t64_mcp, and ensure_codex_mcp built t64-server.mjs and .mcp.json paths with format!(\"{}/...\"), which can produce mixed separators on Windows. The permission server also capped Content-Length with min(1MB), causing oversized requests to be read as truncated JSON, and malformed delegation JSON fell back to Value::default(), allowing blank group messages.",
+      "fix": "Added a native Path::join helper for backend MCP script paths, joined .mcp.json via Path, reject over-1MB bodies with 413, reject malformed delegation JSON and missing group_id with 400, cap retained/read delegation messages, and sanitize the MCP read_team last parameter.",
+      "tags": [
+        "backend",
+        "delegation",
+        "mcp",
+        "windows-paths",
+        "validation"
+      ],
+      "related_bugs": [
+        "bug-001"
+      ],
+      "occurrences": 1,
       "last_seen": "2026-04-28"
     }
   ]

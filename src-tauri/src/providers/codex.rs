@@ -16,11 +16,10 @@
 //!   -c model_reasoning_effort=<v>                    → req.effort
 //!   -C <cwd>                                         → req.cwd
 //!
-//! For Step 1 of the Codex port, multi-turn lives entirely in the CLI:
-//! `codex exec resume <thread_id> ...` re-attaches to a prior session.
-//! The frontend captures `thread.started.thread_id` from the first event
-//! and stores it as the session's external id; subsequent prompts go
-//! through `send_prompt` which uses the resume subcommand.
+//! Terminal 64 keeps a local session id for UI routing and stores Codex's
+//! thread id separately for resume/fork/rollback. The app-server transport
+//! keeps that thread alive through JSON-RPC; the legacy exec transport
+//! re-attaches with `codex exec resume <thread_id>`.
 
 use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
@@ -215,8 +214,8 @@ fn build_command(
     //   Resume:  codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
     // NB: on Windows when shim_command routes through cmd.exe, embedded
     // newlines may be truncated. Same caveat as the Claude adapter; accepted
-    // for Step 1 since the most common case (single-line prompts) works on
-    // all platforms.
+    // for the legacy exec fallback because the primary app-server transport
+    // avoids this path.
     if let InvokeMode::Resume(thread_id) = mode {
         cmd.arg(thread_id);
     }
@@ -2035,17 +2034,14 @@ impl ProviderAdapter for CodexAdapter {
         &self,
         _input: ProviderSessionStartInput,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err(
-            "CodexAdapter::start_session not wired in Step 1 — call inherent create_session"
-                .to_string(),
-        )
+        Err("CodexAdapter::start_session not wired into normalized provider surface; call create_session through ProviderCommandAdapter".to_string())
     }
 
     async fn send_turn(
         &self,
         _input: ProviderSendTurnInput,
     ) -> Result<ProviderTurnStartResult, ProviderAdapterError> {
-        Err("CodexAdapter::send_turn not wired in Step 1 — call inherent send_prompt".to_string())
+        Err("CodexAdapter::send_turn not wired into normalized provider surface; call send_prompt through ProviderCommandAdapter".to_string())
     }
 
     async fn interrupt_turn(
@@ -2062,17 +2058,11 @@ impl ProviderAdapter for CodexAdapter {
         _request_id: &str,
         _decision: ProviderApprovalDecision,
     ) -> Result<(), ProviderAdapterError> {
-        // Codex approvals come through the JSON stream as `item.completed`
-        // requests of type `command_execution` / etc., but `codex exec --json`
-        // is non-interactive — once the approval policy is set at spawn
-        // there's no way to respond mid-turn. Use `--full-auto` or
-        // `--dangerously-bypass-approvals-and-sandbox` instead. Returning
-        // an explicit error so callers don't silently drop replies.
-        Err(
-            "CodexAdapter::respond_to_request: codex exec --json runs non-interactively; \
-             set approval_policy at spawn time"
-                .to_string(),
-        )
+        // Codex approval requests are surfaced through provider events, but
+        // the normalized approval-response trait is not wired to the current
+        // command adapter. Sandbox/approval behavior is configured at turn
+        // start through the selected Codex permission preset.
+        Err("CodexAdapter::respond_to_request not wired into normalized provider approval surface; set approval policy at turn start".to_string())
     }
 
     async fn respond_to_user_input(

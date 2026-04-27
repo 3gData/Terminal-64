@@ -416,6 +416,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // switching is blocked with a toast; the choice is made up-front via
   // ClaudeDialog and locked for the lifetime of the session.
   const selectedProvider = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).provider);
+  const supportsCompact = providerSupports(selectedProvider, "compact");
   const liveMcp = useClaudeStore((s) => s.sessions[sessionId]?.mcpServers);
   const [showFileTree, setShowFileTree] = useState(false);
   // Per-session model + effort persisted via the store. Falls back to the
@@ -570,23 +571,27 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     { name: "reload-plugins", description: "Reload slash commands, skills, and MCP servers", usage: "/reload-plugins — re-fetches all available commands and MCP configs.", source: "Terminal 64" },
   ]);
   const reloadCommands = useCallback(() => {
-    listSlashCommands().then((cmds) => {
-      const merged = [...t64Commands.current, ...cmds];
+    const addClaudeBuiltins = providerSupports(selectedProvider, "nativeSlashCommands");
+    const applyCommands = (cmds: SlashCommand[]) => {
+      const providerCommands = addClaudeBuiltins
+        ? cmds
+        : cmds.filter((cmd) => cmd.source !== "built-in" && cmd.source !== "builtin");
+      const merged = [...t64Commands.current, ...providerCommands];
       const seen = new Set(merged.map((c) => c.name));
-      for (const bc of CLAUDE_BUILTIN_COMMANDS) {
-        if (!seen.has(bc.name)) merged.push(bc);
+      if (addClaudeBuiltins) {
+        for (const bc of CLAUDE_BUILTIN_COMMANDS) {
+          if (!seen.has(bc.name)) merged.push(bc);
+        }
       }
       setSlashCommands(merged);
-    }).catch(() => {
-      const merged = [...t64Commands.current];
-      const seen = new Set(merged.map((c) => c.name));
-      for (const bc of CLAUDE_BUILTIN_COMMANDS) {
-        if (!seen.has(bc.name)) merged.push(bc);
-      }
-      setSlashCommands(merged);
-    });
-    listMcpServers(cwd).then(setConfigMcpServers).catch(() => {});
-  }, [cwd]);
+    };
+    listSlashCommands().then(applyCommands).catch(() => applyCommands([]));
+    if (providerSupports(selectedProvider, "mcp")) {
+      listMcpServers(cwd).then(setConfigMcpServers).catch(() => {});
+    } else {
+      setConfigMcpServers([]);
+    }
+  }, [cwd, selectedProvider]);
   useEffect(() => { reloadCommands(); }, [reloadCommands]);
   // Apply persisted font on mount (once per app, harmless if called multiple times)
   useEffect(() => {
@@ -931,7 +936,7 @@ Rules:
         return;
       }
 
-      if (/^\/compact\b/i.test(prompt)) {
+      if (supportsCompact && /^\/compact\b/i.test(prompt)) {
         useClaudeStore.getState().setAutoCompactStatus(sessionId, "compacting");
       }
 
@@ -939,7 +944,7 @@ Rules:
       if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: displayPrompt }).catch(() => {});
       await actualSend(prompt, permissionOverride, codexCollaborationMode ? { codexCollaborationMode } : undefined);
     },
-    [sessionId, consumeAttachments, addUserMessage, actualSend, reloadCommands, slashCommands, effectiveCwd, planFinished, planContent, resetPlan, selectedProvider]
+    [sessionId, consumeAttachments, addUserMessage, actualSend, reloadCommands, slashCommands, effectiveCwd, planFinished, planContent, resetPlan, selectedProvider, supportsCompact]
   );
 
   // Keep ref current so the discord-prompt listener can call handleSend
@@ -1317,7 +1322,7 @@ Rules:
 
   const activeTasks = useMemo(() => session?.tasks?.filter(t => t.status !== "deleted") ?? [], [session?.tasks]);
   const completedTasks = useMemo(() => activeTasks.filter(t => t.status === "completed"), [activeTasks]);
-  const { visualRows, visualLayoutSignature, userPrompts } = useChatRows(session, hasStreamingText);
+  const { visualRows, visualLayoutSignature, userPrompts } = useChatRows(session, hasStreamingText, supportsCompact);
 
   // Auto-open side panel when content appears (must be before any early return)
   useEffect(() => {
@@ -1642,15 +1647,17 @@ Rules:
                   content={planContent}
                   contextPercent={ctxPct}
                   showViewer={showPlanViewer}
-                  onCompactBuild={() => {
-                    resetPlan();
-                    setPermModeIdx(4); // YOLO
-                    // Queue the build prompt so it fires automatically after /compact finishes
-                    useClaudeStore.getState().enqueuePrompt(sessionId,
-                      "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about."
-                    );
-                    handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
-                  }}
+                  {...(supportsCompact ? {
+                    onCompactBuild: () => {
+                      resetPlan();
+                      setPermModeIdx(4); // YOLO
+                      // Queue the build prompt so it fires automatically after /compact finishes
+                      useClaudeStore.getState().enqueuePrompt(sessionId,
+                        "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about."
+                      );
+                      handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
+                    },
+                  } : {})}
                   onBuildNow={() => {
                     resetPlan();
                     setPermModeIdx(4); // YOLO
@@ -1760,7 +1767,7 @@ Rules:
                   onPasteImage={handlePasteImage}
                   supportsImages={providerSupports(selectedProvider, "images")}
                   contextPct={session.contextMax > 0 ? Math.min(100, Math.max(0, Math.round((session.contextUsed / session.contextMax) * 100))) : 0}
-                  autoCompactAt={autoCompactEnabled ? autoCompactThreshold : 0}
+                  autoCompactAt={autoCompactEnabled && supportsCompact ? autoCompactThreshold : 0}
                   {...(isActive ? { onRegisterVoiceActions: handleRegisterVoiceActions } : {})}
                   sessionId={sessionId}
                 />

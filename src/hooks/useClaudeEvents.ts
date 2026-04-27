@@ -4,12 +4,13 @@ import {
   onClaudeEvent,
   onClaudeDone,
   cancelClaude,
-  sendClaudePrompt,
   onCodexEvent,
   onCodexDone,
 } from "../lib/tauriApi";
 import { resolveSessionProviderState, useClaudeStore, type ClaudeTask, type McpServerStatus, type PendingQuestionItem } from "../stores/claudeStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { getProviderManifest, providerSupports } from "../lib/providers";
+import { runProviderTurn } from "../lib/providerRuntime";
 import type { ToolCall, HookEventPayload, HookEvent, HookEventType } from "../lib/types";
 import {
   claudeBlockToProviderToolCall,
@@ -207,6 +208,47 @@ interface PendingBlock {
 const pendingBlocks = new Map<string, PendingBlock[]>();
 // Track whether the assistant event already finalized for this turn
 const assistantFinalized = new Set<string>();
+
+async function runAutoCompact(session_id: string) {
+  const store = useClaudeStore.getState();
+  const session = store.sessions[session_id];
+  if (!session || session.isStreaming) return;
+
+  const providerState = resolveSessionProviderState(session);
+  if (!providerSupports(providerState.provider, "compact")) return;
+
+  const manifest = getProviderManifest(providerState.provider);
+  const prompt = "/compact";
+  store.addUserMessage(session_id, prompt);
+  store.setStreaming(session_id, true);
+
+  try {
+    const result = await runProviderTurn({
+      provider: providerState.provider,
+      sessionId: session_id,
+      cwd: session.cwd || ".",
+      prompt,
+      started: session.hasBeenStarted,
+      threadId: providerState.openai?.codexThreadId ?? null,
+      selectedModel: providerState.selectedModel ?? manifest.defaultModel,
+      selectedEffort: providerState.selectedEffort ?? manifest.defaultEffort,
+      selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? manifest.defaultPermission,
+      permissionMode: "auto",
+      skipOpenwolf: session.skipOpenwolf,
+      seedTranscript: providerState.seedTranscript,
+      resumeAtUuid: session.resumeAtUuid ?? null,
+      forkParentSessionId: session.forkParentSessionId ?? null,
+    });
+    if (result.clearSeedTranscript) store.clearSeedTranscript(session_id);
+    if (result.clearResumeAtUuid) store.setResumeAtUuid(session_id, null);
+    if (result.clearForkParentSessionId) store.setForkParentSessionId(session_id, null);
+  } catch (err) {
+    const latestStore = useClaudeStore.getState();
+    latestStore.setError(session_id, `Auto-compact failed: ${err}`);
+    latestStore.setAutoCompactStatus(session_id, "idle");
+    latestStore.setStreaming(session_id, false);
+  }
+}
 
 function processContentArray(
   session_id: string,
@@ -623,9 +665,11 @@ export function useClaudeEvents() {
           // Auto-compact check (fresh read — prior set() calls have settled)
           const freshSess = useClaudeStore.getState().sessions[session_id];
           const settings = useSettingsStore.getState();
+          const freshProvider = resolveSessionProviderState(freshSess).provider;
           if (
             settings.autoCompactEnabled &&
             freshSess &&
+            providerSupports(freshProvider, "compact") &&
             freshSess.autoCompactStatus === "idle" &&
             freshSess.contextMax > 0 &&
             freshSess.contextUsed > 0 &&
@@ -635,19 +679,7 @@ export function useClaudeEvents() {
             if (pct >= settings.autoCompactThreshold) {
               useClaudeStore.getState().setAutoCompactStatus(session_id, "compacting");
               setTimeout(() => {
-                const s = useClaudeStore.getState().sessions[session_id];
-                if (!s || s.isStreaming) return;
-                useClaudeStore.getState().addUserMessage(session_id, "/compact");
-                useClaudeStore.getState().setStreaming(session_id, true);
-                sendClaudePrompt({
-                  session_id,
-                  cwd: s.cwd || ".",
-                  prompt: "/compact",
-                  permission_mode: "auto",
-                }, s.skipOpenwolf).catch((err) => {
-                  useClaudeStore.getState().setError(session_id, `Auto-compact failed: ${err}`);
-                  useClaudeStore.getState().setAutoCompactStatus(session_id, "idle");
-                });
+                runAutoCompact(session_id);
               }, 500);
             }
           } else if (freshSess?.autoCompactStatus === "compacting") {

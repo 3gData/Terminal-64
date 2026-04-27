@@ -11,6 +11,13 @@ import type {
   CreateCodexRequest,
   SendCodexPromptRequest,
   ProviderCreateRequest,
+  ProviderHistoryDeleteIpcResult,
+  ProviderHistoryDeleteRequest,
+  ProviderHistoryForkIpcResult,
+  ProviderHistoryForkRequest,
+  ProviderHistoryHydrateRequest,
+  ProviderHistoryTruncateIpcResult,
+  ProviderHistoryTruncateRequest,
   ProviderSendRequest,
   CodexEvent,
   CodexDone,
@@ -146,7 +153,7 @@ export async function onTerminalExitForId(id: string, callback: TerminalExitCall
   };
 }
 
-// Claude session commands
+// Provider session commands
 
 /** Read OpenWolf settings from persisted store (avoids circular imports). */
 function getOpenwolfSettings(): { enabled: boolean; autoInit: boolean; designQc: boolean } {
@@ -176,19 +183,19 @@ function resolveOpenwolf(skipOpenwolf?: boolean) {
 /// JSONL path is known immediately — no wait on the first `system/init`
 /// stream event.
 export async function createClaudeSession(req: CreateClaudeRequest, skipOpenwolf?: boolean): Promise<string> {
-  return providerCreate({ provider: "anthropic", req }, skipOpenwolf);
+  return createProviderSession({ provider: "anthropic", req }, skipOpenwolf);
 }
 
 export async function sendClaudePrompt(req: SendClaudePromptRequest, skipOpenwolf?: boolean): Promise<void> {
-  return providerSend({ provider: "anthropic", req }, skipOpenwolf);
+  return sendProviderPrompt({ provider: "anthropic", req }, skipOpenwolf);
 }
 
 export async function cancelClaude(sessionId: string): Promise<void> {
-  return providerCancel("anthropic", sessionId);
+  return cancelProviderSession(sessionId, "anthropic");
 }
 
 export async function closeClaudeSession(sessionId: string): Promise<void> {
-  return providerClose("anthropic", sessionId);
+  return closeProviderSession(sessionId, "anthropic");
 }
 
 export function onClaudeEvent(callback: (payload: ClaudeEvent) => void): Promise<UnlistenFn> {
@@ -202,14 +209,14 @@ export function onClaudeDone(callback: (payload: ClaudeDone) => void): Promise<U
 // ── Codex (OpenAI Codex CLI) ──────────────────────────────
 
 export async function createCodexSession(req: CreateCodexRequest, skipOpenwolf?: boolean): Promise<string> {
-  return providerCreate({ provider: "openai", req }, skipOpenwolf);
+  return createProviderSession({ provider: "openai", req }, skipOpenwolf);
 }
 
 export async function sendCodexPrompt(req: SendCodexPromptRequest, skipOpenwolf?: boolean): Promise<void> {
-  return providerSend({ provider: "openai", req }, skipOpenwolf);
+  return sendProviderPrompt({ provider: "openai", req }, skipOpenwolf);
 }
 
-export async function providerCreate(input: ProviderCreateRequest, skipOpenwolf?: boolean): Promise<string> {
+export async function createProviderSession(input: ProviderCreateRequest, skipOpenwolf?: boolean): Promise<string> {
   const ow = resolveOpenwolf(skipOpenwolf);
   return invoke<string>("provider_create", {
     provider: input.provider,
@@ -220,7 +227,7 @@ export async function providerCreate(input: ProviderCreateRequest, skipOpenwolf?
   });
 }
 
-export async function providerSend(input: ProviderSendRequest, skipOpenwolf?: boolean): Promise<void> {
+export async function sendProviderPrompt(input: ProviderSendRequest, skipOpenwolf?: boolean): Promise<void> {
   const ow = resolveOpenwolf(skipOpenwolf);
   return invoke("provider_send", {
     provider: input.provider,
@@ -231,6 +238,9 @@ export async function providerSend(input: ProviderSendRequest, skipOpenwolf?: bo
   });
 }
 
+export const providerCreate = createProviderSession;
+export const providerSend = sendProviderPrompt;
+
 export async function providerCancel(provider: ProviderId, sessionId: string): Promise<void> {
   return invoke("provider_cancel", { provider, sessionId });
 }
@@ -239,20 +249,79 @@ export async function providerClose(provider: ProviderId, sessionId: string): Pr
   return invoke("provider_close", { provider, sessionId });
 }
 
+export interface ProviderHistoryHydrateIpcResponse {
+  messages: HistoryMessage[];
+  stat?: SessionJsonlStat | null;
+}
+
+export async function providerHistoryTruncate(
+  input: ProviderHistoryTruncateRequest,
+): Promise<ProviderHistoryTruncateIpcResult> {
+  return invoke<ProviderHistoryTruncateIpcResult>("provider_history_truncate", {
+    provider: input.provider,
+    req: input.req,
+  });
+}
+
+export async function providerHistoryFork(
+  input: ProviderHistoryForkRequest,
+): Promise<ProviderHistoryForkIpcResult> {
+  return invoke<ProviderHistoryForkIpcResult>("provider_history_fork", {
+    provider: input.provider,
+    req: input.req,
+  });
+}
+
+export async function providerHistoryHydrate(
+  input: ProviderHistoryHydrateRequest,
+): Promise<ProviderHistoryHydrateIpcResponse> {
+  return invoke<ProviderHistoryHydrateIpcResponse>("provider_history_hydrate", {
+    provider: input.provider,
+    req: input.req,
+  });
+}
+
+export async function providerHistoryDelete(
+  input: ProviderHistoryDeleteRequest,
+): Promise<ProviderHistoryDeleteIpcResult> {
+  return invoke<ProviderHistoryDeleteIpcResult>("provider_history_delete", {
+    provider: input.provider,
+    req: input.req,
+  });
+}
+
+export async function cancelProviderSession(sessionId: string, provider: ProviderId): Promise<void> {
+  return providerCancel(provider, sessionId);
+}
+
+export async function closeProviderSession(sessionId: string, provider: ProviderId): Promise<void> {
+  return providerClose(provider, sessionId);
+}
+
 export async function cancelCodex(sessionId: string): Promise<void> {
-  return providerCancel("openai", sessionId);
+  return cancelProviderSession(sessionId, "openai");
 }
 
 export async function closeCodexSession(sessionId: string): Promise<void> {
-  return providerClose("openai", sessionId);
+  return closeProviderSession(sessionId, "openai");
 }
 
 export async function rollbackCodexThread(threadId: string, cwd: string, numTurns: number): Promise<void> {
-  return invoke("rollback_codex_thread", { threadId, cwd, numTurns });
+  await providerHistoryTruncate({
+    provider: "openai",
+    req: { thread_id: threadId, cwd, num_turns: numTurns },
+  });
 }
 
 export async function forkCodexThread(threadId: string, cwd: string, dropTurns: number): Promise<string> {
-  return invoke<string>("fork_codex_thread", { threadId, cwd, dropTurns });
+  const result = await providerHistoryFork({
+    provider: "openai",
+    req: { thread_id: threadId, cwd, drop_turns: dropTurns },
+  });
+  if (!result.codex_thread_id) {
+    throw new Error("OpenAI history fork did not return a thread id");
+  }
+  return result.codex_thread_id;
 }
 
 /// Hydrate a Codex chat from its on-disk rollout JSONL. `threadId` is the
@@ -260,7 +329,11 @@ export async function forkCodexThread(threadId: string, cwd: string, dropTurns: 
 /// in the same shape `loadSessionHistory` returns for Claude, so callers can
 /// pipe through `mapHistoryMessages` unchanged.
 export async function loadCodexSessionHistory(threadId: string): Promise<HistoryMessage[]> {
-  return invoke<HistoryMessage[]>("load_codex_session_history", { threadId });
+  const result = await providerHistoryHydrate({
+    provider: "openai",
+    req: { thread_id: threadId },
+  });
+  return result.messages;
 }
 
 /// List on-disk Codex sessions whose original `cwd` matches `cwd`. Same shape
@@ -359,17 +432,32 @@ export async function findRewindUuid(sessionId: string, cwd: string, keepMessage
 }
 
 export async function truncateSessionJsonlByMessages(sessionId: string, cwd: string, keepMessages: number): Promise<unknown> {
-  return invoke("truncate_session_jsonl_by_messages", { sessionId, cwd, keepMessages });
+  return providerHistoryTruncate({
+    provider: "anthropic",
+    req: { session_id: sessionId, cwd, keep_messages: keepMessages },
+  });
 }
 
 export async function forkSessionJsonl(parentSessionId: string, newSessionId: string, cwd: string, keepMessages: number): Promise<string> {
-  return invoke("fork_session_jsonl", { parentSessionId, newSessionId, cwd, keepMessages });
+  const result = await providerHistoryFork({
+    provider: "anthropic",
+    req: {
+      parent_session_id: parentSessionId,
+      new_session_id: newSessionId,
+      cwd,
+      keep_messages: keepMessages,
+    },
+  });
+  return result.resume_at_uuid ?? "";
 }
 
 /** Delete a session's JSONL file from disk. Delegation cleanup uses this so
  *  ephemeral children leave no trace; missing files are a no-op. */
 export async function deleteSessionJsonl(sessionId: string, cwd: string): Promise<void> {
-  return invoke("delete_session_jsonl", { sessionId, cwd });
+  await providerHistoryDelete({
+    provider: "anthropic",
+    req: { session_id: sessionId, cwd },
+  });
 }
 
 // Discord bot commands
@@ -843,15 +931,20 @@ export async function readFileBase64(path: string): Promise<string> {
 // ── Shared helpers ──────────────────────────────────
 
 /**
- * Spawn a Claude session panel on the canvas with an initial prompt.
+ * Spawn a provider-backed session panel on the canvas with an initial prompt.
  * Consolidates the duplicated pattern from WidgetDialog + SkillDialog.
  *
- * @param cwd       Working directory for the Claude CLI
+ * @param cwd       Working directory for the provider runtime
  * @param sessionName  Display name for the session
  * @param prompt    Initial prompt to send
  * @param getStores  Lazy getter to avoid circular imports — returns {canvasStore, claudeStore, settingsStore}
  */
-export function spawnClaudeWithPrompt(
+interface SpawnProviderSessionOptions {
+  skipOpenwolf?: boolean;
+  provider?: ProviderId;
+}
+
+export function spawnProviderSessionWithPrompt(
   cwd: string,
   sessionName: string,
   prompt: string,
@@ -860,20 +953,20 @@ export function spawnClaudeWithPrompt(
     claudeStore: { getState: () => any };
     settingsStore: { getState: () => any };
   },
-  options?: { skipOpenwolf?: boolean; provider?: ProviderId },
+  options?: SpawnProviderSessionOptions,
 ): void {
   const { canvasStore, claudeStore, settingsStore } = getStores();
   const provider = options?.provider ?? "anthropic";
   canvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
   const terminals = canvasStore.getState().terminals;
-  const claudePanel = terminals[terminals.length - 1];
-  if (!claudePanel || claudePanel.panelType !== "claude") return;
+  const sessionPanel = terminals[terminals.length - 1];
+  if (!sessionPanel || sessionPanel.panelType !== "claude") return;
 
-  const sid = claudePanel.terminalId;
+  const sid = sessionPanel.terminalId;
   const skip = options?.skipOpenwolf;
   claudeStore.getState().createSession(sid, sessionName, false, skip, cwd, provider);
   claudeStore.getState().addUserMessage(sid, prompt);
-  // Small delay so ClaudeChat mounts and event listeners are ready
+  // Small delay so the chat panel mounts and event listeners are ready.
   setTimeout(() => {
     if (provider === "openai") {
       const codexPerm = decodeCodexPermission(PROVIDER_CONFIG.openai.defaultPermission);
@@ -904,4 +997,19 @@ export function spawnClaudeWithPrompt(
       });
     }
   }, 300);
+}
+
+/** @deprecated Use spawnProviderSessionWithPrompt. */
+export function spawnClaudeWithPrompt(
+  cwd: string,
+  sessionName: string,
+  prompt: string,
+  getStores: () => {
+    canvasStore: { getState: () => any };
+    claudeStore: { getState: () => any };
+    settingsStore: { getState: () => any };
+  },
+  options?: SpawnProviderSessionOptions,
+): void {
+  spawnProviderSessionWithPrompt(cwd, sessionName, prompt, getStores, options);
 }

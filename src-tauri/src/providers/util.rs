@@ -1,8 +1,7 @@
 //! Provider-agnostic helpers reused by every adapter.
 //!
-//! Step 1 copies these verbatim from `claude_manager.rs` so Agent 2 can
-//! delete the originals and point `claude.rs` at this module. The helpers
-//! are provider-neutral in effect:
+//! These helpers moved out of `claude_manager.rs` so Claude and Codex adapters
+//! can share the provider-neutral pieces:
 //!
 //! - [`shim_command`] — wraps a binary path in `cmd /C` on Windows so
 //!   `.cmd`/`.bat` shims resolve via PATHEXT. Any adapter spawning a CLI

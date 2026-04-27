@@ -10,6 +10,13 @@ import {
   claudeBlockToProviderToolResult,
 } from "./claudeEventDecoder";
 import {
+  buildDelegationChildProviderTurnInput,
+  buildDelegationMcpEnv,
+  getDelegationMcpTransport,
+  resolveDelegationChildRuntimeSettings,
+} from "./delegationChildRuntime";
+import {
+  codexPermissionForOverride,
   codexDropTurnsForKeepMessages,
   buildCodexCreateRequest,
   buildCodexSendRequest,
@@ -25,7 +32,8 @@ import {
 } from "./codexEventDecoder";
 import { decodeCodexPermission, getProviderManifest, providerSupports } from "./providers";
 import { providerTurnOperation } from "./providerRuntime";
-import { STORAGE_KEY, useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, STORAGE_KEY, useClaudeStore } from "../stores/claudeStore";
+import type { CreateCodexRequest, ProviderCreateRequest, ProviderSendRequest } from "../contracts/providerIpc";
 import type { ChatMessage } from "./types";
 
 type VerificationResult = {
@@ -101,6 +109,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
   assert(typeof localStorage !== "undefined", "providerState migration fixture requires browser localStorage");
 
   const sessionId = "provider-verification-legacy-openai";
+  const stateSessionId = "provider-verification-state-openai";
   const previousStorage = localStorage.getItem(STORAGE_KEY);
   const previousSessions = useClaudeStore.getState().sessions;
 
@@ -120,10 +129,35 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
         selectedCodexPermission: "yolo",
         seedTranscript: transcriptFixture.slice(0, 2),
       },
+      [stateSessionId]: {
+        sessionId: stateSessionId,
+        name: "Provider State Wins",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 2,
+        schemaVersion: 5,
+        providerState: {
+          provider: "openai",
+          selectedModel: "gpt-5.5",
+          selectedEffort: "medium",
+          seedTranscript: null,
+          openai: {
+            codexThreadId: "thread-provider-state",
+            selectedCodexPermission: "workspace",
+          },
+        },
+        provider: "anthropic",
+        codexThreadId: "thread-legacy-mirror",
+        selectedModel: "sonnet",
+        selectedEffort: "high",
+        selectedCodexPermission: "yolo",
+      },
     }));
     useClaudeStore.setState({ sessions: {} });
     useClaudeStore.getState().createSession(sessionId);
+    useClaudeStore.getState().createSession(stateSessionId);
     const migrated = useClaudeStore.getState().sessions[sessionId];
+    const stateBacked = useClaudeStore.getState().sessions[stateSessionId];
 
     assert(migrated, "legacy OpenAI metadata creates a session");
     assertEqual(migrated.providerState.provider, "openai", "legacy provider migrates into providerState");
@@ -133,6 +167,24 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(migrated.providerState.selectedEffort, "high", "legacy selected effort migrates");
     assertEqual(migrated.messages.length, 2, "legacy seed transcript hydrates into visible messages");
     assertEqual(migrated.codexThreadId, migrated.providerState.openai?.codexThreadId ?? null, "compat thread mirror matches providerState");
+
+    assert(stateBacked, "schema v5 metadata creates a providerState-backed session");
+    assertEqual(stateBacked.providerState.provider, "openai", "providerState provider wins over stale flat provider");
+    assertEqual(stateBacked.providerState.openai?.codexThreadId, "thread-provider-state", "providerState thread id wins over stale flat mirror");
+    assertEqual(stateBacked.providerState.openai?.selectedCodexPermission, "workspace", "providerState permission wins over stale flat mirror");
+    assertEqual(stateBacked.providerState.selectedModel, "gpt-5.5", "providerState selected model wins over stale flat mirror");
+
+    const hotReloadFallback = resolveSessionProviderState({
+      provider: "openai",
+      codexThreadId: "thread-hot-reload",
+      selectedModel: "gpt-5.4-mini",
+      selectedEffort: "low",
+      selectedCodexPermission: "full-auto",
+      seedTranscript: transcriptFixture.slice(0, 1),
+    });
+    assertEqual(hotReloadFallback.provider, "openai", "hot-reloaded flat provider falls back into providerState");
+    assertEqual(hotReloadFallback.openai?.codexThreadId, "thread-hot-reload", "hot-reloaded flat thread id falls back into providerState");
+    assertEqual(hotReloadFallback.openai?.selectedCodexPermission, "full-auto", "hot-reloaded flat permission falls back into providerState");
 
     return { name: "providerState legacy migration", ok: true };
   } finally {
@@ -176,6 +228,20 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   assertEqual(sendReq.thread_id, "thread-1", "Codex send includes external app-server thread id");
   assertNoUndefinedOwnValues(sendReq as unknown as Record<string, unknown>, "sendReq");
 
+  const legacyFallbackSendReq = buildCodexSendRequest(
+    providerInput({ started: true }),
+    createReq,
+  );
+  assert(
+    !Object.prototype.hasOwnProperty.call(legacyFallbackSendReq, "thread_id"),
+    "legacy Codex resume fallback does not invent a thread_id",
+  );
+  assertEqual(
+    codexPermissionForOverride("workspace", "plan").sandbox_mode,
+    "read-only",
+    "plan override downgrades Codex runtime permissions to read-only",
+  );
+
   const yoloReq = buildCodexCreateRequest(providerInput({
     selectedCodexPermission: "workspace",
     permissionOverride: "bypass_all",
@@ -191,6 +257,123 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   assertEqual(codexDropTurnsForKeepMessages(transcriptFixture, 10), 0, "Codex drop-turn calculation never goes negative");
 
   return { name: "provider runtime create/send/fork/rewind fixtures", ok: true };
+}
+
+export function verifyDelegationChildSpawnFixtures(): VerificationResult {
+  const mcpEnv = buildDelegationMcpEnv({
+    delegationPort: 49152,
+    delegationSecret: "secret",
+    groupId: "group-1",
+    agentLabel: "Agent 1",
+  });
+  assert(mcpEnv, "delegation MCP env is built when port and secret are available");
+  assertEqual(getDelegationMcpTransport("anthropic"), "temp-config", "Anthropic delegation uses a temp MCP config");
+  assertEqual(getDelegationMcpTransport("openai"), "env", "OpenAI delegation uses runtime MCP env");
+
+  const inheritedRuntime = resolveDelegationChildRuntimeSettings({
+    parentSession: {
+      providerState: {
+        provider: "openai",
+        selectedModel: "gpt-5.4",
+        selectedEffort: "medium",
+        seedTranscript: null,
+        openai: {
+          codexThreadId: "thread-parent",
+          selectedCodexPermission: "full-auto",
+        },
+      },
+      skipOpenwolf: true,
+    },
+    selectedProvider: "anthropic",
+    selectedModel: "sonnet",
+    selectedEffort: "high",
+    selectedCodexPermission: "workspace",
+  });
+  assertEqual(inheritedRuntime.provider, "openai", "delegation child inherits parent provider");
+  assertEqual(inheritedRuntime.selectedModel, "gpt-5.4", "delegation child inherits parent model");
+  assertEqual(inheritedRuntime.selectedEffort, "medium", "delegation child inherits parent effort");
+  assertEqual(inheritedRuntime.selectedCodexPermission, "full-auto", "delegation child inherits parent Codex permission");
+  assertEqual(inheritedRuntime.inheritSkipOpenwolf, true, "delegation child inherits parent OpenWolf skip preference");
+
+  const openaiChild = buildDelegationChildProviderTurnInput({
+    provider: "openai",
+    sessionId: "child-openai",
+    cwd: "/repo",
+    prompt: "do the task",
+    selectedModel: "gpt-5.5",
+    selectedEffort: "high",
+    selectedCodexPermission: "workspace",
+    inheritSkipOpenwolf: false,
+    mcpEnv,
+  });
+
+  assertEqual(openaiChild.provider, "openai", "delegation OpenAI child keeps provider");
+  assertEqual(openaiChild.started, false, "delegation child starts as a first turn");
+  assertEqual(openaiChild.permissionOverride, "bypass_all", "delegation child uses bypass override");
+  assertEqual(openaiChild.skipOpenwolf, true, "delegation OpenAI child skips OpenWolf bootstrap");
+  assertEqual(openaiChild.skipGitRepoCheck, true, "delegation OpenAI child skips git repo check");
+  assertEqual(openaiChild.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation OpenAI child receives MCP env");
+  assert(!Object.prototype.hasOwnProperty.call(openaiChild, "mcpConfig"), "delegation OpenAI child does not receive Claude MCP config");
+  assert(!Object.prototype.hasOwnProperty.call(openaiChild, "noSessionPersistence"), "delegation OpenAI child omits Claude persistence flag");
+  assertNoUndefinedOwnValues(openaiChild as unknown as Record<string, unknown>, "openaiChild");
+
+  const anthropicChild = buildDelegationChildProviderTurnInput({
+    provider: "anthropic",
+    sessionId: "child-anthropic",
+    cwd: "/repo",
+    prompt: "do the task",
+    selectedModel: "sonnet",
+    selectedEffort: "high",
+    selectedCodexPermission: "workspace",
+    inheritSkipOpenwolf: true,
+    mcpConfigPath: "/tmp/t64-mcp.json",
+  });
+
+  assertEqual(anthropicChild.provider, "anthropic", "delegation Anthropic child keeps provider");
+  assertEqual(anthropicChild.skipOpenwolf, true, "delegation Anthropic child inherits OpenWolf preference");
+  assertEqual(anthropicChild.mcpConfig, "/tmp/t64-mcp.json", "delegation Anthropic child receives MCP config path");
+  assertEqual(anthropicChild.noSessionPersistence, true, "delegation Anthropic child disables session persistence");
+  assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "mcpEnv"), "delegation Anthropic child omits Codex MCP env");
+  assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "skipGitRepoCheck"), "delegation Anthropic child omits Codex git flag");
+  assertNoUndefinedOwnValues(anthropicChild as unknown as Record<string, unknown>, "anthropicChild");
+
+  return { name: "delegation child provider turn fixtures", ok: true };
+}
+
+export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
+  const openaiCreate = {
+    provider: "openai",
+    req: buildCodexCreateRequest(providerInput()),
+  } satisfies ProviderCreateRequest;
+  const openaiSend = {
+    provider: "openai",
+    req: buildCodexSendRequest(providerInput({ threadId: "thread-1" }), openaiCreate.req),
+  } satisfies ProviderSendRequest;
+  const anthropicCreate = {
+    provider: "anthropic",
+    req: {
+      session_id: "claude-1",
+      cwd: "/repo",
+      prompt: "hello",
+      permission_mode: "default",
+    },
+  } satisfies ProviderCreateRequest;
+
+  // @ts-expect-error provider ids are intentionally closed until a runtime is implemented.
+  const unsupportedProvider = { provider: "opencode", req: openaiCreate.req } satisfies ProviderCreateRequest;
+  // @ts-expect-error OpenAI create requests must include a prompt at the generic IPC boundary.
+  const missingPrompt = { provider: "openai", req: { session_id: "codex-1", cwd: "/repo" } } satisfies ProviderCreateRequest;
+  // @ts-expect-error exactOptionalPropertyTypes requires callers to omit optional values instead of passing undefined.
+  const undefinedOptional = { session_id: "codex-1", cwd: "/repo", prompt: "hello", model: undefined } satisfies CreateCodexRequest;
+  void unsupportedProvider;
+  void missingPrompt;
+  void undefinedOptional;
+
+  assertEqual(openaiCreate.provider, "openai", "generic provider_create carries OpenAI discriminator");
+  assertEqual(openaiSend.req.thread_id, "thread-1", "generic provider_send carries OpenAI thread id");
+  assertEqual(anthropicCreate.req.permission_mode, "default", "generic provider_create carries Anthropic request shape");
+
+  return { name: "generic provider IPC request typing fixtures", ok: true };
 }
 
 export function verifyCodexPermissionFixtures(): VerificationResult {
@@ -273,6 +456,8 @@ export function runProviderModularityVerification(): VerificationResult[] {
   return [
     verifyProviderManifestDefaults(),
     verifyProviderRuntimeFixtures(),
+    verifyDelegationChildSpawnFixtures(),
+    verifyProviderIpcRequestTypingFixtures(),
     verifyCodexPermissionFixtures(),
     verifyProviderEventNormalizationFixtures(),
     verifyProviderStateMigrationFixture(),

@@ -29,6 +29,91 @@ export interface ProviderSessionRequest {
   sessionId: string;
 }
 
+export type ProviderHistoryTruncateRequest =
+  | {
+    provider: "anthropic";
+    req: {
+      session_id: string;
+      cwd: string;
+      keep_messages: number;
+    };
+  }
+  | {
+    provider: "openai";
+    req: {
+      thread_id: string;
+      cwd: string;
+      num_turns: number;
+    };
+  };
+
+export interface ProviderHistoryTruncateIpcResult {
+  resume_at_uuid?: string | null;
+  method?: string;
+  turns?: number;
+  details?: unknown;
+  rollback_error?: string;
+}
+
+export type ProviderHistoryForkRequest =
+  | {
+    provider: "anthropic";
+    req: {
+      parent_session_id: string;
+      new_session_id: string;
+      cwd: string;
+      keep_messages: number;
+    };
+  }
+  | {
+    provider: "openai";
+    req: {
+      thread_id: string;
+      cwd: string;
+      drop_turns: number;
+    };
+  };
+
+export interface ProviderHistoryForkIpcResult {
+  resume_at_uuid?: string | null;
+  codex_thread_id?: string | null;
+}
+
+export type ProviderHistoryHydrateRequest =
+  | {
+    provider: "anthropic";
+    req: {
+      session_id: string;
+      cwd: string;
+    };
+  }
+  | {
+    provider: "openai";
+    req: {
+      thread_id: string;
+    };
+  };
+
+export type ProviderHistoryDeleteRequest =
+  | {
+    provider: "anthropic";
+    req: {
+      session_id: string;
+      cwd: string;
+    };
+  }
+  | {
+    provider: "openai";
+    req: {
+      thread_id?: string | null;
+    };
+  };
+
+export interface ProviderHistoryDeleteIpcResult {
+  method: "deleted" | "skipped";
+  reason?: string;
+}
+
 export interface SendCodexPromptRequest {
   session_id: string;
   thread_id?: string;

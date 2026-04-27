@@ -8,6 +8,8 @@ import {
 import type {
   ProviderForkInput,
   ProviderForkResult,
+  ProviderHistoryDeleteInput,
+  ProviderHistoryDeleteResult,
   ProviderHistoryTruncateInput,
   ProviderHistoryTruncateResult,
   ProviderHydrateInput,
@@ -60,4 +62,10 @@ export function prepareProviderFork(input: ProviderForkInput): Promise<ProviderF
 
 export function hydrateProviderHistory(input: ProviderHydrateInput): Promise<ProviderHydrateResult> {
   return getProviderRuntime(input.provider).hydrate(input);
+}
+
+export function deleteProviderHistory(
+  input: ProviderHistoryDeleteInput,
+): Promise<ProviderHistoryDeleteResult> {
+  return getProviderRuntime(input.provider).deleteHistory(input);
 }

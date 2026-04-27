@@ -489,7 +489,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 <button
                   className={`sp-btn sp-btn--wide ${wolfDaemonRunning ? "sp-btn--danger" : ""}`}
                   disabled={wolfDaemonLoading || !wolfCwd}
-                  title={!wolfCwd ? "Open a Claude session first so the daemon knows which project to watch" : ""}
+                  title={!wolfCwd ? "Open an AI session first so the daemon knows which project to watch" : ""}
                   onClick={async () => {
                     setWolfDaemonLoading(true);
                     try {
@@ -743,26 +743,26 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                   } else {
                     await startDiscordBot(discordToken, discordServerId);
                     setBotConnected(true);
-                    // Wait for gateway to be ready, then link all open Claude panels
+                    // Wait for gateway to be ready, then link all open AI session panels.
                     await new Promise((r) => setTimeout(r, 2000));
                     const terminals = useCanvasStore.getState().terminals;
-                    // Canvas `t.title` is a stale snapshot; read the live name from claudeStore.
-                    let claudeSaved: Record<string, { name?: string; cwd?: string }> = {};
+                    // Canvas `t.title` is a stale snapshot; read the live name from the session store.
+                    let savedSessions: Record<string, { name?: string; cwd?: string }> = {};
                     try {
                       const raw = localStorage.getItem(CLAUDE_STORAGE_KEY);
-                      if (raw) claudeSaved = JSON.parse(raw);
+                      if (raw) savedSessions = JSON.parse(raw);
                     } catch (err) {
-                      console.warn("[discord] Failed to read claude store:", err);
+                      console.warn("[discord] Failed to read session store:", err);
                     }
-                    const claudeSessions = useClaudeStore.getState().sessions;
+                    const providerSessions = useClaudeStore.getState().sessions;
                     for (const t of terminals) {
                       if (t.panelType !== "claude") continue;
-                      const liveName = claudeSessions[t.terminalId]?.name;
-                      const savedName = claudeSaved[t.terminalId]?.name;
+                      const liveName = providerSessions[t.terminalId]?.name;
+                      const savedName = savedSessions[t.terminalId]?.name;
                       const name = (liveName || savedName || "").trim();
                       if (!name) continue;
-                      const cwd = claudeSessions[t.terminalId]?.cwd
-                        || claudeSaved[t.terminalId]?.cwd
+                      const cwd = providerSessions[t.terminalId]?.cwd
+                        || savedSessions[t.terminalId]?.cwd
                         || t.cwd
                         || "";
                       try {

@@ -1,6 +1,7 @@
-// Step 1 emits only the legacy `claude-event` payload; the typed
-// `ProviderEvent` enum is kept ahead of the consumer so adapters can target
-// it as soon as the frontend listens. Allow dead code until that wiring lands.
+// The frontend still consumes provider-specific legacy event topics; the
+// typed `ProviderEvent` enum is kept ahead of the consumer so adapters can
+// target it as soon as the normalized Rust stream is wired. Allow dead code
+// until that wiring lands.
 #![allow(dead_code)]
 
 //! `ProviderEvent` — Rust port of the `ProviderRuntimeEvent` discriminated
@@ -8,9 +9,10 @@
 //!
 //! The tag strings match `ProviderRuntimeEventType` (providerRuntime.ts:135–184)
 //! verbatim so the frontend decodes events without a translation layer.
-//! Per-variant payloads stay `serde_json::Value` for Step 1 — the contract
-//! has 600+ lines of per-variant schemas and we'd rather bind them in a
-//! follow-up than block this refactor.
+//! Per-variant payloads stay `serde_json::Value` while the command-adapter
+//! path remains the live IPC surface. The source contract has 600+ lines of
+//! per-variant schemas, so the typed payloads can be bound when consumers need
+//! the normalized Rust stream directly.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +58,7 @@ pub struct ProviderEventBase {
 /// The `type` tag uses the exact kebab/dotted strings from the TS union so
 /// the frontend decodes without a translation layer. Per-variant payload
 /// fields land in `payload: serde_json::Value` via `#[serde(flatten)]`;
-/// Step 2 may promote hot variants to typed payloads.
+/// A later pass may promote hot variants to typed payloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ProviderEvent {

@@ -7,7 +7,15 @@
 import type { PermissionMode } from "./types";
 
 export type ProviderId = "anthropic" | "openai";
-export type ProviderFeature = "mcp" | "plan" | "fork" | "rewind" | "images" | "hookLog";
+export type ProviderFeature =
+  | "mcp"
+  | "plan"
+  | "fork"
+  | "rewind"
+  | "images"
+  | "hookLog"
+  | "nativeSlashCommands"
+  | "compact";
 
 export interface ModelOption {
   id: string;
@@ -34,6 +42,8 @@ export interface ProviderCapabilities {
   rewind: boolean;
   images: boolean;
   hookLog: boolean;
+  nativeSlashCommands: boolean;
+  compact: boolean;
 }
 
 export interface ProviderUiMetadata {
@@ -145,6 +155,8 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       rewind: true,
       images: true,
       hookLog: true,
+      nativeSlashCommands: true,
+      compact: true,
     },
     models: ANTHROPIC_MODELS,
     efforts: ANTHROPIC_EFFORTS,
@@ -170,6 +182,8 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       rewind: true,
       images: true,
       hookLog: false,
+      nativeSlashCommands: false,
+      compact: false,
     },
     models: OPENAI_MODELS,
     efforts: OPENAI_EFFORTS,

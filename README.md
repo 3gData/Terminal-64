@@ -2,7 +2,7 @@
 
 # Terminal 64
 
-**A canvas-based terminal emulator and AI workstation — run terminals, Claude Code agents, widgets, and more on an infinite pan/zoom canvas.**
+**A canvas-based terminal emulator and AI workstation — run terminals, Claude Code or Codex agents, widgets, and more on an infinite pan/zoom canvas.**
 
 [![Build](https://img.shields.io/github/actions/workflow/status/Pugbread/Terminal-64/ci.yml?branch=master&label=build)](https://github.com/Pugbread/Terminal-64/actions)
 [![Release](https://img.shields.io/github/v/release/Pugbread/Terminal-64?include_prereleases&label=release)](https://github.com/Pugbread/Terminal-64/releases)
@@ -20,11 +20,11 @@
 ## Features
 
 - **Terminals** — multi-session PTYs (xterm.js + WebGL) on a free-form pan/zoom canvas with snap guides, pop-out windows, activity indicators, and session persistence.
-- **Claude Code sessions** — streaming chat UI, Monaco diff overlay, file tree, rewind/fork history, loop mode, and inline permission handling.
+- **Provider-backed AI sessions** — Claude Code and OpenAI Codex runtimes share the streaming chat UI, Monaco diff overlay, file tree, rewind/fork history, loop mode, and provider-specific permissions.
 - **MCP servers** — live Model Context Protocol status and configuration per session.
-- **Multi-agent delegation** — `/delegate` splits work across parallel Claude agents with shared team chat and auto-merge back into the parent session.
-- **Widgets** — build HTML/CSS/JS panels with a 40+ command `postMessage` bridge (shell, filesystem, terminals, Claude sessions, browser, pub/sub, persistent state) plus hot reload.
-- **Skills** — reusable Claude instruction sets stored in `~/.terminal64/skills/`, spawned with the target project as CWD.
+- **Multi-agent delegation** — `/delegate` splits work across parallel provider-backed agents with shared team chat and auto-merge back into the parent session.
+- **Widgets** — build HTML/CSS/JS panels with a 40+ command `postMessage` bridge (shell, filesystem, terminals, AI sessions, browser, pub/sub, persistent state) plus hot reload.
+- **Skills** — reusable AI instruction sets stored in `~/.terminal64/skills/`, spawned with the target project as CWD.
 - **Party mode** — system audio capture → FFT → audio-reactive equalizer bars, edge glow, and theme-locked or rainbow color cycling.
 - **Browser panels** — embedded native webviews positioned on the canvas with URL bar and navigation controls.
 - **Discord bot** — optional session ↔ channel sync for remote access.
@@ -71,7 +71,7 @@ Outputs a native executable and platform installer under `src-tauri/target/relea
 
 ## Architecture
 
-Terminal 64 is a Tauri v2 desktop app: a **Rust backend** (`src-tauri/src/`) manages PTYs, the Claude CLI subprocess, the Discord bot, MCP permission server, audio capture, widget HTTP server, and native browser children; a **React 19 + TypeScript frontend** (`src/`) renders the canvas, xterm.js terminals, Claude chat, Monaco overlays, widgets, and party-mode visuals. Communication flows via Tauri IPC (`invoke` + event emitters), with Zustand stores providing persisted client state. For a full module-by-module breakdown — PTY lifecycle, Claude stream-json parsing, delegation orchestration, widget bridge, party-mode audio pipeline, design conventions, and user-data paths — see [CLAUDE.md](CLAUDE.md).
+Terminal 64 is a Tauri v2 desktop app: a **Rust backend** (`src-tauri/src/`) manages PTYs, the provider registry for Claude CLI and OpenAI Codex runtimes, the Discord bot, MCP permission server, audio capture, widget HTTP server, and native browser children; a **React 19 + TypeScript frontend** (`src/`) renders the canvas, xterm.js terminals, provider-backed chat, Monaco overlays, widgets, and party-mode visuals. Communication flows via Tauri IPC (`invoke` + event emitters), with Zustand stores providing persisted client state. For a full module-by-module breakdown — PTY lifecycle, provider runtime/event normalization, delegation orchestration, widget bridge, party-mode audio pipeline, design conventions, and user-data paths — see [CLAUDE.md](CLAUDE.md).
 
 ## Keyboard Shortcuts
 

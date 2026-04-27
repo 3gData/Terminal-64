@@ -1,20 +1,21 @@
 import {
   ensureCodexMcp,
   ensureCodexSkills,
-  forkCodexThread,
-  loadCodexSessionHistory,
   mapHistoryMessages,
   providerCancel,
   providerClose,
   providerCreate,
+  providerHistoryDelete,
+  providerHistoryFork,
+  providerHistoryHydrate,
+  providerHistoryTruncate,
   providerSend,
-  rollbackCodexThread,
-  truncateCodexRollout,
 } from "../tauriApi";
 import type { PermissionMode, ChatMessage } from "../types";
 import type { CreateCodexRequest, SendCodexPromptRequest } from "../../contracts/providerIpc";
 import type {
   ProviderHistoryTruncateResult,
+  ProviderHistoryDeleteResult,
   ProviderHydrateResult,
   ProviderRuntime,
   ProviderTurnInput,
@@ -147,11 +148,16 @@ export const openaiRuntime: ProviderRuntime = {
   async rewind(input): Promise<ProviderHistoryTruncateResult> {
     if (input.codexThreadId) {
       const dropTurns = codexDropTurnsForKeepMessages(input.preMessages, input.keepMessages);
-      try {
-        await rollbackCodexThread(input.codexThreadId, input.cwd, dropTurns);
-      } catch (err) {
-        console.warn("[providerRuntime] Codex app-server rollback failed, falling back to rollout truncation:", err);
-        await truncateCodexRollout(input.codexThreadId, dropTurns);
+      const result = await providerHistoryTruncate({
+        provider: "openai",
+        req: {
+          thread_id: input.codexThreadId,
+          cwd: input.cwd,
+          num_turns: dropTurns,
+        },
+      });
+      if (result.method === "rollout" && result.rollback_error) {
+        console.warn("[providerRuntime] Codex app-server rollback failed, fell back to rollout truncation:", result.rollback_error);
       }
     }
     return {};
@@ -163,8 +169,19 @@ export const openaiRuntime: ProviderRuntime = {
 
     const dropTurns = codexDropTurnsForKeepMessages(input.preMessages, input.keepMessages);
     try {
+      const result = await providerHistoryFork({
+        provider: "openai",
+        req: {
+          thread_id: input.codexThreadId,
+          cwd: input.cwd,
+          drop_turns: dropTurns,
+        },
+      });
+      if (!result.codex_thread_id) {
+        throw new Error("OpenAI history fork did not return a thread id");
+      }
       return {
-        codexThreadId: await forkCodexThread(input.codexThreadId, input.cwd, dropTurns),
+        codexThreadId: result.codex_thread_id,
       };
     } catch (err) {
       console.warn("[fork] Codex app-server fork failed; falling back to seeded transcript:", err);
@@ -176,10 +193,22 @@ export const openaiRuntime: ProviderRuntime = {
     if (!input.codexThreadId) {
       return { status: "empty" };
     }
-    const history = await loadCodexSessionHistory(input.codexThreadId);
+    const result = await providerHistoryHydrate({
+      provider: "openai",
+      req: { thread_id: input.codexThreadId },
+    });
+    const history = result.messages;
     if (history.length === 0) {
       return { status: "empty" };
     }
     return { status: "messages", messages: mapHistoryMessages(history) };
+  },
+
+  async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
+    const result = await providerHistoryDelete({
+      provider: "openai",
+      req: input.codexThreadId ? { thread_id: input.codexThreadId } : {},
+    });
+    return result;
   },
 };

@@ -310,6 +310,57 @@ fn provider_kind_from_frontend_id(provider: &str) -> Result<ProviderKind, String
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ClaudeHistoryTruncateRequest {
+    session_id: String,
+    cwd: String,
+    keep_messages: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexHistoryTruncateRequest {
+    thread_id: String,
+    cwd: String,
+    num_turns: u32,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeHistoryForkRequest {
+    parent_session_id: String,
+    new_session_id: String,
+    cwd: String,
+    keep_messages: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexHistoryForkRequest {
+    thread_id: String,
+    cwd: String,
+    drop_turns: u32,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeHistoryHydrateRequest {
+    session_id: String,
+    cwd: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexHistoryHydrateRequest {
+    thread_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudeHistoryDeleteRequest {
+    session_id: String,
+    cwd: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexHistoryDeleteRequest {
+    thread_id: Option<String>,
+}
+
 fn provider_create_impl(
     state: &AppState,
     app_handle: &tauri::AppHandle,
@@ -540,6 +591,181 @@ fn provider_close(
 }
 
 #[tauri::command]
+fn provider_history_truncate(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    req: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match provider_kind_from_frontend_id(&provider)? {
+        ProviderKind::ClaudeAgent => {
+            let req: ClaudeHistoryTruncateRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid Anthropic history truncate request: {}", e))?;
+            let details =
+                truncate_session_jsonl_by_messages(req.session_id, req.cwd, req.keep_messages)?;
+            Ok(serde_json::json!({
+                "resume_at_uuid": null,
+                "details": details,
+            }))
+        }
+        ProviderKind::Codex => {
+            let req: CodexHistoryTruncateRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid OpenAI history truncate request: {}", e))?;
+            if req.thread_id.trim().is_empty() {
+                return Err("thread_id is required".to_string());
+            }
+            if req.num_turns == 0 {
+                return Ok(serde_json::json!({
+                    "method": "noop",
+                    "turns": 0,
+                }));
+            }
+            match state
+                .codex
+                .rollback_thread(&req.thread_id, &req.cwd, req.num_turns)
+            {
+                Ok(()) => Ok(serde_json::json!({
+                    "method": "app_server",
+                    "turns": req.num_turns,
+                })),
+                Err(rollback_error) => {
+                    safe_eprintln!(
+                        "[provider-history] Codex rollback failed ({}); falling back to rollout truncation",
+                        rollback_error
+                    );
+                    let turns = providers::codex::truncate_codex_rollout_by_turns(
+                        &req.thread_id,
+                        req.num_turns,
+                    )
+                    .map_err(|truncate_error| {
+                        format!(
+                            "Codex rollback failed ({}); rollout truncation failed ({})",
+                            rollback_error, truncate_error
+                        )
+                    })?;
+                    Ok(serde_json::json!({
+                        "method": "rollout",
+                        "turns": turns,
+                        "rollback_error": rollback_error,
+                    }))
+                }
+            }
+        }
+        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
+            "Provider {:?} is known but does not have a history truncate IPC binding yet",
+            provider_kind_from_frontend_id(&provider)?
+        )),
+    }
+}
+
+#[tauri::command]
+fn provider_history_fork(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    req: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match provider_kind_from_frontend_id(&provider)? {
+        ProviderKind::ClaudeAgent => {
+            let req: ClaudeHistoryForkRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid Anthropic history fork request: {}", e))?;
+            let resume_at_uuid = fork_session_jsonl(
+                req.parent_session_id,
+                req.new_session_id,
+                req.cwd,
+                req.keep_messages,
+            )?;
+            Ok(serde_json::json!({
+                "resume_at_uuid": resume_at_uuid,
+            }))
+        }
+        ProviderKind::Codex => {
+            let req: CodexHistoryForkRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid OpenAI history fork request: {}", e))?;
+            let codex_thread_id =
+                state
+                    .codex
+                    .fork_thread(&req.thread_id, &req.cwd, req.drop_turns)?;
+            Ok(serde_json::json!({
+                "codex_thread_id": codex_thread_id,
+            }))
+        }
+        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
+            "Provider {:?} is known but does not have a history fork IPC binding yet",
+            provider_kind_from_frontend_id(&provider)?
+        )),
+    }
+}
+
+#[tauri::command]
+fn provider_history_hydrate(
+    provider: String,
+    req: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match provider_kind_from_frontend_id(&provider)? {
+        ProviderKind::ClaudeAgent => {
+            let req: ClaudeHistoryHydrateRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid Anthropic history hydrate request: {}", e))?;
+            let stat = stat_session_jsonl(req.session_id.clone(), req.cwd.clone())?;
+            let messages = load_session_history(req.session_id, req.cwd)?;
+            Ok(serde_json::json!({
+                "messages": messages,
+                "stat": stat,
+            }))
+        }
+        ProviderKind::Codex => {
+            let req: CodexHistoryHydrateRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid OpenAI history hydrate request: {}", e))?;
+            let messages = load_codex_session_history(req.thread_id)?;
+            Ok(serde_json::json!({
+                "messages": messages,
+                "stat": null,
+            }))
+        }
+        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
+            "Provider {:?} is known but does not have a history hydrate IPC binding yet",
+            provider_kind_from_frontend_id(&provider)?
+        )),
+    }
+}
+
+#[tauri::command]
+fn provider_history_delete(
+    provider: String,
+    req: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match provider_kind_from_frontend_id(&provider)? {
+        ProviderKind::ClaudeAgent => {
+            let req: ClaudeHistoryDeleteRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid Anthropic history delete request: {}", e))?;
+            delete_session_jsonl(req.session_id, req.cwd)?;
+            Ok(serde_json::json!({
+                "method": "deleted",
+            }))
+        }
+        ProviderKind::Codex => {
+            let req: CodexHistoryDeleteRequest = serde_json::from_value(req)
+                .map_err(|e| format!("Invalid OpenAI history delete request: {}", e))?;
+            let reason = if req
+                .thread_id
+                .as_deref()
+                .is_some_and(|thread_id| !thread_id.trim().is_empty())
+            {
+                "codex_rollout_delete_is_not_safe"
+            } else {
+                "codex_thread_id_missing"
+            };
+            Ok(serde_json::json!({
+                "method": "skipped",
+                "reason": reason,
+            }))
+        }
+        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
+            "Provider {:?} is known but does not have a history delete IPC binding yet",
+            provider_kind_from_frontend_id(&provider)?
+        )),
+    }
+}
+
+#[tauri::command]
 fn create_claude_session(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
@@ -596,11 +822,11 @@ fn close_claude_session(
 
 // ── Codex (OpenAI Codex CLI) ────────────────────────────────
 //
-// Mirrors the four Claude commands above. Codex sessions don't go through
-// the MCP permission shim — `codex exec --json` runs non-interactively and
-// approval policy is set up-front via `req.approval_policy`. The frontend
-// listens to `codex-event` / `codex-done` (parallel to `claude-event` /
-// `claude-done`) and parses Codex's NDJSON stream.
+// Compatibility wrappers over the generic provider_* commands for callers
+// that still use Codex-specific IPC names. The primary runtime is Codex
+// app-server over stdio JSON-RPC, with legacy `codex exec --json` retained as
+// an opt-in fallback. Frontend listeners still consume `codex-event` /
+// `codex-done` and normalize them alongside Claude events.
 
 #[tauri::command]
 fn create_codex_session(
@@ -3268,6 +3494,14 @@ fn resolve_node_path() -> &'static str {
     })
 }
 
+fn t64_mcp_script_path(app_dir: &str) -> String {
+    std::path::Path::new(app_dir)
+        .join("mcp")
+        .join("t64-server.mjs")
+        .to_string_lossy()
+        .to_string()
+}
+
 #[tauri::command]
 fn create_mcp_config_file(
     app_handle: tauri::AppHandle,
@@ -3277,7 +3511,7 @@ fn create_mcp_config_file(
     agent_label: String,
 ) -> Result<String, String> {
     let app_dir = get_app_dir(app_handle)?;
-    let script_path = format!("{}/mcp/t64-server.mjs", app_dir);
+    let script_path = t64_mcp_script_path(&app_dir);
     let node_path = resolve_node_path();
     safe_eprintln!("[mcp] Using node: {}", node_path);
     let config = serde_json::json!({
@@ -3315,9 +3549,9 @@ fn get_node_path() -> String {
 #[tauri::command]
 fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
     let app_dir = get_app_dir(app_handle)?;
-    let script_path = format!("{}/mcp/t64-server.mjs", app_dir);
+    let script_path = t64_mcp_script_path(&app_dir);
     let node_path = resolve_node_path();
-    let mcp_path = format!("{}/.mcp.json", cwd);
+    let mcp_path = std::path::Path::new(&cwd).join(".mcp.json");
 
     let mut config: serde_json::Value = std::fs::read_to_string(&mcp_path)
         .ok()
@@ -3337,7 +3571,7 @@ fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Strin
                 .get("args")
                 .and_then(|v| v.get(0))
                 .and_then(|v| v.as_str())
-                == Some(&script_path)
+                == Some(script_path.as_str())
         {
             return Ok(());
         }
@@ -3428,7 +3662,7 @@ fn configure_codex_t64_mcp(
 #[tauri::command]
 fn ensure_codex_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
     let app_dir = get_app_dir(app_handle)?;
-    let script_path = format!("{}/mcp/t64-server.mjs", app_dir);
+    let script_path = t64_mcp_script_path(&app_dir);
     let node_path = resolve_node_path();
     let project_dir = std::path::Path::new(&cwd).join(".codex");
     let config_path = project_dir.join("config.toml");
@@ -5579,6 +5813,10 @@ pub fn run() {
             provider_send,
             provider_cancel,
             provider_close,
+            provider_history_truncate,
+            provider_history_fork,
+            provider_history_hydrate,
+            provider_history_delete,
             create_claude_session,
             send_claude_prompt,
             cancel_claude,

@@ -1,4 +1,4 @@
-// Fuzzy-match a spoken transcript against a set of Claude session names.
+// Fuzzy-match a spoken transcript against a set of AI session names.
 // Normalizes snake_case / camelCase / kebab-case / PascalCase to lowercase space-separated
 // tokens, then scores candidates by token overlap + Levenshtein distance.
 // Returns the best-matching sessionId above threshold, or null.

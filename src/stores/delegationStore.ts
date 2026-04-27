@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import type { DelegateTaskStatus, DelegationGroup, DelegationStatus } from "../lib/types";
+import type {
+  DelegateTaskStatus,
+  DelegationChildCleanupState,
+  DelegationChildRuntimeMetadata,
+  DelegationGroup,
+  DelegationStatus,
+} from "../lib/types";
 
 const STORAGE_KEY = "terminal64-delegations";
 const COMPLETED_GROUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -21,7 +27,22 @@ interface DelegationState {
     sharedContext?: string,
     parentPermissionMode?: string,
   ) => DelegationGroup;
-  setTaskSessionId: (groupId: string, taskId: string, sessionId: string) => void;
+  setTaskSessionId: (
+    groupId: string,
+    taskId: string,
+    sessionId: string,
+    childRuntime?: DelegationChildRuntimeMetadata,
+  ) => void;
+  setTaskChildRuntime: (
+    groupId: string,
+    taskId: string,
+    childRuntime: DelegationChildRuntimeMetadata,
+  ) => void;
+  setTaskCleanupState: (
+    groupId: string,
+    taskId: string,
+    cleanupState: DelegationChildCleanupState,
+  ) => void;
   updateTaskStatus: (groupId: string, taskId: string, status: DelegateTaskStatus, result?: string) => void;
   setTaskForwarded: (groupId: string, taskId: string, messageId: string) => void;
   setTaskAction: (groupId: string, taskId: string, action: string) => void;
@@ -211,15 +232,56 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
     return group;
   },
 
-  setTaskSessionId: (groupId, taskId, sessionId) => {
+  setTaskSessionId: (groupId, taskId, sessionId, childRuntime) => {
     set((s) => {
       const group = s.groups[groupId];
       if (!group) return s;
-      const tasks = group.tasks.map((t) => (t.id === taskId ? { ...t, sessionId } : t));
+      const tasks = group.tasks.map((t) =>
+        t.id === taskId
+          ? {
+              ...t,
+              sessionId,
+              ...(childRuntime !== undefined ? { childRuntime } : {}),
+            }
+          : t,
+      );
       const groups = { ...s.groups, [groupId]: { ...group, tasks } };
       const sessionToGroup = { ...s.sessionToGroup, [sessionId]: groupId };
       debouncedSave();
       return { groups, sessionToGroup };
+    });
+  },
+
+  setTaskChildRuntime: (groupId, taskId, childRuntime) => {
+    set((s) => {
+      const group = s.groups[groupId];
+      if (!group) return s;
+      const tasks = group.tasks.map((t) => (t.id === taskId ? { ...t, childRuntime } : t));
+      const groups = { ...s.groups, [groupId]: { ...group, tasks } };
+      debouncedSave();
+      return { groups };
+    });
+  },
+
+  setTaskCleanupState: (groupId, taskId, cleanupState) => {
+    set((s) => {
+      const group = s.groups[groupId];
+      if (!group) return s;
+      const tasks = group.tasks.map((t) =>
+        t.id === taskId && t.childRuntime
+          ? {
+              ...t,
+              childRuntime: {
+                ...t.childRuntime,
+                cleanupState,
+                cleanupUpdatedAt: Date.now(),
+              },
+            }
+          : t,
+      );
+      const groups = { ...s.groups, [groupId]: { ...group, tasks } };
+      debouncedSave();
+      return { groups };
     });
   },
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnClaudeWithPrompt, syncClaudeSkills, generateSkillMetadata } from "../../lib/tauriApi";
+import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnProviderSessionWithPrompt, syncClaudeSkills, generateSkillMetadata } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -202,7 +202,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
       const activeProvider = activeId
         ? resolveSessionProviderState(useClaudeStore.getState().sessions[activeId]).provider
         : undefined;
-      spawnClaudeWithPrompt(projectDir, `Skill: ${skillName}`, prompt, () => ({
+      spawnProviderSessionWithPrompt(projectDir, `Skill: ${skillName}`, prompt, () => ({
         canvasStore: useCanvasStore,
         claudeStore: useClaudeStore,
         settingsStore: useSettingsStore,
@@ -231,7 +231,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
   };
 
   const handleUseSkill = (skill: SkillInfo) => {
-    // Find the active Claude session and insert /skill-name into its draft
+    // Find the active AI session panel and insert /skill-name into its draft.
     const activeId = useCanvasStore.getState().activeTerminalId;
     const terminals = useCanvasStore.getState().terminals;
     const activeTerm = terminals.find((t) => t.terminalId === activeId && t.panelType === "claude");

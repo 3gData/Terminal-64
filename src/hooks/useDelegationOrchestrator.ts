@@ -1,14 +1,18 @@
 import { useEffect } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 import { useCanvasStore } from "../stores/canvasStore";
-import { cleanupDelegationGroup, clearT64DelegationEnv, deleteSessionJsonl } from "../lib/tauriApi";
-import { cancelProviderSession, closeProviderSession, runProviderTurn } from "../lib/providerRuntime";
-import type { ChatMessage, PermissionMode, ToolCall, HookEventPayload } from "../lib/types";
+import { cleanupDelegationGroup, clearT64DelegationEnv } from "../lib/tauriApi";
+import { cancelProviderSession, closeProviderSession, deleteProviderHistory, runProviderTurn } from "../lib/providerRuntime";
+import {
+  describeDelegationToolAction,
+  evaluateDelegationCompletion,
+  startClaudeHookCompletionSource,
+} from "../lib/delegationCompletion";
+import type { ProviderId } from "../lib/providers";
+import type { PermissionMode } from "../lib/types";
 import type { ProviderTurnInput, ProviderTurnResult } from "../contracts/providerRuntime";
 
-const FORWARDING_PREFIX = "[Update from";
 const MAX_SUMMARY_LENGTH = 800;
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -32,6 +36,11 @@ function closeSharedChatPanel(groupId: string) {
   if (panel) {
     canvas.removeTerminal(panel.id);
   }
+}
+
+function providerIdFromRuntimeMetadata(providerId: string | undefined): ProviderId | null {
+  if (providerId === "anthropic" || providerId === "openai") return providerId;
+  return null;
 }
 
 function providerTurnForSession({
@@ -82,7 +91,7 @@ function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) 
 /**
  * Tear down every child session for a delegation group. Delegation children
  * are ephemeral by contract — they must leave no trace in localStorage, in
- * memory, or in ~/.claude/projects/... JSONL. Called on both successful merge
+ * memory, or in provider-owned child history. Called on both successful merge
  * and on cancel.
  */
 function purgeDelegationChildren(groupId: string) {
@@ -100,21 +109,31 @@ function purgeDelegationChildren(groupId: string) {
     clearIdleTimer(childId);
     // Kill the CLI subprocess if still alive
     const childSession = claudeStore.sessions[childId];
-    const childProvider = childSession
-      ? resolveSessionProviderState(childSession).provider
-      : resolveSessionProviderState(parentSession).provider;
+    const childProviderState = childSession ? resolveSessionProviderState(childSession) : null;
+    const fallbackProviderState = resolveSessionProviderState(parentSession);
+    const childProvider = childProviderState?.provider
+      ?? providerIdFromRuntimeMetadata(task.childRuntime?.providerId)
+      ?? fallbackProviderState.provider;
+    delStore.setTaskCleanupState(groupId, task.id, "closing");
     cancelProviderSession(childId, childProvider).catch(() => {});
-    closeProviderSession(childId, childProvider).catch(() => {});
+    const closePromise = closeProviderSession(childId, childProvider).catch(() => {});
+    const cleanupCwd = childSession?.cwd || task.childRuntime?.cwd || parentCwd;
+    if (cleanupCwd) {
+      delStore.setTaskCleanupState(groupId, task.id, "history_cleanup_requested");
+      deleteProviderHistory({
+        provider: childProvider,
+        sessionId: childId,
+        cwd: cleanupCwd,
+        codexThreadId: childProviderState?.openai?.codexThreadId ?? null,
+      })
+        .finally(() => delStore.setTaskCleanupState(groupId, task.id, "purged"))
+        .catch(() => {});
+    } else {
+      closePromise.finally(() => delStore.setTaskCleanupState(groupId, task.id, "purged"));
+    }
     // Drop from the store (ephemeral sessions are already skipped by
     // saveToStorage — this just frees memory and removes the canvas-less entry)
     claudeStore.removeSession(childId);
-    // Delete the JSONL from disk. The CLI is spawned with
-    // --no-session-persistence so usually nothing is written; when it IS
-    // written (older CLI, interrupted flag parsing, etc.) we still want a
-    // clean slate.
-    if (parentCwd && childProvider !== "openai") {
-      deleteSessionJsonl(childId, parentCwd).catch(() => {});
-    }
   }
 }
 
@@ -144,9 +163,7 @@ export function useDelegationOrchestrator() {
               if (msg.role === "assistant" && msg.toolCalls?.length) {
                 const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
                 if (lastTc) {
-                  const detail = lastTc.input?.file_path || lastTc.input?.command || lastTc.input?.pattern || "";
-                  const action = `${lastTc.name}${detail ? ` ${String(detail).split(/[/\\]/).pop()?.slice(0, 40)}` : ""}`;
-                  delStore.setTaskAction(group.id, task.id, action);
+                  delStore.setTaskAction(group.id, task.id, describeDelegationToolAction(lastTc));
                 }
               }
             }
@@ -165,36 +182,21 @@ export function useDelegationOrchestrator() {
       }
     });
 
-    // Use SubagentStop hook events as an additional completion signal for delegation children.
-    // When a delegation child's last subagent stops, treat it as a turn-complete hint.
     (async () => {
-      const fnStop = await listen<HookEventPayload>("claude-hook-SubagentStop", (event) => {
-        if (cancelled) return;
-        const { session_id } = event.payload;
-        const delStore = useDelegationStore.getState();
-        const group = delStore.getGroupForSession(session_id);
-        if (!group || group.status !== "active") return;
-
-        // If this child has no more active subagents and isn't streaming, check for completion
-        const session = useClaudeStore.getState().sessions[session_id];
-        if (session && !session.isStreaming && session.subagentIds.length === 0) {
-          handleTurnComplete(session_id);
-        }
+      const dispose = await startClaudeHookCompletionSource({
+        isDelegationChildActive: (sessionId) => {
+          const group = useDelegationStore.getState().getGroupForSession(sessionId);
+          return Boolean(group && group.status === "active");
+        },
+        isSessionQuiescent: (sessionId) => {
+          const session = useClaudeStore.getState().sessions[sessionId];
+          return Boolean(session && !session.isStreaming && session.subagentIds.length === 0);
+        },
+        onCompletionHint: handleTurnComplete,
+        onActivity: clearIdleTimer,
       });
-      if (cancelled) { fnStop(); return; }
-      hookUnlistens.push(fnStop);
-
-      // SubagentStart: cancel idle timers — child is spawning subagents, don't time it out
-      const fnStart = await listen<HookEventPayload>("claude-hook-SubagentStart", (event) => {
-        if (cancelled) return;
-        const { session_id } = event.payload;
-        const delStore = useDelegationStore.getState();
-        if (delStore.getGroupForSession(session_id)) {
-          clearIdleTimer(session_id);
-        }
-      });
-      if (cancelled) { fnStart(); return; }
-      hookUnlistens.push(fnStart);
+      if (cancelled) { dispose(); return; }
+      hookUnlistens.push(dispose);
     })();
 
     return () => {
@@ -225,40 +227,26 @@ function handleTurnComplete(sessionId: string) {
   const freshGroup = delStore.groups[group.id];
   if (!freshGroup || freshGroup.status !== "active") return;
 
-  const msgs = session.messages;
+  const completion = evaluateDelegationCompletion({
+    messages: session.messages,
+    ...(task.lastForwardedMessageId !== undefined ? { lastForwardedMessageId: task.lastForwardedMessageId } : {}),
+  });
+  if (completion.kind === "none") return;
 
-  // Check if agent called report_done — that's the strongest completion signal.
-  // Scan recent messages for a report_done tool call.
-  const reportDoneSummary = extractReportDone(msgs);
-
-  const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-  if (!lastAssistant && !reportDoneSummary) return;
-
-  if (lastAssistant) {
-    if (task.lastForwardedMessageId === lastAssistant.id && !reportDoneSummary) return;
-    if (lastAssistant.content.startsWith(FORWARDING_PREFIX)) return;
-    delStore.setTaskForwarded(group.id, task.id, lastAssistant.id);
+  if (completion.messageId) {
+    delStore.setTaskForwarded(group.id, task.id, completion.messageId);
   }
 
-  // Determine result — prefer report_done summary, fall back to last message content
-  const resultText = reportDoneSummary
-    || lastAssistant?.content
-    || (lastAssistant ? summarizeToolCalls(lastAssistant) : "")
-    || "";
-
-  // report_done is the ONLY hard completion signal — no text-based phrase guessing.
-  // Text matching caused too many false positives (e.g. "I've completed step 1" → killed).
-  if (reportDoneSummary) {
-    const resultSummary = resultText.slice(0, MAX_SUMMARY_LENGTH * 2);
+  if (completion.kind === "report_done") {
+    const resultSummary = completion.summary.slice(0, MAX_SUMMARY_LENGTH * 2);
     markComplete(group.id, task.id, sessionId, resultSummary);
+    checkAndMerge(group.id);
   } else {
     // Agent's process exited without calling report_done. In --print mode with
     // bypass_all, this usually means the agent finished its work. Start a timer:
     // if the agent doesn't start streaming again within IDLE_TIMEOUT_MS, mark done.
-    scheduleIdleCompletion(sessionId, group.id, task.id, resultText);
+    scheduleIdleCompletion(sessionId, group.id, task.id, completion.summary);
   }
-
-  checkAndMerge(group.id);
 }
 
 function markComplete(groupId: string, taskId: string, sessionId: string, summary: string) {
@@ -293,43 +281,6 @@ function scheduleIdleCompletion(sessionId: string, groupId: string, taskId: stri
   }, IDLE_TIMEOUT_MS);
 
   idleTimers.set(sessionId, timer);
-}
-
-/** Scan messages for a report_done tool call and extract its summary arg.
- *  MCP tools are prefixed: mcp__terminal-64__report_done */
-function extractReportDone(msgs: ChatMessage[]): string | null {
-  for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 5); i--) {
-    const msg = msgs[i];
-    if (msg && msg.role === "assistant" && msg.toolCalls) {
-      for (const tc of msg.toolCalls) {
-        const args = tc.input?.arguments;
-        const nestedSummary = args && typeof args === "object" && "summary" in args
-          ? (args as { summary?: unknown }).summary
-          : undefined;
-        const toolName = String(tc.input?.tool_name || tc.name);
-        if (
-          (tc.name === "report_done" ||
-            tc.name.endsWith("__report_done") ||
-            tc.name.endsWith("/report_done") ||
-            toolName === "report_done") &&
-          (tc.input?.summary || nestedSummary)
-        ) {
-          return String(tc.input?.summary || nestedSummary);
-        }
-      }
-    }
-  }
-  return null;
-}
-
-/** Build a summary from tool calls when there's no text content. */
-function summarizeToolCalls(msg: ChatMessage): string {
-  if (!msg?.toolCalls?.length) return "";
-  const actions = msg.toolCalls.map((tc: ToolCall) => {
-    const detail = tc.input?.file_path || tc.input?.command || tc.input?.pattern || "";
-    return `${tc.name}${detail ? ` ${String(detail).split(/[/\\]/).pop()?.slice(0, 50)}` : ""}`;
-  });
-  return `Completed actions: ${actions.join(", ")}`;
 }
 
 function checkAndMerge(groupId: string) {

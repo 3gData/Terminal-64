@@ -22,7 +22,7 @@ import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { closeTerminal, closeClaudeSession, closeCodexSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
+import { closeTerminal, closeProviderSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
 import { pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
 import { resolveSessionProviderState, useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
@@ -105,28 +105,28 @@ function App() {
     // Auto-connect Discord bot if credentials are saved, then link open sessions
     if (saved.discordBotToken && saved.discordServerId) {
       startDiscordBot(saved.discordBotToken, saved.discordServerId).then(async () => {
-        // Wait for gateway to be ready, then link all open Claude panels sequentially
+        // Wait for gateway to be ready, then link all open AI session panels sequentially.
         await new Promise((r) => setTimeout(r, 2000));
         const terminals = useCanvasStore.getState().terminals;
-        // Pull the authoritative name/cwd from claudeStore — canvas `t.title` is a
-        // stale snapshot that isn't updated when the user renames a Claude session.
-        let claudeSaved: Record<string, { name?: string; cwd?: string }> = {};
+        // Pull the authoritative name/cwd from the session store — canvas `t.title`
+        // is a stale snapshot that isn't updated when the user renames a session.
+        let savedSessions: Record<string, { name?: string; cwd?: string }> = {};
         try {
           const raw = localStorage.getItem(STORAGE_KEY);
-          if (raw) claudeSaved = JSON.parse(raw);
+          if (raw) savedSessions = JSON.parse(raw);
         } catch (e) {
-          console.warn("[discord] Failed to read claude store:", e);
+          console.warn("[discord] Failed to read session store:", e);
         }
-        const claudeSessions = useClaudeStore.getState().sessions;
+        const providerSessions = useClaudeStore.getState().sessions;
 
         for (const t of terminals) {
           if (t.panelType !== "claude") continue;
-          const liveName = claudeSessions[t.terminalId]?.name;
-          const savedName = claudeSaved[t.terminalId]?.name;
+          const liveName = providerSessions[t.terminalId]?.name;
+          const savedName = savedSessions[t.terminalId]?.name;
           const name = (liveName || savedName || "").trim();
           if (!name) continue;
-          const cwd = claudeSessions[t.terminalId]?.cwd
-            || claudeSaved[t.terminalId]?.cwd
+          const cwd = providerSessions[t.terminalId]?.cwd
+            || savedSessions[t.terminalId]?.cwd
             || t.cwd
             || "";
           try {
@@ -147,14 +147,14 @@ function App() {
     }
     // Auto-start OpenWolf daemon if enabled. Prefer the project-intel widget's
     // saved project dir (since only one daemon can run at a time — port 18791).
-    // Fall back to any Claude session's cwd.
+    // Fall back to any provider-backed session's cwd.
     if (saved.openwolfEnabled && saved.openwolfDaemon) {
       openwolfProjectCwd()
         .then((widgetCwd) => {
           let cwd = widgetCwd;
           if (!cwd) {
-            const claudeSessions = useClaudeStore.getState().sessions;
-            cwd = Object.values(claudeSessions).find((s) => s.cwd)?.cwd ?? null;
+            const providerSessions = useClaudeStore.getState().sessions;
+            cwd = Object.values(providerSessions).find((s) => s.cwd)?.cwd ?? null;
           }
           if (cwd) openwolfDaemonSwitch(cwd).catch(() => {});
         })
@@ -236,7 +236,7 @@ function App() {
     }
   }, []);
 
-  // Reactively rename Discord channels when a Claude session's name/cwd changes.
+  // Reactively rename Discord channels when a provider-backed session's name/cwd changes.
   useEffect(() => {
     const unsub = useClaudeStore.subscribe((state, prev) => {
       for (const [sid, sess] of Object.entries(state.sessions)) {
@@ -260,11 +260,7 @@ function App() {
         if (!currentIds.has(t.terminalId) && !t.poppedOut) {
           if (t.panelType === "claude") {
             const sess = useClaudeStore.getState().sessions[t.terminalId];
-            if (resolveSessionProviderState(sess).provider === "openai") {
-              closeCodexSession(t.terminalId).catch(() => {});
-            } else {
-              closeClaudeSession(t.terminalId).catch(() => {});
-            }
+            closeProviderSession(t.terminalId, resolveSessionProviderState(sess).provider).catch(() => {});
             unlinkSessionFromDiscord(t.terminalId).catch(() => {});
             // Only remove unnamed/disposable sessions — named ones (e.g. widget chats)
             // stay in memory so they can be reopened with messages intact
@@ -465,8 +461,8 @@ function App() {
             if (newest?.panelType === "claude") {
               const sid = newest.terminalId;
               // Pre-create the store session with the dialog's provider choice.
-              // ClaudeChat.useEffect's createSession is idempotent, so this
-              // primes provider before it ever defaults to "anthropic".
+              // The chat shell's createSession effect is idempotent, so this
+              // primes the provider before it can fall back to Anthropic.
               useClaudeStore.getState().createSession(sid, sessionName, false, undefined, cwd, provider);
               if (sessionName) {
                 // Auto-link to Discord (silently fails if bot not running)

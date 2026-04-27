@@ -12,7 +12,7 @@ interface PlanFinishedActionsProps {
   content: string | null;
   contextPercent: number;
   showViewer: boolean;
-  onCompactBuild: () => void;
+  onCompactBuild?: () => void;
   onBuildNow: () => void;
   onToggleViewer: () => void;
   onDelegate: () => void;
@@ -73,9 +73,11 @@ export function PlanFinishedActions({
         </span>
       )}
       <div className="cc-plan-finished-actions">
-        <button className="cc-plan-finished-btn cc-plan-finished-btn--accept" onClick={onCompactBuild}>
-          Compact &amp; Build
-        </button>
+        {onCompactBuild && (
+          <button className="cc-plan-finished-btn cc-plan-finished-btn--accept" onClick={onCompactBuild}>
+            Compact &amp; Build
+          </button>
+        )}
         <button className="cc-plan-finished-btn cc-plan-finished-btn--compact" onClick={onBuildNow}>
           Build Now
         </button>

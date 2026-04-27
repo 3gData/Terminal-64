@@ -42,7 +42,7 @@ export default function Canvas() {
   // Read zoom for non-transform uses (badge); pan/zoom for transforms are applied via direct DOM writes below
   const zoom = useCanvasStore((s) => s.zoom);
   // Only extract cwds to avoid re-rendering on every message/streaming update
-  const claudeCwds = useClaudeStore(useShallow((s) => {
+  const providerSessionCwds = useClaudeStore(useShallow((s) => {
     const out: Record<string, string> = {};
     for (const [id, sess] of Object.entries(s.sessions)) {
       if (sess.cwd) out[id] = sess.cwd;
@@ -109,14 +109,14 @@ export default function Canvas() {
     const widgets = terminals.filter((t) => t.panelType === "widget" && t.widgetId && !t.poppedOut);
     if (widgets.length === 0) return [];
 
-    const claudes = terminals.filter((t) => t.panelType === "claude" && !t.poppedOut);
+    const sessionPanels = terminals.filter((t) => t.panelType === "claude" && !t.poppedOut);
     const lines: { x: number; y: number; length: number; angle: number; key: string }[] = [];
 
     for (const w of widgets) {
-      // Match any claude panel whose cwd contains this widget's folder
+      // Match any provider-backed session panel whose cwd contains this widget's folder.
       const widgetPath = `/.terminal64/widgets/${w.widgetId}`;
-      for (const c of claudes) {
-        const cwd = claudeCwds[c.terminalId] || c.cwd;
+      for (const c of sessionPanels) {
+        const cwd = providerSessionCwds[c.terminalId] || c.cwd;
         if (!cwd || !cwd.replace(/\\/g, "/").includes(widgetPath)) continue;
 
         const fc = { x: w.x + w.width / 2, y: w.y + w.height / 2 };
@@ -131,7 +131,7 @@ export default function Canvas() {
       }
     }
     return lines;
-  }, [terminals, claudeCwds]);
+  }, [terminals, providerSessionCwds]);
 
   // Center view on terminals on first mount
   useEffect(() => {

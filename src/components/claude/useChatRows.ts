@@ -54,17 +54,19 @@ export function findPromptVisualRowIndex(rows: VisualRow[], msgId: string): numb
   );
 }
 
-export function useChatRows(session: ChatRowsSession | undefined, hasStreamingText: boolean) {
+export function useChatRows(session: ChatRowsSession | undefined, hasStreamingText: boolean, supportsCompact: boolean) {
   const visualRows = useMemo<VisualRow[]>(() => {
     if (!session) return [];
     const rows: VisualRow[] = [];
     const msgs = session.messages;
     let lastCompactUserIndex = -1;
-    for (let idx = msgs.length - 1; idx >= 0; idx--) {
-      const m = msgs[idx];
-      if (m?.role === "user" && /^\/compact\b/i.test(m.content || "")) {
-        lastCompactUserIndex = idx;
-        break;
+    if (supportsCompact) {
+      for (let idx = msgs.length - 1; idx >= 0; idx--) {
+        const m = msgs[idx];
+        if (m?.role === "user" && /^\/compact\b/i.test(m.content || "")) {
+          lastCompactUserIndex = idx;
+          break;
+        }
       }
     }
     let i = 0;
@@ -113,7 +115,7 @@ export function useChatRows(session: ChatRowsSession | undefined, hasStreamingTe
         }
       }
       rows.push({ kind: "message", key: messageLayoutKey(msg), msg });
-      if (msg.role === "user" && /^\/compact\b/i.test(msg.content || "")) {
+      if (supportsCompact && msg.role === "user" && /^\/compact\b/i.test(msg.content || "")) {
         const isLastCompact = i === lastCompactUserIndex;
         if (isLastCompact && session.autoCompactStatus !== "idle") {
           rows.push({
@@ -150,6 +152,7 @@ export function useChatRows(session: ChatRowsSession | undefined, hasStreamingTe
     session?.autoCompactStartedAt,
     session?.isStreaming,
     hasStreamingText,
+    supportsCompact,
   ]);
 
   const visualLayoutSignature = useMemo(

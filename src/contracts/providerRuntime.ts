@@ -73,6 +73,18 @@ export interface ProviderHydrateInput {
   cacheEntry?: ProviderHydrationCacheEntry | null | undefined;
 }
 
+export interface ProviderHistoryDeleteInput {
+  provider: ProviderId;
+  sessionId: string;
+  cwd: string;
+  codexThreadId?: string | null | undefined;
+}
+
+export interface ProviderHistoryDeleteResult {
+  method: "deleted" | "skipped";
+  reason?: string;
+}
+
 export type ProviderHydrateResult =
   | {
     status: "messages";
@@ -94,4 +106,5 @@ export interface ProviderRuntime {
   rewind: (input: ProviderHistoryTruncateInput) => Promise<ProviderHistoryTruncateResult>;
   fork: (input: ProviderForkInput) => Promise<ProviderForkResult>;
   hydrate: (input: ProviderHydrateInput) => Promise<ProviderHydrateResult>;
+  deleteHistory: (input: ProviderHistoryDeleteInput) => Promise<ProviderHistoryDeleteResult>;
 }

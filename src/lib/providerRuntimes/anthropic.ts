@@ -1,17 +1,18 @@
 import {
   ensureT64Mcp,
-  forkSessionJsonl,
-  loadSessionHistory,
   mapHistoryMessages,
   providerCancel,
   providerClose,
   providerCreate,
+  providerHistoryDelete,
+  providerHistoryFork,
+  providerHistoryHydrate,
+  providerHistoryTruncate,
   providerSend,
-  truncateSessionJsonlByMessages,
-  statSessionJsonl,
 } from "../tauriApi";
 import type {
   ProviderHistoryTruncateResult,
+  ProviderHistoryDeleteResult,
   ProviderHydrateResult,
   ProviderRuntime,
   ProviderTurnInput,
@@ -95,19 +96,38 @@ export const anthropicRuntime: ProviderRuntime = {
   },
 
   async rewind(input): Promise<ProviderHistoryTruncateResult> {
-    await truncateSessionJsonlByMessages(input.sessionId, input.cwd, input.keepMessages);
-    return { resumeAtUuid: null };
+    const result = await providerHistoryTruncate({
+      provider: "anthropic",
+      req: {
+        session_id: input.sessionId,
+        cwd: input.cwd,
+        keep_messages: input.keepMessages,
+      },
+    });
+    return { resumeAtUuid: result.resume_at_uuid ?? null };
   },
 
   async fork(input) {
     if (input.keepMessages > 0) {
-      await forkSessionJsonl(input.parentSessionId, input.newSessionId, input.cwd, input.keepMessages);
+      await providerHistoryFork({
+        provider: "anthropic",
+        req: {
+          parent_session_id: input.parentSessionId,
+          new_session_id: input.newSessionId,
+          cwd: input.cwd,
+          keep_messages: input.keepMessages,
+        },
+      });
     }
     return {};
   },
 
   async hydrate(input): Promise<ProviderHydrateResult> {
-    const stat = await statSessionJsonl(input.sessionId, input.cwd);
+    const result = await providerHistoryHydrate({
+      provider: "anthropic",
+      req: { session_id: input.sessionId, cwd: input.cwd },
+    });
+    const stat = result.stat;
     if (!stat) {
       return { status: "empty", clearCache: true };
     }
@@ -117,7 +137,7 @@ export const anthropicRuntime: ProviderRuntime = {
       return { status: "messages", messages: cached.messages };
     }
 
-    const history = await loadSessionHistory(input.sessionId, input.cwd);
+    const history = result.messages;
     if (history.length === 0) {
       return { status: "empty" };
     }
@@ -132,5 +152,16 @@ export const anthropicRuntime: ProviderRuntime = {
         messages,
       },
     };
+  },
+
+  async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
+    await providerHistoryDelete({
+      provider: "anthropic",
+      req: {
+        session_id: input.sessionId,
+        cwd: input.cwd,
+      },
+    });
+    return { method: "deleted" };
   },
 };
