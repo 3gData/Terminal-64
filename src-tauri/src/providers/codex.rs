@@ -766,6 +766,14 @@ fn app_server_thread_id_from_response(value: &JsonValue) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn app_server_thread_id_from_result(value: &JsonValue) -> Option<String> {
+    get_json_str(value, &["thread", "id"])
+        .or_else(|| get_json_str(value, &["threadId"]))
+        .or_else(|| get_json_str(value, &["thread_id"]))
+        .or_else(|| get_json_str(value, &["id"]))
+        .map(|s| s.to_string())
+}
+
 fn codex_content_text(payload: &JsonValue) -> String {
     let mut text = String::new();
     if let Some(arr) = payload.get("content").and_then(|v| v.as_array()) {
@@ -1941,6 +1949,30 @@ impl CodexAdapter {
         Ok(())
     }
 
+    fn fork_thread_via_app_server(
+        thread_id: &str,
+        cwd: &str,
+        rollout_path: Option<&std::path::Path>,
+    ) -> Result<String, String> {
+        let mut params = serde_json::Map::new();
+        params.insert("threadId".to_string(), json!(thread_id));
+        if !cwd.is_empty() {
+            params.insert("cwd".to_string(), json!(cwd));
+        }
+        if let Some(path) = rollout_path {
+            params.insert(
+                "path".to_string(),
+                json!(path.to_string_lossy().to_string()),
+            );
+        }
+        params.insert("excludeTurns".to_string(), json!(true));
+        params.insert("persistExtendedHistory".to_string(), json!(true));
+
+        let result = run_app_server_request(cwd, "thread/fork", JsonValue::Object(params))?;
+        app_server_thread_id_from_result(&result)
+            .ok_or("Codex app-server fork did not return a thread id".to_string())
+    }
+
     pub fn fork_thread(
         &self,
         thread_id: &str,
@@ -1953,18 +1985,26 @@ impl CodexAdapter {
         if codex_transport_is_exec() {
             return Err("Codex native fork requires app-server transport".to_string());
         }
-        let result = run_app_server_request(
-            cwd,
-            "thread/fork",
-            json!({
-                "threadId": thread_id,
-                "cwd": cwd,
-                "excludeTurns": true,
-            }),
-        )?;
-        let forked = get_json_str(&result, &["thread", "id"])
-            .ok_or("Codex app-server fork did not return a thread id")?
-            .to_string();
+        let forked = match Self::fork_thread_via_app_server(thread_id, cwd, None) {
+            Ok(forked) => forked,
+            Err(thread_id_error) => {
+                let Some(rollout_path) = find_codex_rollout(thread_id) else {
+                    return Err(thread_id_error);
+                };
+                safe_eprintln!(
+                    "[codex:app-server] thread/fork by id failed ({}); retrying with rollout path {}",
+                    thread_id_error,
+                    rollout_path.display()
+                );
+                Self::fork_thread_via_app_server(thread_id, cwd, Some(rollout_path.as_path()))
+                    .map_err(|path_error| {
+                        format!(
+                            "Codex app-server fork failed by thread id ({}) and rollout path ({})",
+                            thread_id_error, path_error
+                        )
+                    })?
+            }
+        };
         if drop_turns > 0 {
             self.rollback_thread(&forked, cwd, drop_turns)?;
         }

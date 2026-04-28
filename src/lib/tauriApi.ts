@@ -842,6 +842,60 @@ export async function browserReload(id: string): Promise<void> {
   return invoke("browser_reload", { id });
 }
 
+// Widget native webview commands
+
+export interface WidgetWebviewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export async function createWidgetWebview(id: string, url: string, bounds: WidgetWebviewBounds): Promise<void> {
+  return invoke("create_widget_webview", {
+    id,
+    url,
+    x: bounds.x,
+    y: bounds.y,
+    w: bounds.width,
+    h: bounds.height,
+  });
+}
+
+export async function setWidgetWebviewBounds(id: string, bounds: WidgetWebviewBounds): Promise<void> {
+  return invoke("set_widget_webview_bounds", {
+    id,
+    x: bounds.x,
+    y: bounds.y,
+    w: bounds.width,
+    h: bounds.height,
+  });
+}
+
+export async function setWidgetWebviewVisible(id: string, visible: boolean): Promise<void> {
+  return invoke("set_widget_webview_visible", { id, visible });
+}
+
+export async function closeWidgetWebview(id: string): Promise<void> {
+  return invoke("close_widget_webview", { id });
+}
+
+export async function widgetWebviewReload(id: string): Promise<void> {
+  return invoke("widget_webview_reload", { id });
+}
+
+export async function widgetWebviewEval(id: string, js: string): Promise<void> {
+  return invoke("widget_webview_eval", { id, js });
+}
+
+export async function setWidgetWebviewZoom(id: string, zoom: number): Promise<void> {
+  return invoke("set_widget_webview_zoom", { id, zoom });
+}
+
+export async function setAllWidgetWebviewsVisible(visible: boolean): Promise<void> {
+  return invoke("set_all_widget_webviews_visible", { visible });
+}
+
 // Theme generation
 
 export async function generateTheme(prompt: string): Promise<string> {

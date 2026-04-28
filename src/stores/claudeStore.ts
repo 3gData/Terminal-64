@@ -866,7 +866,11 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       }
       // If caller supplied a cwd and we didn't have one, adopt it and hydrate.
       if (cwd && !existing.cwd && !existing.ephemeral) {
-        set((s) => ({ sessions: updateSession(s.sessions, sessionId, { cwd }) }));
+        set((s) => {
+          const updated = updateSession(s.sessions, sessionId, { cwd });
+          saveToStorage(updated);
+          return { sessions: updated };
+        });
         if (!existing.jsonlLoaded) hydrateFromJsonl(sessionId, cwd);
       }
       return;

@@ -36,7 +36,8 @@ use crate::providers::traits::{
     ProviderUserInputAnswers,
 };
 use crate::providers::util::{
-    cap_event_size, expanded_tool_path, sanitize_dangling_tool_uses, shim_command,
+    cap_event_size, expanded_tool_path, find_existing_claude_session_jsonl,
+    sanitize_dangling_tool_uses, shim_command,
 };
 use crate::types::{ClaudeDone, ClaudeEvent, CreateClaudeRequest, SendClaudePromptRequest};
 
@@ -517,8 +518,21 @@ impl ClaudeAdapter {
             req.cwd,
             req.mcp_config.as_deref().map(|s| &s[..s.len().min(80)])
         );
+        let existing_jsonl = find_existing_claude_session_jsonl(&req.cwd, &resolved_id);
+        let session_flag = if existing_jsonl.is_some() {
+            "--resume"
+        } else {
+            "--session-id"
+        };
+        if let Some(path) = existing_jsonl.as_ref() {
+            safe_eprintln!(
+                "[claude] Session id {} already has history at {}; using --resume for first visible turn",
+                resolved_id,
+                path.display()
+            );
+        }
         let cmd = build_command(
-            "--session-id",
+            session_flag,
             &resolved_id,
             &req.permission_mode,
             &req.model,

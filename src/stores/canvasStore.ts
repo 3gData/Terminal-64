@@ -6,11 +6,11 @@ import {
   DEFAULT_TERMINAL_HEIGHT,
   MIN_TERMINAL_WIDTH,
   MIN_TERMINAL_HEIGHT,
-  AUTO_SAVE_INTERVAL_MS,
 } from "../lib/constants";
 import type { SnapGuide } from "../lib/snapUtils";
 
 const CANVAS_STORAGE_KEY = "terminal64-session";
+const CANVAS_SAVE_DEBOUNCE_MS = 1000;
 
 export type PanelType = "terminal" | "claude" | "shared-chat" | "widget" | "browser";
 
@@ -220,6 +220,28 @@ function getInitialState() {
 
 let dirty = false;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let idleSaveHandle: number | null = null;
+
+function scheduleIdle(callback: () => void): number {
+  const win = window as Window & {
+    requestIdleCallback?: (cb: IdleRequestCallback, opts?: IdleRequestOptions) => number;
+  };
+  if (typeof win.requestIdleCallback === "function") {
+    return win.requestIdleCallback(callback, { timeout: 1500 });
+  }
+  return window.setTimeout(callback, 0);
+}
+
+function cancelIdle(handle: number) {
+  const win = window as Window & {
+    cancelIdleCallback?: (handle: number) => void;
+  };
+  if (typeof win.cancelIdleCallback === "function") {
+    win.cancelIdleCallback(handle);
+  } else {
+    clearTimeout(handle);
+  }
+}
 
 export const useCanvasStore = create<CanvasState>((set, get) => {
   const initial = getInitialState();
@@ -227,12 +249,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
   const flushScheduledSave = () => {
     saveTimer = null;
     if (!dirty) return;
-    try {
-      useCanvasStore.getState().saveSession();
-      dirty = false;
-    } catch (e) {
-      console.warn("[canvasStore] Auto-save failed:", e);
-    }
+    if (idleSaveHandle !== null) return;
+    idleSaveHandle = scheduleIdle(() => {
+      idleSaveHandle = null;
+      if (!dirty) return;
+      try {
+        useCanvasStore.getState().saveSession();
+        dirty = false;
+      } catch (e) {
+        console.warn("[canvasStore] Auto-save failed:", e);
+      }
+    });
   };
 
   // Clean up on HMR to avoid stacking intervals
@@ -242,14 +269,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         clearTimeout(saveTimer);
         saveTimer = null;
       }
+      if (idleSaveHandle !== null) {
+        cancelIdle(idleSaveHandle);
+        idleSaveHandle = null;
+      }
     });
   }
 
   const markDirty = () => {
     dirty = true;
-    if (!saveTimer) {
-      saveTimer = setTimeout(flushScheduledSave, AUTO_SAVE_INTERVAL_MS);
-    }
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushScheduledSave, CANVAS_SAVE_DEBOUNCE_MS);
   };
 
   /** Shared helper: position a new panel, add it to state, mark dirty. */
@@ -567,10 +597,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         zoom: s.zoom,
       };
       try {
+        const startedAt = performance.now();
         const json = JSON.stringify(session);
         if (json === lastSavedSessionJson) return;
         localStorage.setItem(CANVAS_STORAGE_KEY, json);
         lastSavedSessionJson = json;
+        const elapsed = performance.now() - startedAt;
+        if (elapsed > 25) {
+          console.warn(`[canvasStore] saveSession took ${Math.round(elapsed)}ms for ${json.length} bytes`);
+        }
       } catch (e) {
         console.warn("[canvasStore] Failed to save session:", e);
       }

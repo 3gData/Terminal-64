@@ -15,6 +15,7 @@ import { useClaudeEvents } from "./hooks/useClaudeEvents";
 import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
 import { usePartyMode } from "./hooks/usePartyMode";
 import { useVoiceControl } from "./hooks/useVoiceControl";
+import { usePerformanceMonitor } from "./hooks/usePerformanceMonitor";
 import { useVoiceStore } from "./stores/voiceStore";
 import { PartyEqualizer, PartyEdgeGlow } from "./components/party/PartyOverlay";
 import { useCanvasStore } from "./stores/canvasStore";
@@ -22,7 +23,7 @@ import { useThemeStore } from "./stores/themeStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { registerCommand } from "./lib/commands";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { closeTerminal, closeProviderSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
+import { closeTerminal, closeProviderSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, setAllWidgetWebviewsVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
 import { pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
 import { resolveSessionProviderState, useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
@@ -48,6 +49,7 @@ function App() {
   useDelegationOrchestrator();
   usePartyMode();
   useVoiceControl();
+  usePerformanceMonitor();
 
   const [widgetDropOver, setWidgetDropOver] = useState(false);
   const widgetDialogRef = useRef(widgetDialogOpen);
@@ -88,6 +90,7 @@ function App() {
   const anyOverlayOpen = settingsOpen || paletteOpen || claudeDialogOpen || widgetDialogOpen || skillDialogOpen;
   useEffect(() => {
     setAllBrowsersVisible(!anyOverlayOpen).catch(() => {});
+    setAllWidgetWebviewsVisible(!anyOverlayOpen).catch(() => {});
   }, [anyOverlayOpen]);
 
   useEffect(() => {

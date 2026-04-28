@@ -33,7 +33,9 @@ mod pty_manager;
 mod types;
 mod voice;
 mod voice_manager;
+mod widget_bridge_broker;
 mod widget_server;
+mod widget_webview_manager;
 
 // ---- Security ----
 
@@ -105,7 +107,11 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use types::*;
 use voice_manager::VoiceManager;
+use widget_bridge_broker::{
+    WidgetBridgeBroker, WidgetBridgeEmitEventRequest, WidgetBridgeRespondRequest,
+};
 use widget_server::WidgetServer;
+use widget_webview_manager::WidgetWebviewManager;
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -126,6 +132,51 @@ fn session_project_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
 
 fn session_jsonl_path(cwd: &str, session_id: &str) -> Result<std::path::PathBuf, String> {
     Ok(session_project_dir(cwd)?.join(format!("{}.jsonl", session_id)))
+}
+
+fn claude_projects_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("No home dir")?;
+    Ok(home.join(".claude").join("projects"))
+}
+
+fn existing_session_jsonl_path(
+    cwd: &str,
+    session_id: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let exact = session_jsonl_path(cwd, session_id)?;
+    if exact.is_file() {
+        return Ok(Some(exact));
+    }
+
+    // Claude Code resumes by session id, but its project directory is derived
+    // from the CLI's normalized cwd. Terminal 64 may have stored a symlinked,
+    // shorthand, or stale cwd string, so read-only history paths fall back to
+    // locating the same session id under any Claude project directory.
+    let root = claude_projects_dir()?;
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read_dir {}: {}", root.display(), e)),
+    };
+    let filename = format!("{}.jsonl", session_id);
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let candidate = entry.path().join(&filename);
+        if candidate.is_file() {
+            safe_eprintln!(
+                "[history] Resolved Claude JSONL for {} via fallback scan: {}",
+                session_id,
+                candidate.display()
+            );
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 /// Atomic write: stage to a sibling tmp file then rename onto the target. Prevents
@@ -216,6 +267,8 @@ struct AppState {
     permission_server: Arc<PermissionServer>,
     audio_manager: Arc<AudioManager>,
     browser_manager: BrowserManager,
+    widget_bridge_broker: Arc<WidgetBridgeBroker>,
+    widget_webview_manager: WidgetWebviewManager,
     widget_server: WidgetServer,
     // Retained on AppState so its subscribers stay alive for the duration of the app,
     // even though all mic access currently flows through VoiceManager.
@@ -1456,7 +1509,9 @@ fn strip_bom(s: &str) -> &str {
 
 #[tauri::command]
 fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMessage>, String> {
-    let path = session_jsonl_path(&cwd, &session_id)?;
+    let Some(path) = existing_session_jsonl_path(&cwd, &session_id)? else {
+        return Ok(vec![]);
+    };
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
@@ -1745,7 +1800,9 @@ fn load_session_history_tail(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let path = session_jsonl_path(&cwd, &session_id)?;
+    let Some(path) = existing_session_jsonl_path(&cwd, &session_id)? else {
+        return Ok(Vec::new());
+    };
     let tail_lines = read_jsonl_tail_lines(&path, limit)?;
     let mut messages = parse_session_history_lines(tail_lines.iter().map(|s| s.as_str()));
     // Tool-result merges only land if both ends of the pair fell inside the
@@ -1763,7 +1820,9 @@ fn load_session_history_tail(
 /// missing (fresh session or never persisted).
 #[tauri::command]
 fn stat_session_jsonl(session_id: String, cwd: String) -> Result<Option<SessionJsonlStat>, String> {
-    let path = session_jsonl_path(&cwd, &session_id)?;
+    let Some(path) = existing_session_jsonl_path(&cwd, &session_id)? else {
+        return Ok(None);
+    };
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2296,7 +2355,13 @@ fn find_rewind_uuid(
 #[tauri::command]
 fn load_session_metadata(session_id: String, cwd: String) -> Result<SessionMetadata, String> {
     use std::io::BufRead;
-    let path = session_jsonl_path(&cwd, &session_id)?;
+    let Some(path) = existing_session_jsonl_path(&cwd, &session_id)? else {
+        return Ok(SessionMetadata {
+            session_id,
+            exists: false,
+            ..Default::default()
+        });
+    };
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -3953,6 +4018,22 @@ fn widget_file_modified(widget_id: String) -> Result<u64, String> {
     if !dir.exists() {
         return Ok(0);
     }
+    fn should_skip_hot_reload_dir(name: &str) -> bool {
+        name.starts_with('.')
+            || matches!(
+                name,
+                "node_modules"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | ".next"
+                    | "coverage"
+                    | "vendor"
+                    | "tools"
+                    | "Packages"
+                    | ".t64-attachments"
+            )
+    }
     fn newest_mtime(dir: &std::path::Path) -> u64 {
         let mut max = 0u64;
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -3962,10 +4043,14 @@ fn widget_file_modified(widget_id: String) -> Result<u64, String> {
                     Err(_) => continue,
                 };
                 if ft.is_dir() {
-                    // Skip node_modules and hidden dirs
                     let name = entry.file_name();
                     let n = name.to_string_lossy();
-                    if n.starts_with('.') || n == "node_modules" {
+                    // Hot reload should watch widget source/assets, not
+                    // dependency/build/tool trees. Large widgets such as
+                    // ro-sync can contain tens of thousands of files under
+                    // daemon/target and tools/, and recursively statting those
+                    // every poll stalls the app.
+                    if should_skip_hot_reload_dir(&n) {
                         continue;
                     }
                     max = max.max(newest_mtime(&entry.path()));
@@ -5507,6 +5592,123 @@ fn browser_eval(
     state.browser_manager.eval_js(&app_handle, &id, &js)
 }
 
+// ── Widget native webview commands ──
+
+// Tauri IPC requires flat argument lists, so this command takes x/y/w/h individually.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn create_widget_webview(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    url: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    state
+        .widget_webview_manager
+        .create(&app_handle, id, url, x, y, w, h)
+}
+
+#[tauri::command]
+fn set_widget_webview_bounds(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    state
+        .widget_webview_manager
+        .set_bounds(&app_handle, &id, x, y, w, h)
+}
+
+#[tauri::command]
+fn set_widget_webview_visible(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    visible: bool,
+) -> Result<(), String> {
+    state
+        .widget_webview_manager
+        .set_visible(&app_handle, &id, visible)
+}
+
+#[tauri::command]
+fn close_widget_webview(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.widget_webview_manager.close(&app_handle, &id)
+}
+
+#[tauri::command]
+fn widget_webview_reload(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.widget_webview_manager.reload(&app_handle, &id)
+}
+
+#[tauri::command]
+fn widget_webview_eval(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    js: String,
+) -> Result<(), String> {
+    state.widget_webview_manager.eval_js(&app_handle, &id, &js)
+}
+
+#[tauri::command]
+fn set_widget_webview_zoom(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    zoom: f64,
+) -> Result<(), String> {
+    state
+        .widget_webview_manager
+        .set_zoom(&app_handle, &id, zoom)
+}
+
+#[tauri::command]
+fn set_all_widget_webviews_visible(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    visible: bool,
+) -> Result<(), String> {
+    state
+        .widget_webview_manager
+        .set_all_visible(&app_handle, visible);
+    Ok(())
+}
+
+// ── Native widget bridge broker commands ──
+
+#[tauri::command]
+fn widget_bridge_respond(
+    state: tauri::State<'_, AppState>,
+    req: WidgetBridgeRespondRequest,
+) -> Result<(), String> {
+    state.widget_bridge_broker.respond(req)
+}
+
+#[tauri::command]
+fn widget_bridge_emit_event(
+    state: tauri::State<'_, AppState>,
+    req: WidgetBridgeEmitEventRequest,
+) -> Result<usize, String> {
+    state.widget_bridge_broker.emit_event(req)
+}
+
 // ---- Voice control commands ----
 // Names and payload shapes match src/lib/voiceApi.ts exactly.
 
@@ -5729,6 +5931,8 @@ pub fn run() {
                 safe_eprintln!("[setup] Widget server failed to start: {}", e);
                 Box::<dyn std::error::Error>::from(e)
             })?;
+            let widget_bridge_broker = Arc::new(WidgetBridgeBroker::new(app.handle().clone()));
+            widget_srv.set_native_bridge(Arc::clone(&widget_bridge_broker));
             let mic_mgr = MicManager::new();
             let voice_mgr = VoiceManager::new(Arc::clone(&mic_mgr));
             let claude_adapter = Arc::new(ClaudeAdapter::new());
@@ -5750,6 +5954,8 @@ pub fn run() {
                 permission_server: Arc::new(perm_server),
                 audio_manager: Arc::new(AudioManager::new()),
                 browser_manager: BrowserManager::new(),
+                widget_bridge_broker,
+                widget_webview_manager: WidgetWebviewManager::new(),
                 widget_server: widget_srv,
                 mic_manager: mic_mgr,
                 voice_manager: voice_mgr,
@@ -5906,6 +6112,16 @@ pub fn run() {
             browser_eval,
             set_browser_zoom,
             set_all_browsers_visible,
+            create_widget_webview,
+            set_widget_webview_bounds,
+            set_widget_webview_visible,
+            close_widget_webview,
+            widget_webview_reload,
+            widget_webview_eval,
+            set_widget_webview_zoom,
+            set_all_widget_webviews_visible,
+            widget_bridge_respond,
+            widget_bridge_emit_event,
             generate_theme,
             generate_rewind_summary,
             save_pasted_image,

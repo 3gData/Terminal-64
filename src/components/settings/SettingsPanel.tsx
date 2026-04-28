@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { useThemeStore } from "../../stores/themeStore";
-import { useSettingsStore } from "../../stores/settingsStore";
+import {
+  normalizeWidgetRenderMode,
+  resolveWidgetRenderMode,
+  useSettingsStore,
+  WIDGET_RENDER_MODES,
+  type WidgetRenderMode,
+} from "../../stores/settingsStore";
 import { startDiscordBot, stopDiscordBot, discordBotStatus, renameDiscordSession, discordCleanupOrphaned, generateTheme, onThemeGenChunk, onThemeGenDone, startOpenwolfDaemon, stopOpenwolfDaemon, openwolfDaemonStatus } from "../../lib/tauriApi";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsPanel.css";
@@ -11,6 +17,14 @@ import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore, STORAGE_KEY as CLAUDE_STORAGE_KEY } from "../../stores/claudeStore";
 import { useVoiceStore } from "../../stores/voiceStore";
 import { useWidgetMetricsStore, type WidgetMetrics } from "../../stores/widgetMetricsStore";
+import { usePerformanceStore, type PerformanceDebugEvent } from "../../stores/performanceStore";
+import {
+  NOISY_WIDGET_DEFAULTS,
+  WIDGET_HOST_PROTECTION_DROP_THRESHOLD,
+  WIDGET_HOST_PROTECTION_WINDOW_MS,
+  getNoisyWidgetDefault,
+  type WidgetHostProtectionMode,
+} from "../../lib/widgetHostProtection";
 import { downloadVoiceModel, voiceModelsStatus, onVoiceDownloadProgress, setVoiceSensitivity as setVoiceSensitivityBackend, type VoiceModelKind } from "../../lib/voiceApi";
 
 interface SettingsPanelProps {
@@ -76,13 +90,181 @@ function widgetMetricTone(metrics: WidgetMetrics) {
   return "ok";
 }
 
+function performanceEventTone(event: PerformanceDebugEvent) {
+  if (event.durationMs >= 500) return "error";
+  if (event.kind === "frame-drop" && event.durationMs >= 55) return "warn";
+  if (event.durationMs >= 120) return "warn";
+  return "ok";
+}
+
+const WIDGET_RENDER_MODE_LABELS: Record<WidgetRenderMode, string> = {
+  iframe: "Iframe",
+  "native-webview": "Native",
+  auto: "Auto",
+};
+
+const WIDGET_HOST_PROTECTION_LABELS: Record<WidgetHostProtectionMode, string> = {
+  observe: "Observe",
+  "auto-pause": "Auto Pause",
+  "auto-promote": "Auto Promote",
+};
+
+function renderModeStatus(mode: WidgetRenderMode) {
+  const resolution = resolveWidgetRenderMode(mode);
+  if (resolution.fallbackReason) return `${WIDGET_RENDER_MODE_LABELS[mode]} -> ${resolution.effectiveMode}`;
+  return WIDGET_RENDER_MODE_LABELS[resolution.effectiveMode];
+}
+
+function PerformanceDebugSection() {
+  const events = usePerformanceStore((s) => s.events);
+  const clearEvents = usePerformanceStore((s) => s.clearEvents);
+  const logSnapshot = usePerformanceStore((s) => s.logSnapshot);
+  const [copied, setCopied] = useState(false);
+  const latest = events.slice(0, 10);
+  const copySnapshot = async () => {
+    logSnapshot();
+    const rows = events.map((event) => ({
+      at: new Date(event.at).toLocaleTimeString(),
+      kind: event.kind,
+      durationMs: event.durationMs,
+      detail: event.detail,
+      bytes: event.bytes ?? null,
+      widgetCandidates: event.widgetCandidates?.map((candidate) => ({
+        widgetId: candidate.widgetId,
+        visibleFrames: candidate.visibleFrameCount,
+        bridgeInRate: candidate.bridgeInRate ?? null,
+        bridgeOutRate: candidate.bridgeOutRate ?? null,
+        preferredRenderMode: candidate.preferredRenderMode ?? null,
+      })) ?? [],
+      hostProtection: event.hostProtection ?? null,
+      visibility: event.visibility,
+    }));
+    await navigator.clipboard.writeText(JSON.stringify(rows, null, 2));
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  };
+
+  return (
+    <Section label="Performance" icon="⌁" defaultOpen={false}>
+      <div className="sp-row sp-row--col">
+        <span className="sp-hint">
+          Records frame drops, renderer stalls, browser long tasks, and slow storage writes. Open the console for matching [perf] warnings.
+        </span>
+        <div className="sp-row">
+          <span className="sp-value">{events.length} events tracked</span>
+          <div className="sp-debug-actions">
+            <button className="sp-btn sp-btn--small" onClick={() => { void copySnapshot(); }} disabled={events.length === 0}>
+              {copied ? "Copied" : "Copy"}
+            </button>
+            <button className="sp-btn sp-btn--small" onClick={clearEvents} disabled={events.length === 0}>
+              Clear
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {latest.length === 0 ? (
+        <span className="sp-hint">No stalls recorded yet.</span>
+      ) : (
+        <div className="sp-debug-list">
+          {latest.map((event) => {
+            const tone = performanceEventTone(event);
+            return (
+              <div className="sp-perf-card" key={event.id}>
+                <div className="sp-debug-head">
+                  <span className="sp-debug-title">{event.kind}</span>
+                  <span className={`sp-debug-status sp-debug-status--${tone}`}>{event.durationMs}ms</span>
+                </div>
+                <div className="sp-perf-detail">{event.detail}</div>
+                {event.widgetCandidates && event.widgetCandidates.length > 0 && (
+                  <div className="sp-perf-candidates">
+                    {event.widgetCandidates.slice(0, 3).map((candidate) => (
+                      <span key={candidate.widgetId}>
+                        {candidate.widgetId}
+                        {candidate.bridgeInRate !== undefined && ` ${Math.round(candidate.bridgeInRate)}/s`}
+                        {candidate.preferredRenderMode && ` -> ${candidate.preferredRenderMode}`}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {event.hostProtection && (
+                  <div className="sp-perf-action">
+                    {WIDGET_HOST_PROTECTION_LABELS[event.hostProtection.mode]}: {event.hostProtection.detail}
+                  </div>
+                )}
+                <div className="sp-perf-meta">
+                  <span>{formatAge(event.at)} ago</span>
+                  <span>{event.visibility}</span>
+                  {typeof event.bytes === "number" && <span>{formatBytes(event.bytes)}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function WidgetDebugSection() {
   const widgetMetricsById = useWidgetMetricsStore((s) => s.widgets);
   const clearWidgetMetrics = useWidgetMetricsStore((s) => s.clearWidgetMetrics);
   const logWidgetMetricsSnapshot = useWidgetMetricsStore((s) => s.logWidgetMetricsSnapshot);
+  const [copied, setCopied] = useState(false);
+  const widgetsPaused = useSettingsStore((s) => s.widgetsPaused);
+  const pausedWidgetIds = useSettingsStore((s) => s.pausedWidgetIds);
+  const widgetRenderMode = useSettingsStore((s) => s.widgetRenderMode);
+  const widgetRenderModesById = useSettingsStore((s) => s.widgetRenderModesById);
+  const widgetHostProtectionMode = useSettingsStore((s) => s.widgetHostProtectionMode);
+  const setSetting = useSettingsStore((s) => s.set);
   const widgetMetrics = Object.values(widgetMetricsById)
     .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   const activeWidgetMetrics = widgetMetrics.filter((metrics) => metrics.unmountedAt === null);
+  const globalRenderModeResolution = resolveWidgetRenderMode(widgetRenderMode);
+  const toggleWidgetPaused = (widgetId: string) => {
+    const paused = new Set(pausedWidgetIds);
+    if (paused.has(widgetId)) paused.delete(widgetId);
+    else paused.add(widgetId);
+    setSetting({ pausedWidgetIds: Array.from(paused) });
+  };
+  const setWidgetRenderMode = (widgetId: string, mode: WidgetRenderMode | null) => {
+    const next = { ...widgetRenderModesById };
+    if (mode === null) delete next[widgetId];
+    else next[widgetId] = mode;
+    setSetting({ widgetRenderModesById: next });
+  };
+  const copyWidgetSnapshot = async () => {
+    logWidgetMetricsSnapshot();
+    const rows = widgetMetrics.map((metrics) => {
+      const requestedRenderMode = widgetRenderModesById[metrics.widgetId] ?? widgetRenderMode;
+      const renderMode = resolveWidgetRenderMode(requestedRenderMode);
+      return {
+        widgetId: metrics.widgetId,
+        active: metrics.unmountedAt === null,
+        ageSeconds: Math.round((Date.now() - metrics.mountedAt) / 1000),
+        reloads: metrics.reloadCount,
+        loads: metrics.iframeLoadCount,
+        bridgeIn: metrics.bridgeInCount,
+        bridgeOut: metrics.bridgeOutCount,
+        errors: metrics.bridgeErrorCount,
+        plugins: metrics.pluginSubscriptions,
+        bus: metrics.busSubscriptions,
+        session: metrics.sessionEventSubscriptions,
+        termWaits: metrics.terminalWaiters,
+        voice: metrics.voiceSubscriptions,
+        browser: metrics.browserActive,
+        paused: widgetsPaused || pausedWidgetIds.includes(metrics.widgetId),
+        requestedRenderMode,
+        effectiveRenderMode: renderMode.effectiveMode,
+        renderModeFallback: renderMode.fallbackReason,
+        heapBytes: metrics.hostHeapUsedBytes,
+        report: metrics.lastWidgetReport?.payload ?? null,
+      };
+    });
+    await navigator.clipboard.writeText(JSON.stringify(rows, null, 2));
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  };
 
   return (
     <Section label="Widget Debug" icon="▣" defaultOpen={false}>
@@ -91,15 +273,62 @@ function WidgetDebugSection() {
           Host-side counters for widget panels. Heap is renderer-wide when Chromium exposes it; widgets can post t64:debug-metrics for their own numbers.
         </span>
         <div className="sp-row">
+          <label className="sp-label">
+            Host Protection
+            <span className="sp-hint-inline">
+              {WIDGET_HOST_PROTECTION_DROP_THRESHOLD} drops / {Math.round(WIDGET_HOST_PROTECTION_WINDOW_MS / 1000)}s
+            </span>
+          </label>
+          <select
+            className="sp-select sp-select--wide"
+            value={widgetHostProtectionMode}
+            onChange={(e) => setSetting({ widgetHostProtectionMode: e.currentTarget.value as WidgetHostProtectionMode })}
+          >
+            <option value="observe">Observe</option>
+            <option value="auto-pause">Auto Pause</option>
+            <option value="auto-promote">Auto Promote</option>
+          </select>
+        </div>
+        <div className="sp-row">
+          <label className="sp-label">
+            Render Mode
+            <span className="sp-hint-inline">effective {globalRenderModeResolution.effectiveMode}</span>
+          </label>
+          <select
+            className="sp-select sp-select--wide"
+            value={widgetRenderMode}
+            title={globalRenderModeResolution.fallbackReason ?? undefined}
+            onChange={(e) => setSetting({ widgetRenderMode: normalizeWidgetRenderMode(e.currentTarget.value) })}
+          >
+            {WIDGET_RENDER_MODES.map((mode) => (
+              <option key={mode} value={mode}>{WIDGET_RENDER_MODE_LABELS[mode]}</option>
+            ))}
+          </select>
+        </div>
+        <div className="sp-row">
+          <label className="sp-label">
+            Pause Widgets
+            <span className="sp-hint-inline">Unmount all widget iframes for isolation</span>
+          </label>
+          <Toggle checked={widgetsPaused} onChange={(v) => setSetting({ widgetsPaused: v })} />
+        </div>
+        <div className="sp-row">
           <span className="sp-value">{activeWidgetMetrics.length} active / {widgetMetrics.length} tracked</span>
           <div className="sp-debug-actions">
-            <button className="sp-btn sp-btn--small" onClick={logWidgetMetricsSnapshot} disabled={widgetMetrics.length === 0}>
-              Log
+            <button className="sp-btn sp-btn--small" onClick={() => { void copyWidgetSnapshot(); }} disabled={widgetMetrics.length === 0}>
+              {copied ? "Copied" : "Copy"}
             </button>
             <button className="sp-btn sp-btn--small" onClick={clearWidgetMetrics} disabled={widgetMetrics.length === 0}>
               Reset
             </button>
           </div>
+        </div>
+        <div className="sp-protection-defaults">
+          {Object.values(NOISY_WIDGET_DEFAULTS).map((defaults) => (
+            <span key={defaults.widgetId}>
+              {defaults.widgetId}: prefer {defaults.preferredRenderMode}; fallback {WIDGET_HOST_PROTECTION_LABELS[defaults.fallbackProtection]}
+            </span>
+          ))}
         </div>
       </div>
 
@@ -109,13 +338,42 @@ function WidgetDebugSection() {
         <div className="sp-debug-list">
           {widgetMetrics.map((metrics) => {
             const tone = widgetMetricTone(metrics);
+            const paused = widgetsPaused || pausedWidgetIds.includes(metrics.widgetId);
+            const requestedRenderMode = widgetRenderModesById[metrics.widgetId] ?? widgetRenderMode;
+            const renderMode = resolveWidgetRenderMode(requestedRenderMode);
+            const noisyDefault = getNoisyWidgetDefault(metrics.widgetId);
             return (
               <div className="sp-debug-card" key={metrics.instanceId} title={metrics.instanceId}>
                 <div className="sp-debug-head">
                   <span className="sp-debug-title">{metrics.widgetId}</span>
-                  <span className={`sp-debug-status sp-debug-status--${tone}`}>
-                    {metrics.unmountedAt === null ? "active" : "closed"}
-                  </span>
+                  <div className="sp-debug-actions">
+                    <select
+                      className="sp-select sp-select--mini"
+                      value={widgetRenderModesById[metrics.widgetId] ?? ""}
+                      title={renderMode.fallbackReason ?? undefined}
+                      onChange={(e) => {
+                        const nextValue = e.currentTarget.value;
+                        setWidgetRenderMode(
+                          metrics.widgetId,
+                          nextValue ? normalizeWidgetRenderMode(nextValue) : null,
+                        );
+                      }}
+                    >
+                      <option value="">Default</option>
+                      {WIDGET_RENDER_MODES.map((mode) => (
+                        <option key={mode} value={mode}>{WIDGET_RENDER_MODE_LABELS[mode]}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="sp-btn sp-btn--small"
+                      onClick={() => toggleWidgetPaused(metrics.widgetId)}
+                    >
+                      {paused ? "Resume" : "Pause"}
+                    </button>
+                    <span className={`sp-debug-status sp-debug-status--${paused ? "warn" : tone}`}>
+                      {paused ? "paused" : metrics.unmountedAt === null ? "active" : "closed"}
+                    </span>
+                  </div>
                 </div>
                 <div className="sp-debug-grid">
                   <span>age</span><strong>{formatAge(metrics.mountedAt)}</strong>
@@ -129,6 +387,7 @@ function WidgetDebugSection() {
                   <span>term waits</span><strong>{metrics.terminalWaiters}</strong>
                   <span>voice</span><strong>{metrics.voiceSubscriptions}</strong>
                   <span>browser</span><strong>{metrics.browserActive ? "on" : "off"}</strong>
+                  <span>mode</span><strong title={renderMode.fallbackReason ?? undefined}>{renderModeStatus(requestedRenderMode)}</strong>
                   <span>heap</span><strong>{formatBytes(metrics.hostHeapUsedBytes)}</strong>
                 </div>
                 {metrics.lastWidgetReport && (
@@ -137,11 +396,28 @@ function WidgetDebugSection() {
                     <code>{shortPayload(metrics.lastWidgetReport.payload)}</code>
                   </div>
                 )}
+                {noisyDefault && (
+                  <div className="sp-debug-report">
+                    <span>host protection default</span>
+                    <code>{noisyDefault.reason}</code>
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
       )}
+    </Section>
+  );
+}
+
+function DebugSection() {
+  return (
+    <Section label="Debug" icon="⌁" defaultOpen={false}>
+      <div className="sp-debug-menu">
+        <WidgetDebugSection />
+        <PerformanceDebugSection />
+      </div>
     </Section>
   );
 }
@@ -449,9 +725,6 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               <Toggle checked={snapToGrid} onChange={(v) => setSetting({ snapToGrid: v })} />
             </div>
           </Section>
-
-          {/* Widget Debug */}
-          <WidgetDebugSection />
 
           {/* Background */}
           <Section label="Background" icon="▦">
@@ -894,6 +1167,9 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               {botLoading ? "..." : botConnected ? "Disconnect" : "Connect"}
             </button>
           </Section>
+
+          {/* Debug */}
+          <DebugSection />
         </div>
       </div>
     </div>

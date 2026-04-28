@@ -267,6 +267,16 @@
   color: var(--fg, #cdd6f4);
 }
 
+.sp-select--wide {
+  max-width: 170px;
+}
+
+.sp-select--mini {
+  max-width: 86px;
+  padding: 4px 6px;
+  font-size: 10px;
+}
+
 .sp-input {
   padding: 7px 10px;
   background: var(--bg-tertiary, #11111b);
@@ -375,6 +385,12 @@
 
 /* ---- Widget Debug ---- */
 
+.sp-debug-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .sp-debug-actions {
   display: flex;
   gap: 6px;
@@ -385,6 +401,20 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.sp-protection-defaults {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: rgba(137, 180, 250, 0.06);
+  border: 1px solid rgba(137, 180, 250, 0.14);
+  border-radius: 5px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: var(--fg-muted, #6c7086);
 }
 
 .sp-debug-card {
@@ -478,6 +508,55 @@
   line-height: 1.35;
   color: var(--fg-secondary, #bac2de);
   word-break: break-word;
+}
+
+.sp-perf-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-tertiary, #11111b);
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+}
+
+.sp-perf-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--fg-secondary, #bac2de);
+}
+
+.sp-perf-candidates,
+.sp-perf-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.sp-perf-candidates span {
+  padding: 2px 5px;
+  border: 1px solid rgba(249, 226, 175, 0.2);
+  border-radius: 999px;
+  color: #f9e2af;
+}
+
+.sp-perf-action {
+  color: #89b4fa;
+}
+
+.sp-perf-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 9px;
+  color: var(--fg-muted, #6c7086);
 }
 
 /* ---- Sub-settings (nested group) ---- */

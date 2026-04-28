@@ -217,8 +217,8 @@ fn json_string_event(event_type: &str, original: &str) -> String {
 
 // --- sanitize_dangling_tool_uses (Claude-specific, lives here for now) ----
 
-/// Resolve the session JSONL path the Claude CLI writes to.
-fn session_jsonl_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
+/// Resolve the session JSONL path the Claude CLI writes to for a given cwd.
+pub fn claude_session_jsonl_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
     let dir_hash = cwd.replace([':', '\\', '/'], "-");
     Some(
@@ -229,12 +229,42 @@ fn session_jsonl_path(cwd: &str, session_id: &str) -> Option<std::path::PathBuf>
     )
 }
 
+/// Claude can resume by session id even when Terminal 64's stored cwd string
+/// differs from the CLI's normalized project directory. For read/resume safety,
+/// locate an existing transcript by id across all Claude project folders.
+pub fn find_existing_claude_session_jsonl(
+    cwd: &str,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let exact = claude_session_jsonl_path(cwd, session_id)?;
+    if exact.is_file() {
+        return Some(exact);
+    }
+
+    let projects_dir = dirs::home_dir()?.join(".claude").join("projects");
+    let filename = format!("{}.jsonl", session_id);
+    let entries = std::fs::read_dir(projects_dir).ok()?;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let candidate = entry.path().join(&filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Scan the session JSONL for tool_use blocks that never received a matching
 /// tool_result (e.g. Bash killed mid-flight when T64 was force-closed). For
 /// each, append a synthetic `user` record with a cancelled tool_result so
 /// Claude CLI doesn't re-execute the dangling tool on `--resume`.
 pub fn sanitize_dangling_tool_uses(cwd: &str, session_id: &str) -> Result<(), String> {
-    let Some(path) = session_jsonl_path(cwd, session_id) else {
+    let Some(path) = find_existing_claude_session_jsonl(cwd, session_id) else {
         return Ok(());
     };
     let content = match std::fs::read_to_string(&path) {

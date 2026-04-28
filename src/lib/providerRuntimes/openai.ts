@@ -23,6 +23,12 @@ import type {
 } from "../../contracts/providerRuntime";
 import { decodeCodexPermission } from "../providers";
 
+export const CODEX_MAX_TURN_PROMPT_CHARS = 900_000;
+const CODEX_MIN_SEED_TRANSCRIPT_CHARS = 24_000;
+const CODEX_MAX_SEED_MESSAGE_CHARS = 24_000;
+const CODEX_MAX_SEED_TOOL_INPUT_CHARS = 4_000;
+const CODEX_MAX_SEED_TOOL_RESULT_CHARS = 4_000;
+
 export function codexPermissionForOverride(current: string, override?: PermissionMode) {
   if (override === "bypass_all") return decodeCodexPermission("yolo");
   if (override === "accept_edits" || override === "auto") return decodeCodexPermission("full-auto");
@@ -30,23 +36,99 @@ export function codexPermissionForOverride(current: string, override?: Permissio
   return decodeCodexPermission(current);
 }
 
-function renderSeedTranscript(messages: ChatMessage[]): string {
-  return messages.map((m) => {
-    const who = m.role === "user" ? "User" : "Assistant";
-    const text = (m.content || "").trim();
-    const tools = m.toolCalls?.length
-      ? "\n" + m.toolCalls.map((tc) => {
-        const args = Object.keys(tc.input || {}).length ? ` ${JSON.stringify(tc.input)}` : "";
-        return `Tool: ${tc.name}${args}`;
-      }).join("\n")
-      : "";
-    return `${who}: ${text}${tools}`.trim();
-  }).join("\n\n");
+function clipMiddle(text: string, maxChars: number, label: string): string {
+  if (text.length <= maxChars) return text;
+  if (maxChars <= 0) return "";
+  const omitted = text.length - maxChars;
+  const marker = `\n[${label} truncated by Terminal 64 to stay under Codex app-server input limits; omitted ${omitted} chars]\n`;
+  if (marker.length >= maxChars) return text.slice(0, maxChars);
+  const remaining = maxChars - marker.length;
+  const head = Math.ceil(remaining * 0.65);
+  const tail = remaining - head;
+  return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
+}
+
+function stringifySeedValue(value: unknown, maxChars: number, label: string): string {
+  let text: string;
+  if (typeof value === "string") {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+  return clipMiddle(text, maxChars, label);
+}
+
+function renderSeedMessage(message: ChatMessage): string {
+  const who = message.role === "user" ? "User" : "Assistant";
+  const text = clipMiddle((message.content || "").trim(), CODEX_MAX_SEED_MESSAGE_CHARS, "message");
+  const tools = message.toolCalls?.map((toolCall) => {
+    const lines = [`Tool: ${toolCall.name}`];
+    if (toolCall.input && Object.keys(toolCall.input).length > 0) {
+      lines.push(`Input: ${stringifySeedValue(toolCall.input, CODEX_MAX_SEED_TOOL_INPUT_CHARS, "tool input")}`);
+    }
+    if (toolCall.result !== undefined) {
+      lines.push(`Result: ${stringifySeedValue(toolCall.result, CODEX_MAX_SEED_TOOL_RESULT_CHARS, "tool result")}`);
+    }
+    return lines.join("\n");
+  }).join("\n");
+  return `${who}: ${text}${tools ? `\n${tools}` : ""}`.trim();
+}
+
+function renderSeedTranscript(messages: ChatMessage[], maxChars: number): string {
+  const parts: string[] = [];
+  let used = 0;
+  let omitted = 0;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message) continue;
+    const rendered = renderSeedMessage(message);
+    if (!rendered) continue;
+    const separator = parts.length > 0 ? 2 : 0;
+    const needed = rendered.length + separator;
+    if (needed > maxChars - used) {
+      if (parts.length === 0) {
+        parts.unshift(clipMiddle(rendered, maxChars, "latest fork transcript message"));
+      } else {
+        omitted = i + 1;
+      }
+      break;
+    }
+    parts.unshift(rendered);
+    used += needed;
+  }
+
+  if (omitted > 0) {
+    const marker = `[${omitted} older fork transcript message${omitted === 1 ? "" : "s"} omitted to stay under Codex app-server input limits]`;
+    if (parts.length === 0) {
+      return marker;
+    }
+    const currentLength = parts.join("\n\n").length;
+    if (currentLength + marker.length + 2 <= maxChars) {
+      parts.unshift(marker);
+    }
+  }
+
+  return parts.join("\n\n");
 }
 
 export function promptWithCodexSeed(prompt: string, seedTranscript: ChatMessage[] | null | undefined): string {
-  if (!seedTranscript?.length) return prompt;
-  return `You are continuing from a forked Terminal 64 conversation. Prior transcript:\n\n${renderSeedTranscript(seedTranscript)}\n\nContinue from there and answer this new user message:\n\n${prompt}`;
+  const clippedPrompt = clipMiddle(prompt, CODEX_MAX_TURN_PROMPT_CHARS, "user prompt");
+  if (!seedTranscript?.length) return clippedPrompt;
+
+  const prefix = "You are continuing from a forked Terminal 64 conversation. Prior transcript:\n\n";
+  const suffix = "\n\nContinue from there and answer this new user message:\n\n";
+  const transcriptBudget = Math.max(
+    CODEX_MIN_SEED_TRANSCRIPT_CHARS,
+    CODEX_MAX_TURN_PROMPT_CHARS - prefix.length - suffix.length - clippedPrompt.length,
+  );
+  const boundedTranscript = renderSeedTranscript(seedTranscript, transcriptBudget);
+  const fullPrompt = `${prefix}${boundedTranscript}${suffix}${clippedPrompt}`;
+  return clipMiddle(fullPrompt, CODEX_MAX_TURN_PROMPT_CHARS, "fork prompt");
 }
 
 async function ensureCodexRuntime(input: ProviderTurnInput) {

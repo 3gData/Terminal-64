@@ -767,6 +767,7 @@
 - `src/lib/delegationCompletion.ts` — Provider-neutral delegation completion helpers for report_done normalization, idle completion candidates, and lifecycle-bus completion source wiring (~1300 tok)
 - `src/lib/providerLifecycleBus.ts` — Provider-neutral frontend lifecycle event bus normalizing Claude Subagent hooks and provider turn transitions for delegation consumers (~1200 tok)
 - `src/lib/providerRuntime.ts` — Frontend provider runtime dispatcher for create/send/cancel/close/fork/rewind/hydrate (~1400 tok)
+- `src/lib/widgetHostProtection.ts` — Widget host-protection policy constants, known noisy-widget defaults, frame-drop candidate scoring, and protection decision types (~1100 tok)
 - `src/lib/providerRuntimes/anthropic.ts` — Anthropic/Claude runtime adapter that maps provider turns to Claude IPC and JSONL history helpers (~1300 tok)
 - `src/lib/providerRuntimes/openai.ts` — OpenAI/Codex runtime adapter that maps provider turns to Codex app-server/exec IPC, rollback/fork, and rollout hydration (~1600 tok)
 - `src/lib/claudeEventDecoder.ts` — Claude raw event to provider-neutral event/tool decoder (~1500 tok)
@@ -782,6 +783,7 @@
 - `src/lib/types.ts` — Shared frontend types including provider-backed ClaudeSession compatibility fields and providerState (~2500 tok)
 - `src/stores/delegationStore.ts` — Zustand delegation persistence store with groups, child session indexes, parent indexes, pruning, and task status mutation helpers (~3000 tok)
 - `src-tauri/src/lib.rs` — Tauri command layer; generic provider_create/send/cancel/close commands plus compatibility wrappers route through ProviderRegistry (~6000 tok)
+- `src-tauri/src/browser_manager.rs` — Native child webview manager used by embedded browser panels; owns create/close/bounds/visible/reload/eval/navigation/zoom operations (~1500 tok)
 - `src-tauri/src/providers/mod.rs` — Rust provider module exports for registry, traits, adapters, events, and shared utilities (~200 tok)
 - `src-tauri/src/providers/traits.rs` — Rust provider adapter traits plus synchronous command request/result enums used by current IPC wrappers (~1200 tok)
 - `src-tauri/src/providers/registry.rs` — Rust provider registry wiring typed command requests to Claude/Codex adapters (~1200 tok)
@@ -796,6 +798,7 @@
 
 - `src/components/claude/ClaudeChat.tsx` — Main chat shell and workflow orchestration for provider-backed sessions (~34000 tok)
 - `src/components/widget/WidgetPanel.tsx` — Widget iframe bridge, including session creation and prompt APIs (~18000 tok)
+- `src/components/widget/useWidgetBridgeHost.ts` — Extracted widget bridge host hook for iframe request handling, session event forwarding, widget resources, and provider turn helpers (~12000 tok)
 - `src/components/claude/DelegationBadge.tsx` — Delegation child badge and sibling prompt forwarding (~1500 tok)
 - `src/hooks/useDelegationOrchestrator.ts` — Delegation lifecycle, child cleanup, and auto-merge routing (~7000 tok)
 
@@ -803,5 +806,14 @@
 
 - `src/components/settings/SettingsPanel.tsx` — Settings overlay with appearance, canvas, provider, OpenWolf, quick paste, party, voice, Discord, and widget diagnostics sections (~18000 tok)
 - `src/components/settings/SettingsPanel.css` — Styling for Settings overlay sections, controls, quick pastes, and widget diagnostics cards (~4500 tok)
+- `src/stores/performanceStore.ts` — Zustand renderer performance diagnostics store for event-loop lag, Long Task API entries, and slow storage-write records (~600 tok)
+- `src/hooks/usePerformanceMonitor.ts` — Global renderer performance monitor hook that detects timer drift, observes long tasks when supported, and wraps Storage.setItem for slow-write diagnostics (~900 tok)
+- `src/stores/canvasStore.ts` — Zustand canvas layout store for terminal/widget/browser panel positions, active panel state, pan/zoom, snap guides, and debounced session persistence (~6000 tok)
+- `src/stores/settingsStore.ts` — Zustand persisted user settings store for provider defaults, theme/canvas options, party/voice/OpenWolf settings, and debug toggles (~1400 tok)
 - `src/components/widget/WidgetDialog.tsx` — Widget create/manage dialog with embedded bridge API reference docs for widget authors (~12000 tok)
 - `src-tauri/bundled-widgets/project-intel/main.js` — Bundled Project Intelligence widget bridge client, OpenWolf panel loaders, daemon status polling, and inter-widget update subscriptions (~9000 tok)
+- `docs/widget-isolation-research.md` — Research and implementation direction for moving heavy widgets from iframe rendering to native Tauri webview isolation plus a transport-agnostic widget bridge (~900 tok)
+- `src-tauri/src/widget_webview_manager.rs` — Native child webview manager for future widget render mode; owns namespaced create/close/bounds/visible/reload/eval operations without replacing iframe rendering (~1000 tok)
+- `src-tauri/src/widget_bridge_broker.rs` — Native widget bridge broker contract: HTTP request routing to main-webview Tauri events, pending response timeouts, instance ids, and SSE event fanout (~1800 tok)
+- `src/contracts/widgetBridgeBroker.ts` — TypeScript contract for native widget bridge messages, request events, responses, errors, and host handler controls (~500 tok)
+- `src/lib/widgetBridgeBroker.ts` — Frontend helper for listening to native widget bridge requests and responding/emitting events through Tauri IPC (~700 tok)

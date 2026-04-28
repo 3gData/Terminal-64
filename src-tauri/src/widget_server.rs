@@ -8,18 +8,27 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::widget_bridge_broker::{bridge_ready_frame, WidgetBridgeBroker};
+
 /// A simple localhost-only HTTP server that serves widget files from
 /// `~/.terminal64/widgets/{widget_id}/`.  Widgets loaded via `<iframe src=...>`
 /// get a proper `http://127.0.0.1:{port}` origin, enabling relative imports,
 /// ES modules, multi-file projects, and camera/mic permissions.
 ///
-/// On top of file serving, the server exposes two plugin-host bridge routes
+/// On top of file serving, the server exposes plugin-host bridge routes
 /// used by `kind: "plugin"` / `"hybrid"` widgets:
 ///
 /// * `POST /widgets/{id}/plugin/invoke` — JSON envelope forwarded to the
 ///   installed [`PluginHostBridge`] for request/response RPC.
 /// * `GET  /widgets/{id}/plugin/stream` — Server-Sent Events of plugin-pushed
 ///   events and crash signals. Each message is a pre-serialized JSON frame.
+///
+/// It also exposes the first native-widget bridge broker contract:
+///
+/// * `POST /widgets/{id}/bridge/{instance}/request` — widget-originated
+///   request routed through Rust to the main webview host.
+/// * `GET  /widgets/{id}/bridge/{instance}/events` — SSE stream of
+///   host-originated widget events.
 pub struct WidgetServer {
     inner: Arc<ServerInner>,
 }
@@ -33,6 +42,10 @@ struct ServerInner {
     /// [`WidgetServer::set_plugin_host`]. When `None`, plugin routes respond
     /// with HTTP 503 so the frontend can surface a clear error.
     bridge: Mutex<Option<Arc<dyn PluginHostBridge>>>,
+    /// Broker for native-webview widget bridge traffic. Kept optional so the
+    /// static widget server can still start before the Tauri app state is fully
+    /// managed.
+    native_bridge: Mutex<Option<Arc<WidgetBridgeBroker>>>,
 }
 
 fn widgets_base() -> Option<PathBuf> {
@@ -239,6 +252,8 @@ fn respond(mut stream: TcpStream, status: u16, mime: &str, body: &[u8]) {
         400 => "Bad Request",
         404 => "Not Found",
         403 => "Forbidden",
+        409 => "Conflict",
+        504 => "Gateway Timeout",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -404,6 +419,39 @@ fn handle_request(mut stream: TcpStream, inner: Arc<ServerInner>) {
             return;
         }
         _ => {}
+    }
+
+    // ---- Native widget bridge routes ---------------------------------
+    if let Some(bridge_rest) = rest.strip_prefix("bridge/") {
+        let mut segments = bridge_rest.split('/');
+        let instance_id = segments.next().unwrap_or("");
+        let route = segments.next().unwrap_or("");
+        if instance_id.is_empty() || segments.next().is_some() {
+            respond(stream, 404, "text/plain", b"Not found");
+            return;
+        }
+        match route {
+            "request" => {
+                if req.method != "POST" {
+                    respond(stream, 405, "text/plain", b"POST required");
+                    return;
+                }
+                handle_bridge_request(stream, &inner, widget_id, instance_id, &req.body);
+                return;
+            }
+            "events" => {
+                if req.method != "GET" {
+                    respond(stream, 405, "text/plain", b"GET required");
+                    return;
+                }
+                handle_bridge_events(stream, &inner, widget_id, instance_id);
+                return;
+            }
+            _ => {
+                respond(stream, 404, "text/plain", b"Not found");
+                return;
+            }
+        }
     }
 
     // ---- Classic file serving ----------------------------------------
@@ -616,6 +664,116 @@ fn handle_plugin_stream(mut stream: TcpStream, inner: &Arc<ServerInner>, widget_
     }
 }
 
+fn handle_bridge_request(
+    stream: TcpStream,
+    inner: &Arc<ServerInner>,
+    widget_id: &str,
+    instance_id: &str,
+    body: &[u8],
+) {
+    let bridge = match inner.native_bridge.lock().ok().and_then(|g| g.clone()) {
+        Some(b) => b,
+        None => {
+            respond_json(
+                stream,
+                503,
+                &serde_json::json!({
+                    "ok": false,
+                    "error": {
+                        "code": "no_host",
+                        "message": "widget bridge host is not running",
+                    },
+                }),
+            );
+            return;
+        }
+    };
+
+    let (status, response) = bridge.handle_http_request(widget_id, instance_id, body);
+    respond_json(stream, status, &response);
+}
+
+fn handle_bridge_events(
+    mut stream: TcpStream,
+    inner: &Arc<ServerInner>,
+    widget_id: &str,
+    instance_id: &str,
+) {
+    let bridge = match inner.native_bridge.lock().ok().and_then(|g| g.clone()) {
+        Some(b) => b,
+        None => {
+            respond_json(
+                stream,
+                503,
+                &serde_json::json!({
+                    "ok": false,
+                    "error": {
+                        "code": "no_host",
+                        "message": "widget bridge host is not running",
+                    },
+                }),
+            );
+            return;
+        }
+    };
+
+    let rx = match bridge.subscribe(widget_id, instance_id) {
+        Ok(rx) => rx,
+        Err(e) => {
+            respond_json(
+                stream,
+                400,
+                &serde_json::json!({
+                    "ok": false,
+                    "error": {
+                        "code": "bad_request",
+                        "message": e,
+                    },
+                }),
+            );
+            return;
+        }
+    };
+
+    let header = "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         X-Accel-Buffering: no\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Connection: close\r\n\r\n";
+    if stream.write_all(header.as_bytes()).is_err() {
+        return;
+    }
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+
+    let ready = bridge_ready_frame(widget_id, instance_id);
+    if stream
+        .write_all(format!("data: {}\n\n", ready).as_bytes())
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(frame) => {
+                let safe = frame.replace('\r', "").replace('\n', " ");
+                let chunk = format!("data: {}\n\n", safe);
+                if stream.write_all(chunk.as_bytes()).is_err() {
+                    return;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if stream.write_all(b": keepalive\n\n").is_err() {
+                    return;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 fn url_decode(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.bytes();
@@ -652,6 +810,7 @@ impl WidgetServer {
             port: AtomicU16::new(port),
             manifest_cache: Mutex::new(HashMap::new()),
             bridge: Mutex::new(None),
+            native_bridge: Mutex::new(None),
         });
 
         {
@@ -683,6 +842,14 @@ impl WidgetServer {
     #[allow(dead_code)] // Public API for plugin host wire-up; caller lands in a follow-up.
     pub fn set_plugin_host(&self, bridge: Arc<dyn PluginHostBridge>) {
         if let Ok(mut guard) = self.inner.bridge.lock() {
+            *guard = Some(bridge);
+        }
+    }
+
+    /// Install the native-webview bridge broker used by
+    /// `/widgets/{id}/bridge/{instance}/request` and `/events`.
+    pub fn set_native_bridge(&self, bridge: Arc<WidgetBridgeBroker>) {
+        if let Ok(mut guard) = self.inner.native_bridge.lock() {
             *guard = Some(bridge);
         }
     }

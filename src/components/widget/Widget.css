@@ -18,6 +18,14 @@
   border-radius: 0 0 4px 4px;
 }
 
+.wdg-native-surface {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
 /* Loading state */
 .wdg-panel--loading {
   gap: 12px;
@@ -505,4 +513,3 @@
   border-color: #89b4fa;
   color: #89b4fa;
 }
-

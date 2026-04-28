@@ -1559,6 +1559,367 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-28T02:16:00+02:00"
+    },
+    {
+      "id": "bug-080",
+      "timestamp": "2026-04-28T02:24:00+02:00",
+      "error_message": "After widget bridge traffic dropped to normal levels, Terminal 64 still had periodic lag spikes, pointing at another fixed-cadence main-thread task.",
+      "file": "src/stores/canvasStore.ts",
+      "root_cause": "Canvas session persistence used a fixed 5000ms throttle from the first dirty mark. If layout stayed dirty during ongoing interaction, the renderer could synchronously stringify and write canvas session state to localStorage every 5 seconds.",
+      "fix": "Replaced fixed 5s throttle with a 1s quiet-time debounce followed by requestIdleCallback when available, added HMR idle cleanup, and logs saveSession duration/byte count when canvas persistence itself is slow.",
+      "tags": [
+        "performance",
+        "canvas",
+        "localStorage",
+        "autosave",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-078",
+        "bug-079"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:24:00+02:00"
+    },
+    {
+      "id": "bug-081",
+      "timestamp": "2026-04-28T02:34:00+02:00",
+      "error_message": "User still sees lag after widget bridge and canvas autosave fixes; installed ro-sync widget has a direct 5000ms health loop not visible in Terminal 64 bridge counters.",
+      "file": "src/stores/performanceStore.ts, src/hooks/usePerformanceMonitor.ts, src/components/settings/SettingsPanel.tsx, /Users/janislacars/.terminal64/widgets/ro-sync/app.js",
+      "root_cause": "The previous diagnostics only covered Terminal 64 bridge traffic and known persistence paths. Custom widget code can still run direct timers/fetches inside iframe contexts, and ro-sync specifically used setInterval(healthTick, 5000) against its local daemon.",
+      "fix": "Added a global renderer performance monitor for event-loop lag, browser long tasks, and slow storage writes, exposed it in Settings, and changed the installed ro-sync health loop to a non-overlapping visibility-aware 30s timeout loop.",
+      "tags": [
+        "performance",
+        "widgets",
+        "event-loop",
+        "diagnostics",
+        "ro-sync"
+      ],
+      "related_bugs": [
+        "bug-078",
+        "bug-079",
+        "bug-080"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:34:00+02:00"
+    },
+    {
+      "id": "bug-082",
+      "timestamp": "2026-04-28T02:42:00+02:00",
+      "error_message": "User still sees lag but Settings -> Performance says 0 events tracked.",
+      "file": "src/hooks/usePerformanceMonitor.ts, src/stores/performanceStore.ts, src/components/settings/SettingsPanel.tsx, src/components/widget/WidgetPanel.tsx, src/stores/settingsStore.ts",
+      "root_cause": "The first performance monitor only recorded event-loop drift above 120ms, Long Task API entries, and slow storage writes. Visible compositor/iframe/render hitches can drop frames without producing those events.",
+      "fix": "Added requestAnimationFrame frame-drop detection at 55ms gaps, made frame drops show as warnings in Settings, and added a persisted Pause Widgets toggle that unmounts all widget iframes and closes embedded browser views for isolation.",
+      "tags": [
+        "performance",
+        "frame-drops",
+        "widgets",
+        "diagnostics",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-078",
+        "bug-079",
+        "bug-080",
+        "bug-081"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:42:00+02:00"
+    },
+    {
+      "id": "bug-083",
+      "timestamp": "2026-04-28T02:42:30+02:00",
+      "error_message": "npm run typecheck failed: src/components/widget/WidgetPanel.tsx(1127,53): error TS1382: Unexpected token. Did you mean {'>'} or &gt;?",
+      "file": "src/components/widget/WidgetPanel.tsx",
+      "root_cause": "JSX text in the paused-widget placeholder contained a raw '->' sequence; the greater-than character was parsed as JSX syntax.",
+      "fix": "Escaped the arrow as {'->'} in the JSX text and reran npm run typecheck successfully.",
+      "tags": [
+        "typecheck",
+        "jsx",
+        "widgets",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-082"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:42:30+02:00"
+    },
+    {
+      "id": "bug-084",
+      "timestamp": "2026-04-28T02:48:00+02:00",
+      "error_message": "User clicked the diagnostics Log button but had no accessible console inside the app.",
+      "file": "src/components/settings/SettingsPanel.tsx",
+      "root_cause": "The Widget Debug and Performance Log buttons only wrote console.table output, which is not visible to normal Terminal 64 users without devtools.",
+      "fix": "Changed both diagnostic Log actions into Copy actions that still log internally but also write JSON snapshots to the clipboard and show a temporary Copied state.",
+      "tags": [
+        "diagnostics",
+        "settings",
+        "ux",
+        "performance"
+      ],
+      "related_bugs": [
+        "bug-078",
+        "bug-082"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:48:00+02:00"
+    },
+    {
+      "id": "bug-085",
+      "timestamp": "2026-04-28T03:16:00+02:00",
+      "error_message": "User confirmed the lag stops when widgets are paused.",
+      "file": "src/stores/settingsStore.ts, src/components/settings/SettingsPanel.tsx, src/components/widget/WidgetPanel.tsx",
+      "root_cause": "The global widget pause isolated the frame drops to widget iframe/compositor work, but there was no way to pause/resume individual widgets to identify the exact offender.",
+      "fix": "Added persisted per-widget paused ids, per-card Pause/Resume controls in Widget Debug, and made WidgetPanel treat either global pause or per-widget pause as an iframe unmount/embedded-browser close condition.",
+      "tags": [
+        "widgets",
+        "performance",
+        "frame-drops",
+        "diagnostics",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-078",
+        "bug-079",
+        "bug-081",
+        "bug-082"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T03:16:00+02:00"
+    },
+    {
+      "id": "bug-086",
+      "timestamp": "2026-04-28T03:22:00+02:00",
+      "error_message": "User identified the ro-sync widget as the remaining lag source after per-widget pause isolation.",
+      "file": "/Users/janislacars/.terminal64/widgets/ro-sync/views/active.js, /Users/janislacars/.terminal64/widgets/ro-sync/app.js",
+      "root_cause": "ro-sync's active view opened a daemon WebSocket and synchronously appended a DOM log row, trimmed the log, updated counters, updated unsynced UI, and forced scroll on every op frame. After DOM batching, lag persisted because both the active stream and app stream still JSON-parsed every high-volume op frame before ignoring or sampling it.",
+      "fix": "Patched the installed widget so active log rendering is RAF-batched, pending log frames are capped and collapsed, scroll is only forced when already near the bottom, op/stat badge writes are batched, hidden documents drop log work, app-level op preview buffering is bounded, and daemonWS supports raw-frame skipping before JSON.parse. The app stream now counts op bursts without parsing payloads, and the active stream samples 20 parsed op frames per second while collapsing the rest. User still reports lag after unpausing, so the durable fix is tracked as widget render-process isolation rather than further per-widget throttling.",
+      "tags": [
+        "widgets",
+        "performance",
+        "ro-sync",
+        "websocket",
+        "dom"
+      ],
+      "related_bugs": [
+        "bug-081",
+        "bug-082",
+        "bug-085"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T03:22:00+02:00"
+    },
+    {
+      "id": "bug-087",
+      "timestamp": "2026-04-28T03:46:55+02:00",
+      "error_message": "Agent 4 briefly introduced invalid JSX/TypeScript syntax while adding widget render-mode fields to the Widget Debug snapshot map.",
+      "file": "src/components/settings/SettingsPanel.tsx",
+      "root_cause": "The callback was accidentally written as an object-returning arrow function while declaring local const values inside the returned object literal.",
+      "fix": "Changed the map callback to a block body that computes requested/effective render mode and then returns the snapshot object; npm run typecheck passes.",
+      "tags": [
+        "typecheck",
+        "tsx",
+        "settings",
+        "widgets",
+        "frontend"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T03:46:55+02:00"
+    },
+    {
+      "id": "bug-088",
+      "timestamp": "2026-04-28T03:50:37+02:00",
+      "error_message": "npx tsc --noEmit failed with missing imports/types in src/components/widget/WidgetPanel.tsx during parallel widget bridge extraction.",
+      "file": "src/components/widget/WidgetPanel.tsx",
+      "root_cause": "A concurrent bridge extraction left WidgetPanel referencing symbols such as PluginStreamHandle, WidgetSessionEventName, buildStateSnapshot, useClaudeStore, and bridge API helpers without local imports or definitions.",
+      "fix": "Not fixed by Agent 3 because WidgetPanel is owned by the parallel Agent 1 extraction; Agent 3 reported the failure in team chat and avoided the file to prevent conflicts.",
+      "tags": [
+        "typecheck",
+        "widgets",
+        "parallel-work",
+        "frontend"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T03:50:37+02:00"
+    },
+    {
+      "id": "bug-089",
+      "timestamp": "2026-04-28T03:52:00+02:00",
+      "error_message": "npm run typecheck failed in src/components/widget/useWidgetBridgeHost.ts: startVoice/stopVoice imported from tauriApi and OpenDialogOptions included filters: undefined.",
+      "file": "src/components/widget/useWidgetBridgeHost.ts",
+      "root_cause": "The extracted widget bridge host imported voice capture helpers from the wrong module and passed an explicitly undefined optional filters field while exactOptionalPropertyTypes is enabled.",
+      "fix": "Removed the stale tauriApi voice imports and built the file-picker options object so filters is omitted unless present. Full typecheck remains blocked by the separate WidgetPanel extraction issue in bug-088.",
+      "tags": [
+        "typecheck",
+        "widgets",
+        "bridge",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-088"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T03:52:00+02:00"
+    },
+    {
+      "id": "bug-090",
+      "timestamp": "2026-04-28T03:53:54+02:00",
+      "error_message": "npx tsc --noEmit failed with missing imports/types in src/components/widget/WidgetPanel.tsx during parallel widget bridge extraction.",
+      "file": "src/components/widget/WidgetPanel.tsx, src/components/widget/useWidgetBridgeHost.ts",
+      "root_cause": "The extraction was temporarily split between WidgetPanel and the new host hook, leaving bridge-owned symbols referenced from the panel while the hook file was incomplete.",
+      "fix": "Moved the bridge command switch, session event fanout, resource subscriptions, and provider-turn helpers into useWidgetBridgeHost, reduced WidgetPanel to iframe transport wiring, and verified npm run typecheck passes.",
+      "tags": [
+        "typecheck",
+        "widgets",
+        "bridge",
+        "parallel-work",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-088",
+        "bug-089"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T03:53:54+02:00"
+    },
+    {
+      "id": "bug-091",
+      "timestamp": "2026-04-28T04:12:00+02:00",
+      "error_message": "Native widget webview mode rendered at the wrong size/scale on the zoomable canvas and ro-sync still lagged when unpaused.",
+      "file": "src/components/widget/WidgetPanel.tsx, src-tauri/src/widget_webview_manager.rs, src-tauri/src/lib.rs, src/lib/tauriApi.ts, /Users/janislacars/.terminal64/widgets/ro-sync/app.js, /Users/janislacars/.terminal64/widgets/ro-sync/views/active.js",
+      "root_cause": "Tauri child webviews are positioned outside the React DOM and do not inherit CSS transforms from the canvas, so bounds-only syncing is insufficient. ro-sync also kept realtime daemon streams open in its widget UI, making the visible widget surface itself the expensive component.",
+      "fix": "Added native widget webview zoom syncing from canvas zoom, exposed set_widget_webview_zoom, and patched the installed ro-sync widget so app-level realtime daemon streaming is disabled by default and the Activity live log starts paused behind a manual Start live log button.",
+      "tags": [
+        "widgets",
+        "native-webview",
+        "zoom",
+        "performance",
+        "ro-sync"
+      ],
+      "related_bugs": [
+        "bug-086"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:12:00+02:00"
+    },
+    {
+      "id": "bug-092",
+      "timestamp": "2026-04-28T04:18:00+02:00",
+      "error_message": "ro-sync still lagged Terminal 64 when unpaused even after realtime UI streams were throttled/disabled.",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "The host widget hot-reload poll called widget_file_modified every 1.5s for each mounted widget and recursively scanned the whole widget folder. The installed ro-sync widget folder was 5.5G with 42,295 files, including daemon/target and tools trees, so the app repeatedly walked huge build/tool directories while the widget was mounted.",
+      "fix": "Changed widget_file_modified to skip heavy dependency/build/tool directories such as target, tools, node_modules, Packages, dist, build, coverage, vendor, and hidden directories. For the installed ro-sync folder this reduces the hot-reload scan from 42,295 files to 54 files.",
+      "tags": [
+        "widgets",
+        "performance",
+        "hot-reload",
+        "filesystem",
+        "ro-sync"
+      ],
+      "related_bugs": [
+        "bug-086",
+        "bug-091"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:18:00+02:00"
+    },
+    {
+      "id": "bug-093",
+      "timestamp": "2026-04-28T04:35:00+02:00",
+      "error_message": "Codex app-server turn/start failed code=-32602: Input exceeds the maximum length of 1048576 characters when forking a Codex session.",
+      "file": "src/lib/providerRuntimes/openai.ts, src/lib/providerModularity.verification.ts",
+      "root_cause": "The Codex fork fallback seeded the next first turn with the full visible transcript and raw tool input JSON, which can exceed app-server's turn/start input limit on large sessions.",
+      "fix": "Added a hard 900k character Codex prompt budget, bounded latest-first transcript rendering, per-message/tool input/result caps, truncation markers, and a verification fixture for oversized fork seeds.",
+      "tags": [
+        "codex",
+        "app-server",
+        "fork",
+        "input-limit",
+        "provider-runtime"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:35:00+02:00"
+    },
+    {
+      "id": "bug-094",
+      "timestamp": "2026-04-28T04:35:00+02:00",
+      "error_message": "Claude session UI reopened empty and refresh-from-jsonl stayed empty after app restart, while Claude itself still remembered the previous work.",
+      "file": "src-tauri/src/lib.rs, src/stores/claudeStore.ts",
+      "root_cause": "Claude history hydration only looked at the JSONL path derived from Terminal 64's stored cwd, and createSession adopted a late cwd for an existing row without persisting that metadata. If cwd metadata was missing/stale or normalized differently than Claude's project directory, the UI could miss the JSONL even though --resume still worked by session id.",
+      "fix": "Made read-only Claude history hydration/stat/metadata/tail resolve an existing JSONL by session id across ~/.claude/projects when the exact cwd-derived path is missing, and persisted cwd immediately when createSession adopts it for an existing non-ephemeral session.",
+      "tags": [
+        "claude",
+        "history",
+        "persistence",
+        "jsonl",
+        "hydration"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:35:00+02:00"
+    },
+    {
+      "id": "bug-095",
+      "timestamp": "2026-04-28T04:35:00+02:00",
+      "error_message": "npm run typecheck failed after adding the Codex oversized seed fixture.",
+      "file": "src/lib/providerRuntimes/openai.ts, src/lib/providerModularity.verification.ts",
+      "root_cause": "The transcript loop indexed an array under noUncheckedIndexedAccess, and the verification fixture explicitly set toolCalls: undefined while exactOptionalPropertyTypes is enabled.",
+      "fix": "Guarded the indexed transcript message before rendering and built fixture ChatMessage objects without explicit undefined optional fields.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "exactOptionalPropertyTypes",
+        "noUncheckedIndexedAccess"
+      ],
+      "related_bugs": [
+        "bug-093"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:35:00+02:00"
+    },
+    {
+      "id": "bug-096",
+      "timestamp": "2026-04-28T04:44:27+02:00",
+      "error_message": "Codex forking needed to use the upstream app-server fork contract instead of falling back to transcript seeding.",
+      "file": "src-tauri/src/providers/codex.rs",
+      "root_cause": "Terminal 64's native Codex fork request omitted the required persistExtendedHistory flag and only attempted thread-id based fork. If app-server could not resolve the thread id, the frontend fell back to seeded transcript forking, which is less correct and can hit turn/start input limits.",
+      "fix": "Updated Codex fork to send persistExtendedHistory, parse several app-server thread id result shapes, and retry thread/fork with the local rollout JSONL path found under ~/.codex/sessions before allowing the frontend seed-transcript fallback.",
+      "tags": [
+        "codex",
+        "app-server",
+        "fork",
+        "upstream-contract",
+        "rollout"
+      ],
+      "related_bugs": [
+        "bug-093"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:44:27+02:00"
+    },
+    {
+      "id": "bug-097",
+      "timestamp": "2026-04-28T04:48:09+02:00",
+      "error_message": "Error: Session ID 40862248-a9d4-437a-b0cb-e87021c7a78a is already in use when prompting an empty-looking previously used Claude session.",
+      "file": "src-tauri/src/providers/claude.rs, src-tauri/src/providers/util.rs",
+      "root_cause": "The frontend could mark a recovered Claude session as not started when its visible message list was empty, so the provider create path spawned Claude with --session-id for an id that already had a transcript. The CLI reports that asynchronously on stderr after providerCreate has already returned, so the runtime catch fallback to --resume never ran.",
+      "fix": "Added a shared Claude transcript resolver that locates an existing JSONL by session id across ~/.claude/projects. Claude create_session now uses --resume instead of --session-id whenever that transcript already exists, and dangling-tool sanitization uses the same resolver.",
+      "tags": [
+        "claude",
+        "session-lifecycle",
+        "resume",
+        "jsonl",
+        "provider-runtime"
+      ],
+      "related_bugs": [
+        "bug-094"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T04:48:09+02:00"
     }
   ]
 }

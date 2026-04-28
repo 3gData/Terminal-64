@@ -16,6 +16,7 @@ import {
   resolveDelegationChildRuntimeSettings,
 } from "./delegationChildRuntime";
 import {
+  CODEX_MAX_TURN_PROMPT_CHARS,
   codexPermissionForOverride,
   codexDropTurnsForKeepMessages,
   buildCodexCreateRequest,
@@ -253,6 +254,24 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   const seededPrompt = promptWithCodexSeed("continue", transcriptFixture.slice(0, 2));
   assert(seededPrompt.includes("Prior transcript"), "Codex fork prompt includes transcript heading");
   assert(seededPrompt.includes("Tool: Read"), "Codex fork prompt includes tool call context");
+  const oversizedSeed: ChatMessage[] = transcriptFixture.concat(Array.from({ length: 80 }, (_, index): ChatMessage => {
+    const base: ChatMessage = {
+      id: `huge-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `message ${index} ${"x".repeat(40_000)}`,
+      timestamp: index + 10,
+    };
+    if (index % 2 === 0) return base;
+    return {
+      ...base,
+      toolCalls: [{ id: `tool-${index}`, name: "Bash", input: { command: "x".repeat(40_000) }, result: "y".repeat(40_000) }],
+    };
+  }));
+  const cappedSeededPrompt = promptWithCodexSeed("continue", oversizedSeed);
+  assert(
+    cappedSeededPrompt.length <= CODEX_MAX_TURN_PROMPT_CHARS,
+    "Codex fork prompt is capped below app-server input limit",
+  );
   assertEqual(codexDropTurnsForKeepMessages(transcriptFixture, 2), 1, "Codex rewind/fork drops trailing user turns");
   assertEqual(codexDropTurnsForKeepMessages(transcriptFixture, 10), 0, "Codex drop-turn calculation never goes negative");
 
