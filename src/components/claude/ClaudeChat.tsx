@@ -1,7 +1,16 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { resolveSessionProviderState, selectSessionProvider, useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
+import {
+  queuedPromptDisplayText,
+  queuedPromptProviderPrompt,
+  resolveSessionProviderState,
+  selectSessionProvider,
+  useClaudeStore,
+  type ClaudeSession,
+  type QueuedPromptCommandMetadata,
+  type QueuedPromptInput,
+} from "../../stores/claudeStore";
 import { useShallow } from "zustand/react/shallow";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { listSlashCommands, resolvePermission, readFile, writeFile, listMcpServers, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, resolveSkillPrompt } from "../../lib/tauriApi";
@@ -32,7 +41,7 @@ import { v4 as uuidv4 } from "uuid";
 import { baseName, dirName } from "../../lib/platform";
 import "./ClaudeChat.css";
 import "../ui/DropdownMenu.css";
-import { cancelProviderSession, closeProviderSession, hydrateProviderHistory, runProviderTurn } from "../../lib/providerRuntime";
+import { cancelProviderSession, closeProviderSession, runProviderTurn } from "../../lib/providerRuntime";
 import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 
 // Provider lookup. `provider` is non-optional on ClaudeSession but the
@@ -43,6 +52,34 @@ function sessionProviderFor(sessionId: string): ProviderId {
 
 async function cancelByProvider(sessionId: string, provider: ProviderId): Promise<void> {
   return cancelProviderSession(sessionId, provider);
+}
+
+function queuedCommandMetadataForText(
+  text: string,
+  supportsCompact: boolean,
+  isCodexPlan: boolean,
+): QueuedPromptCommandMetadata {
+  if (isCodexPlan) {
+    return { kind: "codex-plan", name: "plan", originalText: text };
+  }
+
+  const slashMatch = text.match(/^\/([a-zA-Z0-9_:.-]+)/);
+  if (slashMatch) {
+    const name = slashMatch[1]!;
+    return {
+      kind: supportsCompact && name.toLowerCase() === "compact" ? "compact" : "slash",
+      name,
+      originalText: text,
+    };
+  }
+
+  return { kind: "plain", originalText: text };
+}
+
+function replayQueuedCommandMetadata(sessionId: string, item: { command?: QueuedPromptCommandMetadata | undefined }) {
+  if (item.command?.kind === "compact") {
+    useClaudeStore.getState().setAutoCompactStatus(sessionId, "compacting");
+  }
 }
 
 async function closeByProvider(sessionId: string, provider: ProviderId): Promise<void> {
@@ -727,10 +764,28 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
       // Streaming just ended — check queue first
       const next = useClaudeStore.getState().dequeuePrompt(sessionId);
       if (next) {
-        addUserMessage(sessionId, next.text);
-        emit("gui-message", { session_id: sessionId, content: next.text }).catch(() => {});
+        const displayText = queuedPromptDisplayText(next);
+        const providerPrompt = queuedPromptProviderPrompt(next);
+        replayQueuedCommandMetadata(sessionId, next);
+        addUserMessage(sessionId, displayText);
+        emit("gui-message", { session_id: sessionId, content: displayText }).catch(() => {});
+        if (next.command?.kind === "delegate-plan") {
+          delegateRequested.current = true;
+        }
+        if (next.command?.kind === "loop") {
+          useClaudeStore.getState().tickLoop(sessionId);
+        }
         setTimeout(() => {
-          actualSend(next.text).catch((err) => useClaudeStore.getState().setError(sessionId, String(err)));
+          const opts = next.codexCollaborationMode !== undefined
+            ? { codexCollaborationMode: next.codexCollaborationMode }
+            : undefined;
+          actualSend(providerPrompt, next.permissionOverride, opts)
+            .then(() => {
+              if (next.command?.kind === "reload") {
+                setTimeout(reloadCommands, 3000);
+              }
+            })
+            .catch((err) => useClaudeStore.getState().setError(sessionId, String(err)));
         }, 500);
         return;
       }
@@ -827,6 +882,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
           lastFiredAt: null,
           iteration: 0,
         });
+        if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
+          useClaudeStore.getState().enqueuePrompt(sessionId, {
+            displayText: loopPrompt,
+            providerPrompt: loopPrompt,
+            ...(permissionOverride !== undefined ? { permissionOverride } : {}),
+            command: { kind: "loop", originalText: loopPrompt },
+          });
+          setQueueExpanded(true);
+          return;
+        }
         // Fire the first iteration immediately
         addUserMessage(sessionId, loopPrompt);
         if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
@@ -836,6 +901,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
       }
 
       if (/^\/reload-plugins\b/i.test(text)) {
+        if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
+          useClaudeStore.getState().enqueuePrompt(sessionId, {
+            displayText: text,
+            providerPrompt: text,
+            ...(permissionOverride !== undefined ? { permissionOverride } : {}),
+            command: { kind: "reload", name: "reload-plugins", originalText: text },
+          });
+          setQueueExpanded(true);
+          return;
+        }
         reloadCommands();
         addUserMessage(sessionId, text);
         await actualSend(text, permissionOverride);
@@ -871,6 +946,16 @@ Rules:
 - Fewer focused agents > many tiny agents. If two things are tightly coupled, keep them in one task
 - Output the delegation block IMMEDIATELY, nothing else`;
 
+        if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
+          useClaudeStore.getState().enqueuePrompt(sessionId, {
+            displayText: `/delegate ${userGoal}`,
+            providerPrompt: skillPrompt,
+            ...(permissionOverride !== undefined ? { permissionOverride } : {}),
+            command: { kind: "delegate-plan", name: "delegate", originalText: `/delegate ${userGoal}` },
+          });
+          setQueueExpanded(true);
+          return;
+        }
         delegateRequested.current = true;
         addUserMessage(sessionId, `/delegate ${userGoal}`);
         await actualSend(skillPrompt, permissionOverride);
@@ -902,6 +987,16 @@ Rules:
               "",
               resolved.body,
             ].filter((l) => l !== null).join("\n");
+            if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
+              useClaudeStore.getState().enqueuePrompt(sessionId, {
+                displayText: text,
+                providerPrompt: injectedPrompt,
+                ...(permissionOverride !== undefined ? { permissionOverride } : {}),
+                command: { kind: "skill", name: resolved.name, originalText: text },
+              });
+              setQueueExpanded(true);
+              return;
+            }
             // Show the original /command in chat history, send the resolved content
             addUserMessage(sessionId, text);
             if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: text }).catch(() => {});
@@ -926,12 +1021,22 @@ Rules:
         codexCollaborationMode = codexPlan.collaborationMode;
         prompt = codexPlan.prompt;
       }
-      ({ prompt, displayPrompt } = consumeAttachments(prompt, displayPrompt));
+      const consumed = consumeAttachments(prompt, displayPrompt);
+      prompt = consumed.prompt;
+      displayPrompt = consumed.displayPrompt;
 
       const isCurrentlyStreaming = useClaudeStore.getState().sessions[sessionId]?.isStreaming;
       if (isCurrentlyStreaming) {
         // Queue the prompt instead of sending mid-thinking
-        useClaudeStore.getState().enqueuePrompt(sessionId, displayPrompt);
+        const queuedPrompt: QueuedPromptInput = {
+          displayText: displayPrompt,
+          providerPrompt: prompt,
+          command: queuedCommandMetadataForText(text, supportsCompact, !!codexPlan),
+          ...(permissionOverride !== undefined ? { permissionOverride } : {}),
+          ...(codexCollaborationMode !== undefined ? { codexCollaborationMode } : {}),
+          ...(consumed.attachmentState !== undefined ? { attachmentState: consumed.attachmentState } : {}),
+        };
+        useClaudeStore.getState().enqueuePrompt(sessionId, queuedPrompt);
         setQueueExpanded(true);
         return;
       }
@@ -1512,8 +1617,8 @@ Rules:
           <button
             className="cc-refresh-btn"
             onClick={() => {
-              // Cancel running process + reset UI state, then ask the active
-              // provider runtime to hydrate any messages we missed.
+              // Cancel running process + reset UI state, then reload the
+              // active provider's persisted transcript.
               {
                 const rp = sessionProviderFor(sessionId);
                 cancelByProvider(sessionId, rp).catch(() => {});
@@ -1523,21 +1628,10 @@ Rules:
               store.setStreaming(sessionId, false);
               store.setError(sessionId, null);
               store.clearStreamingText(sessionId);
-              const refreshedSession = store.sessions[sessionId];
-              if (!refreshedSession || !effectiveCwd) return;
-              const providerState = resolveSessionProviderState(refreshedSession);
-              hydrateProviderHistory({
-                provider: providerState.provider,
-                sessionId,
-                cwd: effectiveCwd,
-                codexThreadId: providerState.openai?.codexThreadId ?? null,
-              }).then((result) => {
-                if (result.status === "messages" && result.messages.length) {
-                  store.mergeFromDisk(sessionId, result.messages);
-                }
-              }).catch(() => {});
+              if (!store.sessions[sessionId] || !effectiveCwd) return;
+              store.refreshFromHistory(sessionId, effectiveCwd).catch(() => {});
             }}
-            title="Refresh chat (cancel in-flight request, merge recent JSONL)"
+            title="Refresh chat (cancel in-flight request, reload provider history)"
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <path d="M1.5 6A4.5 4.5 0 0 1 10 3.5M10.5 6A4.5 4.5 0 0 1 2 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
@@ -1632,7 +1726,7 @@ Rules:
                   <div className="cc-queue-list">
                     {session.promptQueue.map((qp) => (
                       <div key={qp.id} className="cc-queue-item">
-                        <span className="cc-queue-text">{qp.text}</span>
+                        <span className="cc-queue-text">{queuedPromptDisplayText(qp)}</span>
                         <button className="cc-queue-remove" onClick={() => useClaudeStore.getState().removeQueuedPrompt(sessionId, qp.id)}>×</button>
                       </div>
                     ))}
@@ -1652,9 +1746,13 @@ Rules:
                       resetPlan();
                       setPermModeIdx(4); // YOLO
                       // Queue the build prompt so it fires automatically after /compact finishes
-                      useClaudeStore.getState().enqueuePrompt(sessionId,
-                        "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about."
-                      );
+                      const buildPrompt = "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.";
+                      useClaudeStore.getState().enqueuePrompt(sessionId, {
+                        displayText: buildPrompt,
+                        providerPrompt: buildPrompt,
+                        permissionOverride: "bypass_all",
+                        command: { kind: "plan-build", originalText: buildPrompt },
+                      });
                       handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
                     },
                   } : {})}

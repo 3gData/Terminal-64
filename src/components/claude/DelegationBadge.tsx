@@ -77,7 +77,12 @@ export default function DelegationBadge({ sessionId }: DelegationBadgeProps) {
       const sibSession = useClaudeStore.getState().sessions[sibId];
       if (!sibSession) continue;
       if (sibSession.isStreaming) {
-        useClaudeStore.getState().enqueuePrompt(sibId, forwardMsg);
+        useClaudeStore.getState().enqueuePrompt(sibId, {
+          displayText: forwardMsg,
+          providerPrompt: forwardMsg,
+          permissionOverride: "bypass_all",
+          command: { kind: "delegation-forward", sourceSessionId: sessionId, originalText: forwardMsg },
+        });
       } else {
         runProviderTurn(providerTurnForSession(sibId, sibSession, forwardMsg))
           .then((result) => applyProviderTurnResult(sibId, result))

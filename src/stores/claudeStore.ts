@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import type { ChatMessage, ToolCall, McpTool, HookEvent } from "../lib/types";
+import type { ChatMessage, ToolCall, McpTool, HookEvent, PermissionMode } from "../lib/types";
 import type { ProviderId } from "../lib/providers";
 import { hydrateProviderHistory } from "../lib/providerRuntime";
 import type { ProviderHydrateInput } from "../contracts/providerRuntime";
@@ -204,10 +204,92 @@ export interface PendingPermission {
   toolInput: Record<string, unknown>;
 }
 
+export type QueuedPromptCommandKind =
+  | "plain"
+  | "slash"
+  | "compact"
+  | "codex-plan"
+  | "plan-build"
+  | "delegation-merge"
+  | "delegation-forward"
+  | "delegate-plan"
+  | "skill"
+  | "reload"
+  | "loop";
+
+export interface QueuedPromptCommandMetadata {
+  kind: QueuedPromptCommandKind;
+  name?: string | undefined;
+  originalText?: string | undefined;
+  sourceSessionId?: string | undefined;
+  groupId?: string | undefined;
+}
+
+export interface QueuedPromptAttachmentState {
+  expanded: boolean;
+  files: string[];
+}
+
+export interface QueuedPromptInput {
+  displayText: string;
+  providerPrompt?: string | undefined;
+  permissionOverride?: PermissionMode | undefined;
+  codexCollaborationMode?: "plan" | "default" | undefined;
+  attachmentState?: QueuedPromptAttachmentState | undefined;
+  command?: QueuedPromptCommandMetadata | undefined;
+}
+
 export interface QueuedPrompt {
   id: string;
-  text: string;
+  displayText: string;
+  providerPrompt: string;
   timestamp: number;
+  permissionOverride?: PermissionMode | undefined;
+  codexCollaborationMode?: "plan" | "default" | undefined;
+  attachmentState?: QueuedPromptAttachmentState | undefined;
+  command?: QueuedPromptCommandMetadata | undefined;
+  /** @deprecated legacy in-memory queue entries used text-only payloads. */
+  text?: string | undefined;
+}
+
+export function queuedPromptDisplayText(prompt: QueuedPrompt): string {
+  const legacy = prompt as QueuedPrompt & {
+    displayText?: string | undefined;
+    providerPrompt?: string | undefined;
+    text?: string | undefined;
+  };
+  return legacy.displayText ?? legacy.text ?? legacy.providerPrompt ?? "";
+}
+
+export function queuedPromptProviderPrompt(prompt: QueuedPrompt): string {
+  const legacy = prompt as QueuedPrompt & {
+    displayText?: string | undefined;
+    providerPrompt?: string | undefined;
+    text?: string | undefined;
+  };
+  return legacy.providerPrompt ?? legacy.text ?? legacy.displayText ?? "";
+}
+
+function createQueuedPrompt(input: string | QueuedPromptInput): QueuedPrompt {
+  if (typeof input === "string") {
+    return {
+      id: uuidv4(),
+      displayText: input,
+      providerPrompt: input,
+      timestamp: Date.now(),
+    };
+  }
+
+  return {
+    id: uuidv4(),
+    displayText: input.displayText,
+    providerPrompt: input.providerPrompt ?? input.displayText,
+    timestamp: Date.now(),
+    ...(input.permissionOverride !== undefined ? { permissionOverride: input.permissionOverride } : {}),
+    ...(input.codexCollaborationMode !== undefined ? { codexCollaborationMode: input.codexCollaborationMode } : {}),
+    ...(input.attachmentState !== undefined ? { attachmentState: input.attachmentState } : {}),
+    ...(input.command !== undefined ? { command: input.command } : {}),
+  };
 }
 
 export interface McpServerStatus {
@@ -340,11 +422,13 @@ interface ClaudeState {
   setName: (sessionId: string, name: string) => void;
   setCwd: (sessionId: string, cwd: string) => void;
   setMcpServers: (sessionId: string, servers: McpServerStatus[]) => void;
-  enqueuePrompt: (sessionId: string, text: string) => void;
+  enqueuePrompt: (sessionId: string, prompt: string | QueuedPromptInput) => void;
   dequeuePrompt: (sessionId: string) => QueuedPrompt | undefined;
   removeQueuedPrompt: (sessionId: string, promptId: string) => void;
   clearQueue: (sessionId: string) => void;
   loadFromDisk: (sessionId: string, messages: ChatMessage[]) => void;
+  replaceFromDisk: (sessionId: string, messages: ChatMessage[]) => void;
+  refreshFromHistory: (sessionId: string, cwd: string) => Promise<void>;
   mergeFromDisk: (sessionId: string, messages: ChatMessage[]) => void;
   setDraftPrompt: (sessionId: string, text: string) => void;
   setLoop: (sessionId: string, loop: ActiveLoop | null) => void;
@@ -700,11 +784,9 @@ function rememberHydration(sessionId: string, mtimeMs: number, size: number, mes
   trimHydrationCache();
 }
 
-// Async provider history hydration. Fire-and-forget — errors are logged but
-// non-fatal so the user can still interact with a session whose history hasn't
-// loaded yet.
-function hydrateFromJsonl(sessionId: string, cwd: string) {
+function buildProviderHydrateInput(sessionId: string, cwd: string): ProviderHydrateInput | null {
   const sess = useClaudeStore.getState().sessions[sessionId];
+  if (!sess) return null;
   const providerState = sess?.providerState;
   const provider = providerState?.provider ?? sess?.provider ?? "anthropic";
   const codexThreadId = providerState?.openai?.codexThreadId ?? sess?.codexThreadId ?? null;
@@ -721,31 +803,51 @@ function hydrateFromJsonl(sessionId: string, cwd: string) {
     cached.lastUsedAt = Date.now();
     input.cacheEntry = cached;
   }
+  return input;
+}
 
-  hydrateProviderHistory(input)
-    .then((result) => {
-      if (result.clearCache) {
-        hydrationCache.delete(sessionId);
+async function hydrateSessionHistory(
+  sessionId: string,
+  cwd: string,
+  mode: "extend" | "replace",
+): Promise<void> {
+  const input = buildProviderHydrateInput(sessionId, cwd);
+  if (!input) return;
+  try {
+    const result = await hydrateProviderHistory(input);
+    if (result.clearCache) {
+      hydrationCache.delete(sessionId);
+    }
+    if (result.status === "messages") {
+      if (result.cacheWrite) {
+        rememberHydration(
+          sessionId,
+          result.cacheWrite.mtimeMs,
+          result.cacheWrite.size,
+          result.cacheWrite.messages,
+        );
       }
-      if (result.status === "messages") {
-        if (result.cacheWrite) {
-          rememberHydration(
-            sessionId,
-            result.cacheWrite.mtimeMs,
-            result.cacheWrite.size,
-            result.cacheWrite.messages,
-          );
-        }
-        useClaudeStore.getState().loadFromDisk(sessionId, result.messages);
+      if (mode === "replace") {
+        useClaudeStore.getState().replaceFromDisk(sessionId, result.messages);
       } else {
-        patchSession(sessionId, { jsonlLoaded: true });
+        useClaudeStore.getState().loadFromDisk(sessionId, result.messages);
       }
-    })
-    .catch((err) => {
-      const label = input.provider === "openai" ? "Codex" : "JSONL";
-      console.warn(`[claudeStore] ${label} hydrate failed:`, sessionId, err);
+    } else {
       patchSession(sessionId, { jsonlLoaded: true });
-    });
+    }
+  } catch (err) {
+    const label = input.provider === "openai" ? "Codex" : "JSONL";
+    console.warn(`[claudeStore] ${label} hydrate failed:`, sessionId, err);
+    patchSession(sessionId, { jsonlLoaded: true });
+    throw err;
+  }
+}
+
+// Async provider history hydration. Fire-and-forget — errors are logged but
+// non-fatal so the user can still interact with a session whose history hasn't
+// loaded yet.
+function hydrateFromJsonl(sessionId: string, cwd: string) {
+  hydrateSessionHistory(sessionId, cwd, "extend").catch(() => {});
 }
 
 
@@ -1177,11 +1279,11 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     });
   },
 
-  enqueuePrompt: (sessionId, text) => {
+  enqueuePrompt: (sessionId, prompt) => {
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
-      const item: QueuedPrompt = { id: uuidv4(), text, timestamp: Date.now() };
+      const item = createQueuedPrompt(prompt);
       return { sessions: updateSession(s.sessions, sessionId, { promptQueue: [...session.promptQueue, item] }) };
     });
   },
@@ -1230,6 +1332,28 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       }) };
     });
   },
+
+  // Explicit refresh treats non-empty provider history as authoritative and
+  // may shrink the visible transcript after rewind/truncate. Empty or missing
+  // history still preserves live in-memory messages.
+  replaceFromDisk: (sessionId, messages) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      if (messages.length === 0) {
+        return { sessions: updateSession(s.sessions, sessionId, { jsonlLoaded: true }) };
+      }
+      const promptCount = messages.filter((m) => m.role === "user").length;
+      return { sessions: updateSession(s.sessions, sessionId, {
+        messages,
+        promptCount,
+        hasBeenStarted: promptCount > 0,
+        jsonlLoaded: true,
+      }) };
+    });
+  },
+
+  refreshFromHistory: (sessionId, cwd) => hydrateSessionHistory(sessionId, cwd, "replace"),
 
   mergeFromDisk: (sessionId, incoming) => {
     set((s) => {

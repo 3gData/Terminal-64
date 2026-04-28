@@ -7,7 +7,7 @@ import { cancelProviderSession, closeProviderSession, deleteProviderHistory, run
 import {
   describeDelegationToolAction,
   evaluateDelegationCompletion,
-  startClaudeHookCompletionSource,
+  startProviderLifecycleCompletionSource,
 } from "../lib/delegationCompletion";
 import type { ProviderId } from "../lib/providers";
 import type { PermissionMode } from "../lib/types";
@@ -140,7 +140,7 @@ function purgeDelegationChildren(groupId: string) {
 export function useDelegationOrchestrator() {
   useEffect(() => {
     let cancelled = false;
-    const hookUnlistens: (() => void)[] = [];
+    const lifecycleUnlistens: (() => void)[] = [];
 
     const unsub = useClaudeStore.subscribe((state, prev) => {
       for (const [sid, session] of Object.entries(state.sessions)) {
@@ -169,21 +169,11 @@ export function useDelegationOrchestrator() {
             }
           }
         }
-
-        // Cancel idle timer if agent started streaming again
-        if (!was && now) {
-          clearIdleTimer(sid);
-        }
-
-        // Only act on streaming → not-streaming transitions
-        if (was && !now) {
-          handleTurnComplete(sid);
-        }
       }
     });
 
     (async () => {
-      const dispose = await startClaudeHookCompletionSource({
+      const dispose = await startProviderLifecycleCompletionSource({
         isDelegationChildActive: (sessionId) => {
           const group = useDelegationStore.getState().getGroupForSession(sessionId);
           return Boolean(group && group.status === "active");
@@ -196,13 +186,13 @@ export function useDelegationOrchestrator() {
         onActivity: clearIdleTimer,
       });
       if (cancelled) { dispose(); return; }
-      hookUnlistens.push(dispose);
+      lifecycleUnlistens.push(dispose);
     })();
 
     return () => {
       cancelled = true;
       unsub();
-      for (const u of hookUnlistens) u();
+      for (const u of lifecycleUnlistens) u();
       // Clean up timers on unmount
       for (const timer of idleTimers.values()) clearTimeout(timer);
       idleTimers.clear();
@@ -320,7 +310,12 @@ export async function performMerge(groupId: string) {
 
   let mergeSucceeded = false;
   if (parentSession.isStreaming) {
-    useClaudeStore.getState().enqueuePrompt(group.parentSessionId, mergePrompt);
+    useClaudeStore.getState().enqueuePrompt(group.parentSessionId, {
+      displayText: mergePrompt,
+      providerPrompt: mergePrompt,
+      permissionOverride: group.parentPermissionMode || "auto",
+      command: { kind: "delegation-merge", groupId, originalText: mergePrompt },
+    });
     mergeSucceeded = true; // queued — will send when streaming finishes
   } else {
     useClaudeStore.getState().addUserMessage(group.parentSessionId, mergePrompt);

@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { readFileBase64, savePastedImage } from "../lib/tauriApi";
 import { useCanvasStore } from "../stores/canvasStore";
+import type { QueuedPromptAttachmentState } from "../stores/claudeStore";
 
 const CHAT_DROP_SELECTOR = ".cc-container[data-session-id]";
 const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
@@ -210,17 +211,22 @@ export function useChatAttachments({ sessionId, isActive }: UseChatAttachmentsOp
     });
   }, []);
 
-  const consumeAttachments = useCallback((promptText: string, displayText = promptText): { prompt: string; displayPrompt: string } => {
+  const consumeAttachments = useCallback((promptText: string, displayText = promptText): {
+    prompt: string;
+    displayPrompt: string;
+    attachmentState?: QueuedPromptAttachmentState;
+  } => {
     if (attachedFiles.length === 0) return { prompt: promptText, displayPrompt: displayText };
 
-    const fileList = attachedFiles.map((f) => `[Attached file: ${f}]`).join("\n");
+    const files = [...attachedFiles];
+    const fileList = files.map((f) => `[Attached file: ${f}]`).join("\n");
     const prompt = `${fileList}\n\n${promptText}`;
     const displayPrompt = `${fileList}\n\n${displayText}`;
     Object.values(previewsRef.current).forEach((url) => URL.revokeObjectURL(url));
     previewsRef.current = {};
     setAttachedFiles([]);
     setFilePreviews({});
-    return { prompt, displayPrompt };
+    return { prompt, displayPrompt, attachmentState: { expanded: true, files } };
   }, [attachedFiles]);
 
   useEffect(() => {

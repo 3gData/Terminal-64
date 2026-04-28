@@ -764,13 +764,15 @@
 - `src/contracts/providerIpc.ts` — TypeScript provider IPC request unions for generic provider_create/send/cancel/close wrappers (~900 tok)
 - `src/lib/providers.ts` — Provider manifests, defaults, capabilities, and compatibility config alias for Anthropic and OpenAI providers (~1300 tok)
 - `src/lib/delegationChildRuntime.ts` — Provider-neutral delegation child runtime preparation: inherited provider settings, MCP env/config setup, skip policies, and first-turn input shaping (~1100 tok)
-- `src/lib/delegationCompletion.ts` — Provider-neutral delegation completion helpers for report_done normalization, idle completion candidates, and Claude hook lifecycle source isolation (~1200 tok)
+- `src/lib/delegationCompletion.ts` — Provider-neutral delegation completion helpers for report_done normalization, idle completion candidates, and lifecycle-bus completion source wiring (~1300 tok)
+- `src/lib/providerLifecycleBus.ts` — Provider-neutral frontend lifecycle event bus normalizing Claude Subagent hooks and provider turn transitions for delegation consumers (~1200 tok)
 - `src/lib/providerRuntime.ts` — Frontend provider runtime dispatcher for create/send/cancel/close/fork/rewind/hydrate (~1400 tok)
 - `src/lib/providerRuntimes/anthropic.ts` — Anthropic/Claude runtime adapter that maps provider turns to Claude IPC and JSONL history helpers (~1300 tok)
 - `src/lib/providerRuntimes/openai.ts` — OpenAI/Codex runtime adapter that maps provider turns to Codex app-server/exec IPC, rollback/fork, and rollout hydration (~1600 tok)
 - `src/lib/claudeEventDecoder.ts` — Claude raw event to provider-neutral event/tool decoder (~1500 tok)
 - `src/lib/codexEventDecoder.ts` — Codex app-server/rollout raw event to provider-neutral event/tool decoder (~2200 tok)
 - `src/stores/claudeStore.ts` — Zustand provider-backed chat store; legacy name, canonical providerState metadata, v5 migration, history hydration (~3000 tok)
+- `src/stores/widgetMetricsStore.ts` — Zustand host-side widget diagnostics store tracking panel lifetimes, reloads, bridge traffic, retained subscriptions/listeners, browser state, renderer heap samples, and optional widget self-reports (~1500 tok)
 - `src/hooks/useClaudeEvents.ts` — Shared Claude/Codex event listeners that feed normalized provider events into claudeStore (~2200 tok)
 - `src/hooks/useChatSend.ts` — Chat send hook that prepares provider turn inputs, handles Codex plan slash command, and routes through providerRuntime (~1600 tok)
 - `src/hooks/useChatFork.ts` — Chat fork hook that seeds provider metadata and delegates provider-specific fork prep (~1400 tok)
@@ -796,3 +798,10 @@
 - `src/components/widget/WidgetPanel.tsx` — Widget iframe bridge, including session creation and prompt APIs (~18000 tok)
 - `src/components/claude/DelegationBadge.tsx` — Delegation child badge and sibling prompt forwarding (~1500 tok)
 - `src/hooks/useDelegationOrchestrator.ts` — Delegation lifecycle, child cleanup, and auto-merge routing (~7000 tok)
+
+## Widget Diagnostics / Settings Scope
+
+- `src/components/settings/SettingsPanel.tsx` — Settings overlay with appearance, canvas, provider, OpenWolf, quick paste, party, voice, Discord, and widget diagnostics sections (~18000 tok)
+- `src/components/settings/SettingsPanel.css` — Styling for Settings overlay sections, controls, quick pastes, and widget diagnostics cards (~4500 tok)
+- `src/components/widget/WidgetDialog.tsx` — Widget create/manage dialog with embedded bridge API reference docs for widget authors (~12000 tok)
+- `src-tauri/bundled-widgets/project-intel/main.js` — Bundled Project Intelligence widget bridge client, OpenWolf panel loaders, daemon status polling, and inter-widget update subscriptions (~9000 tok)

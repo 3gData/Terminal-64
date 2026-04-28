@@ -1,5 +1,8 @@
-import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, HookEventPayload, ToolCall } from "./types";
+import {
+  retainProviderLifecycleSources,
+  subscribeProviderLifecycle,
+} from "./providerLifecycleBus";
+import type { ChatMessage, ToolCall } from "./types";
 
 const FORWARDING_PREFIX = "[Update from";
 const REPORT_DONE_TOOL = "report_done";
@@ -20,7 +23,7 @@ interface NormalizedReportDone {
   messageId: string | null;
 }
 
-interface ClaudeHookCompletionSourceOptions {
+interface ProviderLifecycleCompletionSourceOptions {
   isDelegationChildActive: (sessionId: string) => boolean;
   isSessionQuiescent: (sessionId: string) => boolean;
   onCompletionHint: (sessionId: string) => void;
@@ -159,29 +162,38 @@ export function evaluateDelegationCompletion(input: DelegationCompletionInput): 
   };
 }
 
-export async function startClaudeHookCompletionSource(
-  options: ClaudeHookCompletionSourceOptions,
+export async function startProviderLifecycleCompletionSource(
+  options: ProviderLifecycleCompletionSourceOptions,
 ): Promise<() => void> {
-  const unlistens: (() => void)[] = [];
-
-  const stopUnlisten = await listen<HookEventPayload>("claude-hook-SubagentStop", (event) => {
-    const { session_id: sessionId } = event.payload;
+  const unsubscribe = subscribeProviderLifecycle((event) => {
+    const { sessionId } = event;
     if (!options.isDelegationChildActive(sessionId)) return;
+
+    if (event.kind === "turn_started" || event.kind === "agent_harness_started") {
+      options.onActivity(sessionId);
+      return;
+    }
+
+    if (event.kind === "turn_completed") {
+      options.onCompletionHint(sessionId);
+      return;
+    }
+
     if (options.isSessionQuiescent(sessionId)) {
       options.onCompletionHint(sessionId);
     }
   });
-  unlistens.push(stopUnlisten);
 
-  const startUnlisten = await listen<HookEventPayload>("claude-hook-SubagentStart", (event) => {
-    const { session_id: sessionId } = event.payload;
-    if (options.isDelegationChildActive(sessionId)) {
-      options.onActivity(sessionId);
-    }
-  });
-  unlistens.push(startUnlisten);
+  let releaseSources: (() => void) | null = null;
+  try {
+    releaseSources = await retainProviderLifecycleSources();
+  } catch (err) {
+    unsubscribe();
+    throw err;
+  }
 
   return () => {
-    for (const unlisten of unlistens) unlisten();
+    unsubscribe();
+    releaseSources?.();
   };
 }

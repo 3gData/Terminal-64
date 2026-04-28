@@ -9,6 +9,7 @@ import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from 
 import { useThemeStore } from "../../stores/themeStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useVoiceStore } from "../../stores/voiceStore";
+import { useWidgetMetricsStore } from "../../stores/widgetMetricsStore";
 import { startVoice, stopVoice, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
 import { widgetBus } from "../../lib/widgetBus";
 import { invokePlugin, onPluginEvent, type PluginStreamHandle } from "../../lib/pluginApi";
@@ -19,6 +20,34 @@ interface WidgetPanelProps {
 }
 
 const POLL_INTERVAL = 1500;
+
+type WidgetSessionEventName = "all" | "session" | "message" | "tool-result" | "streaming" | "streaming-text";
+
+const SESSION_EVENT_NAMES = new Set<WidgetSessionEventName>([
+  "all",
+  "session",
+  "message",
+  "tool-result",
+  "streaming",
+  "streaming-text",
+]);
+
+function makeWidgetMetricsInstanceId(widgetId: string) {
+  return `widget-${widgetId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function countVoiceSubscriptions(unlisteners: { intent?: () => void; partial?: () => void; final?: () => void }) {
+  return Number(Boolean(unlisteners.intent)) + Number(Boolean(unlisteners.partial)) + Number(Boolean(unlisteners.final));
+}
+
+function normalizeSessionEventNames(raw: unknown): WidgetSessionEventName[] {
+  if (raw == null) return ["all"];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const events = values.filter((value): value is WidgetSessionEventName => (
+    typeof value === "string" && SESSION_EVENT_NAMES.has(value as WidgetSessionEventName)
+  ));
+  return events.length > 0 ? events : ["all"];
+}
 
 /**
  * Build a snapshot of Terminal 64 state that widgets receive on init
@@ -119,6 +148,8 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const disposedRef = useRef(false);
   const reloadCounterRef = useRef(0);
+  const metricsInstanceIdRef = useRef(makeWidgetMetricsInstanceId(widgetId));
+  const bridgeTrafficRef = useRef({ inbound: 0, outbound: 0, errors: 0 });
 
   // Embedded browser state — native webview overlaid on the widget panel
   const embeddedBrowserId = useRef<string | null>(null);
@@ -132,7 +163,48 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   // Active plugin SSE subscriptions opened by the iframe via `t64:plugin`.
   // Keyed by the subscription id the iframe supplied so it can unsubscribe later.
   const pluginSubscriptionsRef = useRef<Map<string, PluginStreamHandle>>(new Map());
+  const widgetBusSubscriptionsRef = useRef<Set<string>>(new Set());
+  const sessionEventSubscriptionsRef = useRef<Set<WidgetSessionEventName>>(new Set());
   const terminalReadyCleanupsRef = useRef<Set<() => void>>(new Set());
+
+  const flushWidgetTraffic = useCallback((instanceId = metricsInstanceIdRef.current) => {
+    const traffic = bridgeTrafficRef.current;
+    if (traffic.inbound === 0 && traffic.outbound === 0 && traffic.errors === 0) return;
+    bridgeTrafficRef.current = { inbound: 0, outbound: 0, errors: 0 };
+    useWidgetMetricsStore.getState().recordBridgeTraffic(instanceId, traffic);
+  }, []);
+
+  const updateWidgetResourceMetrics = useCallback(() => {
+    useWidgetMetricsStore.getState().setResourceCounts(metricsInstanceIdRef.current, {
+      pluginSubscriptions: pluginSubscriptionsRef.current.size,
+      busSubscriptions: widgetBusSubscriptionsRef.current.size,
+      sessionEventSubscriptions: sessionEventSubscriptionsRef.current.size,
+      terminalWaiters: terminalReadyCleanupsRef.current.size,
+      voiceSubscriptions: countVoiceSubscriptions(voiceUnlistenersRef.current),
+    });
+  }, []);
+
+  useEffect(() => {
+    const instanceId = makeWidgetMetricsInstanceId(widgetId);
+    metricsInstanceIdRef.current = instanceId;
+    bridgeTrafficRef.current = { inbound: 0, outbound: 0, errors: 0 };
+    useWidgetMetricsStore.getState().registerWidget(instanceId, widgetId);
+
+    const interval = setInterval(() => flushWidgetTraffic(instanceId), 1000);
+    return () => {
+      clearInterval(interval);
+      flushWidgetTraffic(instanceId);
+      useWidgetMetricsStore.getState().unregisterWidget(instanceId);
+    };
+  }, [flushWidgetTraffic, widgetId]);
+
+  useEffect(() => {
+    useWidgetMetricsStore.getState().setBrowserState(
+      metricsInstanceIdRef.current,
+      browserActive,
+      embeddedBrowserId.current,
+    );
+  }, [browserActive]);
 
   useEffect(() => {
     let cancelled = false;
@@ -240,9 +312,11 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
         if (modified > 0 && modified !== lastModifiedRef.current) {
           if (lastModifiedRef.current === 0) {
             lastModifiedRef.current = modified;
+            useWidgetMetricsStore.getState().setLastModified(metricsInstanceIdRef.current, modified);
             return;
           }
           lastModifiedRef.current = modified;
+          useWidgetMetricsStore.getState().recordReload(metricsInstanceIdRef.current, modified);
           // Bump a cache-buster to force iframe reload
           reloadCounterRef.current += 1;
           setWidgetUrl((prev) => {
@@ -276,11 +350,35 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
   useEffect(() => {
     const iframe = iframeRef.current;
     let bridgeDisposed = false;
+    const pendingStreamingText = new Map<string, string>();
+    let streamingTextFlushTimer: ReturnType<typeof setTimeout> | null = null;
     const post = (msg: unknown) => {
-      try { iframeRef.current?.contentWindow?.postMessage(msg, "*"); } catch {}
+      bridgeTrafficRef.current.outbound += 1;
+      try {
+        iframeRef.current?.contentWindow?.postMessage(msg, "*");
+      } catch (err) {
+        useWidgetMetricsStore.getState().recordBridgeError(metricsInstanceIdRef.current, String(err));
+      }
+    };
+    const wantsSessionEvent = (eventName: WidgetSessionEventName) => {
+      const subscriptions = sessionEventSubscriptionsRef.current;
+      return subscriptions.has("all") || subscriptions.has(eventName);
+    };
+    const flushStreamingText = () => {
+      streamingTextFlushTimer = null;
+      for (const [sid, text] of pendingStreamingText.entries()) {
+        post({ type: "t64:streaming-text", payload: { sessionId: sid, text } });
+      }
+      pendingStreamingText.clear();
+    };
+    const queueStreamingText = (sid: string, text: string) => {
+      pendingStreamingText.set(sid, text);
+      if (streamingTextFlushTimer) return;
+      streamingTextFlushTimer = setTimeout(flushStreamingText, 250);
     };
 
     const onLoad = () => {
+      useWidgetMetricsStore.getState().recordIframeLoad(metricsInstanceIdRef.current);
       post({ type: "t64:init", payload: buildStateSnapshot() });
     };
     iframe?.addEventListener("load", onLoad);
@@ -292,20 +390,23 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
 
     // Subscribe to Claude store — emit granular events
     const unsub = useClaudeStore.subscribe((state, prev) => {
+      if (sessionEventSubscriptionsRef.current.size === 0) return;
       for (const [sid, session] of Object.entries(state.sessions)) {
         const prevSession = prev.sessions[sid] as ClaudeSession | undefined;
         if (!prevSession) {
-          post({ type: "t64:session-created", payload: { sessionId: sid, name: session.name, cwd: session.cwd } });
+          if (wantsSessionEvent("session")) {
+            post({ type: "t64:session-created", payload: { sessionId: sid, name: session.name, cwd: session.cwd } });
+          }
           continue;
         }
 
         // CWD changed (set after session init)
-        if (session.cwd && session.cwd !== prevSession.cwd) {
+        if (wantsSessionEvent("session") && session.cwd && session.cwd !== prevSession.cwd) {
           post({ type: "t64:session-cwd-changed", payload: { sessionId: sid, cwd: session.cwd } });
         }
 
         // New messages
-        if (session.messages.length > prevSession.messages.length) {
+        if (wantsSessionEvent("message") && session.messages.length > prevSession.messages.length) {
           const newMsgs = session.messages.slice(prevSession.messages.length);
           for (const msg of newMsgs) {
             post({
@@ -330,7 +431,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
         // Tool results updated
         const lastMsg = session.messages[session.messages.length - 1];
         const prevLastMsg = prevSession.messages[prevSession.messages.length - 1];
-        if (lastMsg?.toolCalls && prevLastMsg?.toolCalls && lastMsg.id === prevLastMsg.id) {
+        if (wantsSessionEvent("tool-result") && lastMsg?.toolCalls && prevLastMsg?.toolCalls && lastMsg.id === prevLastMsg.id) {
           for (let i = 0; i < lastMsg.toolCalls.length; i++) {
             const tc = lastMsg.toolCalls[i];
             const ptc = prevLastMsg.toolCalls[i];
@@ -351,15 +452,15 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
         }
 
         // Streaming state changed
-        if (session.isStreaming !== prevSession.isStreaming) {
+        if (wantsSessionEvent("streaming") && session.isStreaming !== prevSession.isStreaming) {
           post({ type: "t64:streaming", payload: { sessionId: sid, isStreaming: session.isStreaming } });
           const anyStreaming = Object.values(state.sessions).some((s) => s.isStreaming);
           post({ type: "t64:any-streaming", payload: { isStreaming: anyStreaming } });
         }
 
         // Streaming text
-        if (session.streamingText && session.streamingText !== prevSession.streamingText) {
-          post({ type: "t64:streaming-text", payload: { sessionId: sid, text: session.streamingText } });
+        if (wantsSessionEvent("streaming-text") && session.streamingText && session.streamingText !== prevSession.streamingText) {
+          queueStreamingText(sid, session.streamingText);
         }
       }
     });
@@ -369,8 +470,45 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
       if (e.source !== iframeRef.current?.contentWindow) return;
       const msg = e.data;
       if (!msg || typeof msg.type !== "string") return;
+      bridgeTrafficRef.current.inbound += 1;
 
       switch (msg.type) {
+        case "t64:subscribe-session-events": {
+          const events = normalizeSessionEventNames(msg.payload?.events ?? msg.payload?.event);
+          for (const eventName of events) {
+            sessionEventSubscriptionsRef.current.add(eventName);
+          }
+          updateWidgetResourceMetrics();
+          post({ type: "t64:session-events-subscribed", payload: { id: msg.payload?.id, events: Array.from(sessionEventSubscriptionsRef.current) } });
+          return;
+        }
+
+        case "t64:unsubscribe-session-events": {
+          const rawEvents = msg.payload?.events ?? msg.payload?.event;
+          if (rawEvents == null || rawEvents === "all") {
+            sessionEventSubscriptionsRef.current.clear();
+          } else {
+            for (const eventName of normalizeSessionEventNames(rawEvents)) {
+              if (eventName === "all") sessionEventSubscriptionsRef.current.clear();
+              else sessionEventSubscriptionsRef.current.delete(eventName);
+            }
+          }
+          updateWidgetResourceMetrics();
+          post({ type: "t64:session-events-unsubscribed", payload: { id: msg.payload?.id, events: Array.from(sessionEventSubscriptionsRef.current) } });
+          return;
+        }
+
+        case "t64:debug-metrics":
+        case "t64:widget-metrics":
+          useWidgetMetricsStore.getState().recordWidgetReport(metricsInstanceIdRef.current, msg.payload);
+          return;
+
+        case "t64:request-debug-metrics": {
+          const currentMetrics = useWidgetMetricsStore.getState().widgets[metricsInstanceIdRef.current] ?? null;
+          post({ type: "t64:debug-metrics", payload: { id: msg.payload?.id, metrics: currentMetrics } });
+          return;
+        }
+
         case "t64:request-state":
           post({ type: "t64:state", payload: { ...buildStateSnapshot(), id: msg.payload?.id } });
           return;
@@ -408,6 +546,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
               post({ type: "t64:plugin-event", payload: { id: subId, pluginId: targetPlugin, frame } });
             });
             pluginSubscriptionsRef.current.set(subId, handle);
+            updateWidgetResourceMetrics();
             post({ type: "t64:plugin-subscribed", payload: { id: subId } });
             return;
           }
@@ -417,6 +556,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
             if (handle) {
               handle.close();
               pluginSubscriptionsRef.current.delete(subId);
+              updateWidgetResourceMetrics();
             }
             return;
           }
@@ -479,6 +619,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
                 if (disposedRef.current) return;
                 console.warn("[widget] Failed to create embedded browser:", err);
                 embeddedBrowserId.current = null;
+                useWidgetMetricsStore.getState().setBrowserState(metricsInstanceIdRef.current, false, null);
               });
           }
           post({ type: "t64:browser-ready", payload: { browserId: bid } });
@@ -499,6 +640,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
             embeddedBrowserId.current = null;
             lastBoundsRef.current = "";
             setBrowserActive(false);
+            useWidgetMetricsStore.getState().setBrowserState(metricsInstanceIdRef.current, false, null);
           }
           return;
 
@@ -632,10 +774,12 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
             if (timeout) clearTimeout(timeout);
             if (unlisten) unlisten();
             terminalReadyCleanupsRef.current.delete(cancel);
+            updateWidgetResourceMetrics();
             if (shouldRespond) respond();
           };
           const cancel = () => finish(false);
           terminalReadyCleanupsRef.current.add(cancel);
+          updateWidgetResourceMetrics();
           timeout = setTimeout(() => finish(true), 3000);
           onTerminalOutput((out) => {
             if (out.id === tid) finish(true);
@@ -796,6 +940,8 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           widgetBus.subscribe(topic, widgetId, (data) => {
             post({ type: "t64:broadcast", payload: { topic, data } });
           });
+          widgetBusSubscriptionsRef.current.add(topic);
+          updateWidgetResourceMetrics();
           return;
         }
 
@@ -803,6 +949,8 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           const { topic } = msg.payload || {};
           if (!topic || typeof topic !== "string") return;
           widgetBus.unsubscribe(topic, widgetId);
+          widgetBusSubscriptionsRef.current.delete(topic);
+          updateWidgetResourceMetrics();
           return;
         }
 
@@ -859,6 +1007,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           }).then((un) => {
             if (bridgeDisposed) { un(); return; }
             voiceUnlistenersRef.current.intent = un;
+            updateWidgetResourceMetrics();
           }).catch(() => {});
           return;
         }
@@ -870,6 +1019,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           }).then((un) => {
             if (bridgeDisposed) { un(); return; }
             voiceUnlistenersRef.current.partial = un;
+            updateWidgetResourceMetrics();
           }).catch(() => {});
           return;
         }
@@ -881,6 +1031,7 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
           }).then((un) => {
             if (bridgeDisposed) { un(); return; }
             voiceUnlistenersRef.current.final = un;
+            updateWidgetResourceMetrics();
           }).catch(() => {});
           return;
         }
@@ -918,10 +1069,17 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
 
     return () => {
       bridgeDisposed = true;
+      if (streamingTextFlushTimer) {
+        clearTimeout(streamingTextFlushTimer);
+        streamingTextFlushTimer = null;
+      }
+      pendingStreamingText.clear();
       unsub();
       iframe?.removeEventListener("load", onLoad);
       window.removeEventListener("message", handleMessage);
       widgetBus.unsubscribeAll(widgetId);
+      widgetBusSubscriptionsRef.current.clear();
+      sessionEventSubscriptionsRef.current.clear();
       for (const cleanup of terminalReadyCleanupsRef.current) {
         cleanup();
       }
@@ -931,12 +1089,14 @@ export default function WidgetPanel({ widgetId }: WidgetPanelProps) {
       try { vu.partial?.(); } catch { /* ignore */ }
       try { vu.final?.(); } catch { /* ignore */ }
       voiceUnlistenersRef.current = {};
+      updateWidgetResourceMetrics();
       for (const handle of pluginSubscriptionsRef.current.values()) {
         try { handle.close(); } catch { /* ignore */ }
       }
       pluginSubscriptionsRef.current.clear();
+      updateWidgetResourceMetrics();
     };
-  }, [widgetUrl, widgetId, syncBrowserBounds]);
+  }, [widgetUrl, widgetId, syncBrowserBounds, updateWidgetResourceMetrics]);
 
   if (error) {
     return (

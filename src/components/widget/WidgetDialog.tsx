@@ -107,12 +107,14 @@ window.parent.postMessage({ type: "t64:write-terminal", payload: { terminalId: t
 | \`t64:send-prompt\` | \`{ sessionId, prompt, id? }\` | \`t64:prompt-sent\` | \`{ id, error }\` |
 | \`t64:request-state\` | none | \`t64:state\` | \`{ sessions, activeTerminals, theme }\` |
 | \`t64:request-messages\` | \`{ sessionId }\` | \`t64:messages\` | \`{ sessionId, messages[] }\` |
+| \`t64:subscribe-session-events\` | \`{ events?: "all" \| string[] }\` | \`t64:session-events-subscribed\` | \`{ events[] }\` |
+| \`t64:unsubscribe-session-events\` | \`{ events?: "all" \| string[] }\` | \`t64:session-events-unsubscribed\` | \`{ events[] }\` |
 
 ---
 
 ### 5. REAL-TIME EVENTS — Listen to AI session activity
 
-Events pushed FROM Terminal 64 (listen with \`window.addEventListener("message", handler)\`):
+Session activity events are opt-in. Send \`t64:subscribe-session-events\` first with \`"all"\` or any of \`"session"\`, \`"message"\`, \`"tool-result"\`, \`"streaming"\`, \`"streaming-text"\`.
 
 | \`event.data.type\` | Payload | When |
 |---|---|---|

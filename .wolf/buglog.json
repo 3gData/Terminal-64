@@ -1234,7 +1234,7 @@
         "bug-053",
         "bug-060"
       ],
-      "occurrences": 3,
+      "occurrences": 4,
       "last_seen": "2026-04-28"
     },
     {
@@ -1243,7 +1243,7 @@
       "error_message": "npm run typecheck failed with missing names in src/hooks/useDelegationOrchestrator.ts and missing ProviderCreateRequest/ProviderSendRequest exports in src/lib/tauriApi.ts.",
       "file": "src/hooks/useDelegationOrchestrator.ts, src/lib/tauriApi.ts",
       "root_cause": "Concurrent provider runtime/IPC refactors removed or renamed direct IPC imports and generic provider IPC types while dependent files still referenced the old names.",
-    "fix": "Reported to the team because the failures were in files owned by concurrent Agent 1/Agent 2 work; after those concurrent provider runtime/IPC edits landed, npm run typecheck passed.",
+      "fix": "Reported to the team because the failures were in files owned by concurrent Agent 1/Agent 2 work; after those concurrent provider runtime/IPC edits landed, npm run typecheck passed.",
       "tags": [
         "typescript",
         "provider-runtime",
@@ -1464,6 +1464,101 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-075",
+      "timestamp": "2026-04-27T23:43:40.848Z",
+      "error_message": "npm run typecheck failed during parallel provider audit work: ClaudeChat queued prompt payload uses possibly undefined legacy text, and useDelegationOrchestrator references missing lifecycle completion export plus implicit any parameters.",
+      "file": "src/components/claude/ClaudeChat.tsx, src/hooks/useDelegationOrchestrator.ts",
+      "root_cause": "Parallel in-progress edits changed queued prompt and lifecycle completion APIs while Agent 2 was verifying refresh-from-history. The failing symbols are outside the authoritative refresh path.",
+      "fix": "Reported exact failures in team chat; parallel owners completed their queue/lifecycle fixes, and Agent 2 reran npm run typecheck successfully.",
+      "tags": [
+        "typecheck",
+        "parallel-work",
+        "queue",
+        "lifecycle",
+        "frontend"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28"
+    },
+    {
+      "id": "bug-076",
+      "timestamp": "2026-04-28T01:45:05+02:00",
+      "error_message": "npm run typecheck initially failed during lifecycle bus verification with ClaudeChat.tsx string | undefined queue errors from parallel work; rerun passed after concurrent edits settled.",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Parallel queued prompt payload edits temporarily left ClaudeChat with an undefined legacy text value at typecheck time while Agent 3 was verifying lifecycle bus changes.",
+      "fix": "Reported the failure in team chat, avoided touching the queue-owned file, and reran npm run typecheck after parallel edits settled; the command passed.",
+      "tags": [
+        "typecheck",
+        "parallel-work",
+        "queue",
+        "frontend",
+        "verification"
+      ],
+      "related_bugs": [
+        "bug-075"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T01:45:05+02:00"
+    },
+    {
+      "id": "bug-077",
+      "timestamp": "2026-04-28T01:49:00+02:00",
+      "error_message": "Rich queued prompt payloads preserved normal prompts but special commands still bypassed the queue while a turn was streaming.",
+      "file": "src/components/claude/ClaudeChat.tsx, src/stores/claudeStore.ts",
+      "root_cause": "ClaudeChat handled /loop, /reload-plugins, /delegate, and skill slash commands before the general streaming queue check, so those paths could still call actualSend during an active provider turn and lose transformed provider prompt metadata.",
+      "fix": "Added queued command metadata kinds for loop/reload/delegate-plan/skill; queued each special command's display text and transformed provider prompt when streaming; replay now restores delegate and loop side effects before sending.",
+      "tags": [
+        "queue",
+        "special-commands",
+        "provider-runtime",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-075"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T01:49:00+02:00"
+    },
+    {
+      "id": "bug-078",
+      "timestamp": "2026-04-28T02:05:00+02:00",
+      "error_message": "Terminal 64 still lagging heavily; user suspects a widget is memory leaking and needs per-widget diagnostics to debug it.",
+      "file": "src/stores/widgetMetricsStore.ts, src/components/widget/WidgetPanel.tsx, src/components/settings/SettingsPanel.tsx, src/components/settings/SettingsPanel.css",
+      "root_cause": "Widget panels had no host-side visibility into reload churn, bridge traffic, retained plugin/bus/voice/terminal subscriptions, embedded browser state, or optional widget self-reported metrics, making leaks hard to isolate.",
+      "fix": "Added a low-overhead widget metrics store, instrumented WidgetPanel with batched bridge traffic and resource counters, added t64:debug-metrics self-report support, and surfaced active/tracked widget diagnostics plus console snapshot logging in Settings.",
+      "tags": [
+        "widgets",
+        "performance",
+        "memory",
+        "diagnostics",
+        "frontend"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:05:00+02:00"
+    },
+    {
+      "id": "bug-079",
+      "timestamp": "2026-04-28T02:16:00+02:00",
+      "error_message": "Widget diagnostics showed every active widget receiving about 9k outbound bridge messages in 3 minutes, while the app still had a visible lag spike about every 5 seconds.",
+      "file": "src/components/widget/WidgetPanel.tsx, src/components/widget/WidgetDialog.tsx, src-tauri/bundled-widgets/project-intel/main.js, src/stores/widgetMetricsStore.ts, src/components/settings/SettingsPanel.tsx",
+      "root_cause": "WidgetPanel default-pushed live AI session updates, including token-level streaming text, into every iframe whether the widget asked for session events or not. The bundled project-intel widget also polled OpenWolf daemon status on a fixed 5000ms interval.",
+      "fix": "Made AI session bridge events opt-in via t64:subscribe-session-events, throttled streaming-text delivery for subscribers, tracked session-event subscriptions in widget diagnostics, documented the opt-in API, and changed project-intel daemon polling to a non-overlapping visibility-aware 30s timeout loop.",
+      "tags": [
+        "widgets",
+        "performance",
+        "postmessage",
+        "polling",
+        "frontend"
+      ],
+      "related_bugs": [
+        "bug-078"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T02:16:00+02:00"
     }
   ]
 }

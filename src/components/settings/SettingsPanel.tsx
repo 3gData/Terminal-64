@@ -10,6 +10,7 @@ import type { ThemeDefinition } from "../../lib/types";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useClaudeStore, STORAGE_KEY as CLAUDE_STORAGE_KEY } from "../../stores/claudeStore";
 import { useVoiceStore } from "../../stores/voiceStore";
+import { useWidgetMetricsStore, type WidgetMetrics } from "../../stores/widgetMetricsStore";
 import { downloadVoiceModel, voiceModelsStatus, onVoiceDownloadProgress, setVoiceSensitivity as setVoiceSensitivityBackend, type VoiceModelKind } from "../../lib/voiceApi";
 
 interface SettingsPanelProps {
@@ -41,6 +42,107 @@ function Section({ label, icon, children, defaultOpen = true }: { label: string;
       </button>
       {open && <div className="sp-section-body">{children}</div>}
     </div>
+  );
+}
+
+function formatBytes(bytes: number | null) {
+  if (bytes === null) return "n/a";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+function formatAge(at: number | null) {
+  if (at === null) return "n/a";
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
+}
+
+function shortPayload(payload: unknown) {
+  try {
+    const text = typeof payload === "string" ? payload : JSON.stringify(payload);
+    return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+  } catch {
+    return String(payload);
+  }
+}
+
+function widgetMetricTone(metrics: WidgetMetrics) {
+  if (metrics.bridgeErrorCount > 0) return "error";
+  if (metrics.reloadCount >= 5 || metrics.pluginSubscriptions >= 10 || metrics.busSubscriptions >= 10 || metrics.sessionEventSubscriptions >= 5 || metrics.voiceSubscriptions >= 3) return "warn";
+  return "ok";
+}
+
+function WidgetDebugSection() {
+  const widgetMetricsById = useWidgetMetricsStore((s) => s.widgets);
+  const clearWidgetMetrics = useWidgetMetricsStore((s) => s.clearWidgetMetrics);
+  const logWidgetMetricsSnapshot = useWidgetMetricsStore((s) => s.logWidgetMetricsSnapshot);
+  const widgetMetrics = Object.values(widgetMetricsById)
+    .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  const activeWidgetMetrics = widgetMetrics.filter((metrics) => metrics.unmountedAt === null);
+
+  return (
+    <Section label="Widget Debug" icon="▣" defaultOpen={false}>
+      <div className="sp-row sp-row--col">
+        <span className="sp-hint">
+          Host-side counters for widget panels. Heap is renderer-wide when Chromium exposes it; widgets can post t64:debug-metrics for their own numbers.
+        </span>
+        <div className="sp-row">
+          <span className="sp-value">{activeWidgetMetrics.length} active / {widgetMetrics.length} tracked</span>
+          <div className="sp-debug-actions">
+            <button className="sp-btn sp-btn--small" onClick={logWidgetMetricsSnapshot} disabled={widgetMetrics.length === 0}>
+              Log
+            </button>
+            <button className="sp-btn sp-btn--small" onClick={clearWidgetMetrics} disabled={widgetMetrics.length === 0}>
+              Reset
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {widgetMetrics.length === 0 ? (
+        <span className="sp-hint">No widget panels tracked yet.</span>
+      ) : (
+        <div className="sp-debug-list">
+          {widgetMetrics.map((metrics) => {
+            const tone = widgetMetricTone(metrics);
+            return (
+              <div className="sp-debug-card" key={metrics.instanceId} title={metrics.instanceId}>
+                <div className="sp-debug-head">
+                  <span className="sp-debug-title">{metrics.widgetId}</span>
+                  <span className={`sp-debug-status sp-debug-status--${tone}`}>
+                    {metrics.unmountedAt === null ? "active" : "closed"}
+                  </span>
+                </div>
+                <div className="sp-debug-grid">
+                  <span>age</span><strong>{formatAge(metrics.mountedAt)}</strong>
+                  <span>reloads</span><strong>{metrics.reloadCount}</strong>
+                  <span>loads</span><strong>{metrics.iframeLoadCount}</strong>
+                  <span>bridge</span><strong>{metrics.bridgeInCount}/{metrics.bridgeOutCount}</strong>
+                  <span>errors</span><strong>{metrics.bridgeErrorCount}</strong>
+                  <span>plugins</span><strong>{metrics.pluginSubscriptions}</strong>
+                  <span>bus</span><strong>{metrics.busSubscriptions}</strong>
+                  <span>session</span><strong>{metrics.sessionEventSubscriptions}</strong>
+                  <span>term waits</span><strong>{metrics.terminalWaiters}</strong>
+                  <span>voice</span><strong>{metrics.voiceSubscriptions}</strong>
+                  <span>browser</span><strong>{metrics.browserActive ? "on" : "off"}</strong>
+                  <span>heap</span><strong>{formatBytes(metrics.hostHeapUsedBytes)}</strong>
+                </div>
+                {metrics.lastWidgetReport && (
+                  <div className="sp-debug-report">
+                    <span>report {formatAge(metrics.lastWidgetReport.at)} ago</span>
+                    <code>{shortPayload(metrics.lastWidgetReport.payload)}</code>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Section>
   );
 }
 
@@ -347,6 +449,9 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               <Toggle checked={snapToGrid} onChange={(v) => setSetting({ snapToGrid: v })} />
             </div>
           </Section>
+
+          {/* Widget Debug */}
+          <WidgetDebugSection />
 
           {/* Background */}
           <Section label="Background" icon="▦">

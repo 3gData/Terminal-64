@@ -373,6 +373,113 @@
   max-width: 220px;
 }
 
+/* ---- Widget Debug ---- */
+
+.sp-debug-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sp-debug-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sp-debug-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  background: var(--bg-tertiary, #11111b);
+  border: 1px solid var(--border, #313244);
+  border-radius: 6px;
+}
+
+.sp-debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sp-debug-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-primary, #cdd6f4);
+}
+
+.sp-debug-status {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 9px;
+  border: 1px solid currentColor;
+}
+
+.sp-debug-status--ok {
+  color: #a6e3a1;
+}
+
+.sp-debug-status--warn {
+  color: #f9e2af;
+}
+
+.sp-debug-status--error {
+  color: #f38ba8;
+}
+
+.sp-debug-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: baseline;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+}
+
+.sp-debug-grid span {
+  color: var(--fg-muted, #6c7086);
+  min-width: 0;
+}
+
+.sp-debug-grid strong {
+  color: var(--fg-secondary, #bac2de);
+  font-weight: 600;
+  text-align: right;
+}
+
+.sp-debug-report {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(205, 214, 244, 0.08);
+}
+
+.sp-debug-report span {
+  font-size: 9px;
+  color: var(--fg-muted, #6c7086);
+}
+
+.sp-debug-report code {
+  display: block;
+  max-height: 46px;
+  overflow: hidden;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: var(--fg-secondary, #bac2de);
+  word-break: break-word;
+}
+
 /* ---- Sub-settings (nested group) ---- */
 
 .sp-sub {

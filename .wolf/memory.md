@@ -59,7 +59,7 @@
 > Consolidated session (0 actions)
 
 ## Session: 2026-04-20 04:00
-> Consolidated session (57 actions)
+> Consolidated session (0 actions)
 
 ## Session: 2026-04-27
 
@@ -167,6 +167,7 @@
 | 01:07 | Scanned delegation/agent harness for remaining modularity work | src/hooks/useDelegationOrchestrator.ts, src/hooks/useDelegationSpawn.ts, src/stores/delegationStore.ts, src/components/claude/DelegationDialog.tsx, mcp/*, src-tauri/src/permission_server.rs | Found remaining provider-neutralization opportunities around child lifecycle, team MCP prep, completion signals, and persistent delegation metadata | ~9000 |
 | 01:17 | Reviewed integrated delegation harness modularity batch | src/lib/delegationChildRuntime.ts, src/lib/delegationCompletion.ts, src/hooks/useDelegationOrchestrator.ts, src/stores/delegationStore.ts, mcp/delegation-common.mjs, provider runtime/history files | npm typecheck/build, cargo fmt/check/clippy, node --check MCP scripts, git diff --check, and buglog JSON parse pass; no code follow-up needed | ~12000 |
 | 01:25 | Reviewed three-agent improvement search batch | src/lib/delegationChildRuntime.ts, src/hooks/useChatSend.ts, src-tauri/src/permission_server.rs, src-tauri/src/lib.rs, mcp/delegation-common.mjs | npm typecheck/build, cargo fmt/check/clippy, node --check MCP scripts, git diff --check, and buglog JSON parse pass; remaining risks are queued prompt payload richness and authoritative history refresh | ~10000 |
+| 01:50 | Reviewed queue/history/lifecycle delegation batch and patched special-command queue replay | src/components/claude/ClaudeChat.tsx, src/stores/claudeStore.ts, src/lib/providerLifecycleBus.ts, src/lib/delegationCompletion.ts, .wolf/buglog.json, .wolf/cerebrum.md | Special commands now queue transformed provider prompts; npm typecheck/build, cargo fmt/check/clippy, node --check MCP scripts, git diff --check, and buglog JSON parse pass | ~16000 |
 | 01:10 | Read OpenWolf protocol, anatomy, and cerebrum before code inspection | .wolf/OPENWOLF.md, .wolf/anatomy.md, .wolf/cerebrum.md | requirements loaded | ~10800 |
 | 01:10 | Loaded OpenWolf session rules and searched delegation completion surfaces | .wolf/OPENWOLF.md, .wolf/anatomy.md, .wolf/cerebrum.md, src/hooks/useDelegationOrchestrator.ts | identified orchestrator as primary edit target | ~17000 |
 | 01:10 | Read OpenWolf protocol, anatomy summary, and cerebrum before MCP refactor | .wolf/OPENWOLF.md, .wolf/anatomy.md, .wolf/cerebrum.md | confirmed required workflow and provider/delegation constraints | ~10500 |
@@ -201,3 +202,18 @@
 | 01:24 | Patched backend MCP path joins and delegation HTTP validation caps | src-tauri/src/lib.rs, src-tauri/src/permission_server.rs, mcp/delegation-common.mjs | native path joins, 413/400 responses, per-group/read caps, sanitized read_team last | ~5000 |
 | 01:25 | Verified Agent 3 backend/MCP patch and recorded OpenWolf learning/bug entry | src-tauri, mcp/delegation-common.mjs, .wolf/buglog.json, .wolf/cerebrum.md | cargo fmt --check, cargo check, cargo clippy, node --check, diff check passed | ~2500 |
 | 01:23 | Audited provider/delegation modularity and centralized delegation MCP transport selection | src/lib/delegationChildRuntime.ts, src/lib/providerModularity.verification.ts | no-behavior-change helper added; build and typecheck passed; follow-ups identified | ~22000 |
+| 01:39 | Read OpenWolf guidance, anatomy, and cerebrum before scoped queue work | .wolf/anatomy.md, .wolf/OPENWOLF.md, .wolf/cerebrum.md | ready to inspect queued send path | ~9600 |
+| 01:39 | Read OpenWolf operating protocol, anatomy index, and cerebrum before implementation | .wolf/OPENWOLF.md, .wolf/anatomy.md, .wolf/cerebrum.md | guidance loaded | ~9900 |
+| 01:43 | Implemented authoritative refresh store path and wired refresh button; typecheck blocked by parallel queue/lifecycle edits | src/stores/claudeStore.ts, src/components/claude/ClaudeChat.tsx, .wolf/buglog.json | refresh code in place; verification errors reported to team | ~2100 |
+| 01:44 | Added cerebrum learning for authoritative refresh vs startup hydration behavior | .wolf/cerebrum.md | future sessions should preserve the split | ~120 |
+| 01:46 | Reran frontend typecheck after parallel queue/lifecycle fixes settled | package.json, src/** | npm run typecheck passed | ~100 |
+| 01:45 | Added provider-neutral lifecycle event bus and rewired delegation completion | src/lib/providerLifecycleBus.ts, src/lib/delegationCompletion.ts, src/hooks/useDelegationOrchestrator.ts | Claude Subagent hooks and provider turn transitions now publish shared lifecycle events; npm run typecheck passed after transient parallel failure | ~3500 |
+| 01:44 | Implemented rich prompt queue payloads and updated queue producers/drain path | src/stores/claudeStore.ts, src/hooks/useChatAttachments.ts, src/components/claude/ClaudeChat.tsx, src/hooks/useDelegationOrchestrator.ts, src/components/claude/DelegationBadge.tsx | ready for typecheck | ~1800 |
+| 01:46 | Added OpenWolf learning for rich prompt queue payload helpers | .wolf/cerebrum.md | recorded queue contract | ~80 |
+| 02:05 | Added low-overhead widget diagnostics store and Settings debug section | src/stores/widgetMetricsStore.ts, src/components/widget/WidgetPanel.tsx, src/components/settings/SettingsPanel.tsx, src/components/settings/SettingsPanel.css | widget panels now track reload/load churn, batched bridge traffic, retained subscriptions/listeners, browser state, renderer heap samples, and optional widget self-reports | ~5200 |
+| 02:05 | Recorded widget diagnostics anatomy, learning, and bug entry | .wolf/anatomy.md, .wolf/cerebrum.md, .wolf/buglog.json | future sessions know per-iframe heap limits and diagnostics contract; bug-078 logged | ~900 |
+| 02:07 | Verified widget diagnostics patch | src/stores/widgetMetricsStore.ts, src/components/widget/WidgetPanel.tsx, src/components/settings/SettingsPanel.tsx, src/components/settings/SettingsPanel.css | npm run typecheck, npm run build, git diff --check, and buglog JSON parse passed | ~600 |
+| 02:16 | Reduced widget bridge firehose and project-intel 5s polling | src/components/widget/WidgetPanel.tsx, src/components/widget/WidgetDialog.tsx, src/stores/widgetMetricsStore.ts, src/components/settings/SettingsPanel.tsx, src-tauri/bundled-widgets/project-intel/main.js | AI session events are now opt-in/throttled; project-intel daemon polling is non-overlapping, hidden-tab aware, and 30s cadence | ~4600 |
+| 02:16 | Logged widget performance root cause | .wolf/anatomy.md, .wolf/cerebrum.md, .wolf/buglog.json | anatomy covers settings/widget docs/project-intel; bug-079 and cerebrum learnings recorded | ~1200 |
+| 02:17 | Verified widget bridge firehose fix | src/components/widget/WidgetPanel.tsx, src-tauri/bundled-widgets/project-intel/main.js, .wolf/buglog.json | npm run typecheck, node --check, jq, git diff --check, and npm run build passed | ~700 |
+| 02:18 | Updated installed project-intel widget copy for the running app | ~/.terminal64/widgets/project-intel/main.js | running widget server can hot-reload the slower daemon polling loop without waiting for app restart | ~100 |

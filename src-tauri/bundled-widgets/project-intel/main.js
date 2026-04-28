@@ -100,7 +100,9 @@ let activePanel = "anatomy";
 let themeColors = {};
 let projectCwd = ".";
 let daemonPollTimer = null;
+let daemonPollInFlight = false;
 let lastDaemonInfo = null;
+const DAEMON_POLL_INTERVAL_MS = 30000;
 
 // Data caches
 let anatomyData = null;
@@ -182,16 +184,36 @@ async function syncDaemonToProject() {
 }
 
 function startDaemonPolling() {
-  if (daemonPollTimer) clearInterval(daemonPollTimer);
-  daemonPollTimer = setInterval(async () => {
+  if (daemonPollTimer) clearTimeout(daemonPollTimer);
+
+  const scheduleNext = () => {
+    daemonPollTimer = setTimeout(() => { void poll(); }, DAEMON_POLL_INTERVAL_MS);
+  };
+
+  const poll = async () => {
+    if (document.hidden || daemonPollInFlight) {
+      scheduleNext();
+      return;
+    }
+    daemonPollInFlight = true;
     try {
       lastDaemonInfo = await daemonInfo();
       renderDaemonStatus();
     } catch {
       renderDaemonStatus({ status: "unknown" });
+    } finally {
+      daemonPollInFlight = false;
+      scheduleNext();
     }
-  }, 5000);
+  };
+
+  scheduleNext();
 }
+
+window.addEventListener("beforeunload", () => {
+  if (daemonPollTimer) clearTimeout(daemonPollTimer);
+  daemonPollTimer = null;
+});
 
 function formatUptime(ms) {
   if (!ms || ms < 0) return "";
