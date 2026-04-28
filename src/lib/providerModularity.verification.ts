@@ -528,6 +528,15 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   assertEqual(createReq.collaboration_mode, "plan", "Codex create carries app-server collaboration mode");
   assertNoUndefinedOwnValues(createReq as unknown as Record<string, unknown>, "createReq");
 
+  const buildAfterPlanReq = buildCodexCreateRequest(providerInput({
+    codexCollaborationMode: "default",
+  }));
+  assertEqual(
+    buildAfterPlanReq.collaboration_mode,
+    "default",
+    "Codex build-after-plan requests explicitly exit plan collaboration mode",
+  );
+
   const sendReq = buildCodexSendRequest(
     providerInput({ threadId: "thread-1" }),
     createReq,

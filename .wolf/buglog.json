@@ -2305,6 +2305,76 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-04-28T10:06:01Z"
+    },
+    {
+      "id": "bug-119",
+      "timestamp": "2026-04-28T20:24:14+02:00",
+      "error_message": "Codex stayed in plan collaboration mode after the user clicked build-after-plan actions.",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Plan build actions relied on natural-language text like \"Plan mode is over\" instead of passing Codex app-server `collaboration_mode: \"default\"` through the provider turn payload.",
+      "fix": "Extended the chat send options path to carry explicit Codex collaboration mode for build-after-plan actions, set queued plan-build prompts to `default`, and added a runtime request-shaping regression assertion.",
+      "tags": [
+        "codex",
+        "plan-mode",
+        "collaboration-mode",
+        "provider-runtime"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T20:24:14+02:00"
+    },
+    {
+      "id": "bug-120",
+      "timestamp": "2026-04-28T20:24:14+02:00",
+      "error_message": "npm install @tauri-apps/plugin-updater @tauri-apps/plugin-process --package-lock-only failed with `getaddrinfo ENOTFOUND registry.npmjs.org`.",
+      "file": "package.json, package-lock.json",
+      "root_cause": "The sandbox has no DNS/network access to the npm registry, so npm could not fetch metadata for newly added frontend plugin packages.",
+      "fix": "Manually added the package.json dependencies and lockfile entries using published package metadata; local `npm run typecheck` still cannot resolve the modules until dependencies are installed with network access.",
+      "tags": [
+        "npm",
+        "network",
+        "tauri-updater",
+        "verification"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T20:24:14+02:00"
+    },
+    {
+      "id": "bug-121",
+      "timestamp": "2026-04-28T20:24:14+02:00",
+      "error_message": "npm run tauri signer generate -- --no-password -w /tmp/terminal64-updater.key failed with `unexpected argument '--no-password'`.",
+      "file": "src-tauri/tauri.conf.json",
+      "root_cause": "The installed Tauri CLI signer subcommand uses `--ci` to skip prompts; it does not support a `--no-password` flag.",
+      "fix": "Generated the updater keypair with `npm run tauri signer generate -- --ci -w /tmp/terminal64-updater.key` and used the generated public key in tauri.conf.json.",
+      "tags": [
+        "tauri",
+        "updater",
+        "signing-key",
+        "cli"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T20:24:14+02:00"
+    },
+    {
+      "id": "bug-122",
+      "timestamp": "2026-04-28T20:24:14+02:00",
+      "error_message": "cargo check --all-targets failed while updating crates.io index with `Could not resolve host: index.crates.io`.",
+      "file": "src-tauri/Cargo.toml",
+      "root_cause": "The sandbox has no DNS/network access to crates.io, and the new Tauri updater/process crates are not present in the local Cargo lock/cache.",
+      "fix": "Recorded the verification blocker; cargo fmt passed, but cargo check must be rerun in an environment that can fetch crates and update Cargo.lock.",
+      "tags": [
+        "cargo",
+        "network",
+        "tauri-updater",
+        "verification"
+      ],
+      "related_bugs": [
+        "bug-120"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T20:24:14+02:00"
     }
   ]
 }

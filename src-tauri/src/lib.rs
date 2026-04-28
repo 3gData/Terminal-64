@@ -5896,6 +5896,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let perm_server = PermissionServer::start(app.handle().clone()).map_err(|e| {
                 safe_eprintln!("[setup] Permission server failed to start: {}", e);

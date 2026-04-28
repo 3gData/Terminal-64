@@ -3,7 +3,8 @@ name: Release
 # Builds and publishes Terminal 64 installers for macOS (universal), Linux (x86_64), and Windows (x86_64).
 # Triggers on a semver tag push (v*.*.*) or manual dispatch.
 #
-# MVP scope: unsigned builds. See TODO markers below for signing + updater wiring.
+# App binaries remain OS-code-signing unsigned until Apple/Azure signing is configured.
+# Tauri updater artifacts are signed with Tauri's mandatory free updater key.
 
 on:
   push:
@@ -80,6 +81,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Verify updater public key
+        shell: bash
+        run: |
+          if grep -q "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY" src-tauri/tauri.conf.json; then
+            echo "Replace the updater pubkey in src-tauri/tauri.conf.json before publishing updater releases."
+            exit 1
+          fi
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -98,19 +107,15 @@ jobs:
           #   AZURE_TRUSTED_SIGNING_ENDPOINT, AZURE_CODE_SIGNING_ACCOUNT,
           #   AZURE_CERTIFICATE_PROFILE
           #
-          # TODO: Tauri updater
-          #   https://tauri.app/v2/guide/distribute/updater/
-          #   Generate a keypair with `tauri signer generate` and store:
-          #     TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-          #   Then enable the `updater` bundle target in tauri.conf.json and
-          #   publish a latest.json manifest alongside each release.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           releaseName: "Terminal 64 ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.platform.args }}
+          args: ${{ matrix.platform.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       - name: Collect bundle artifacts
         if: always()
@@ -119,13 +124,18 @@ jobs:
           mkdir -p dist-artifacts
           # macOS
           find src-tauri/target/universal-apple-darwin/release/bundle/dmg -maxdepth 1 -name "*.dmg" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
+          find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 \( -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \) -exec cp {} dist-artifacts/ \; 2>/dev/null || true
           # Linux
           find src-tauri/target/release/bundle/deb -maxdepth 1 -name "*.deb" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
           find src-tauri/target/release/bundle/appimage -maxdepth 1 -name "*.AppImage" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
+          find src-tauri/target/release/bundle/appimage -maxdepth 1 \( -name "*.AppImage.tar.gz" -o -name "*.AppImage.tar.gz.sig" -o -name "*.AppImage.sig" \) -exec cp {} dist-artifacts/ \; 2>/dev/null || true
           find src-tauri/target/release/bundle/rpm -maxdepth 1 -name "*.rpm" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
           # Windows
           find src-tauri/target/release/bundle/nsis -maxdepth 1 -name "*.exe" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
+          find src-tauri/target/release/bundle/nsis -maxdepth 1 -name "*.exe.sig" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
           find src-tauri/target/release/bundle/msi -maxdepth 1 -name "*.msi" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
+          find src-tauri/target/release/bundle/msi -maxdepth 1 -name "*.msi.sig" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
+          find src-tauri/target -name "latest.json" -exec cp {} dist-artifacts/ \; 2>/dev/null || true
           ls -la dist-artifacts || true
 
       - name: Upload bundle artifacts
@@ -167,3 +177,6 @@ jobs:
             release-assets/*.rpm
             release-assets/*.exe
             release-assets/*.msi
+            release-assets/*.tar.gz
+            release-assets/*.sig
+            release-assets/latest.json

@@ -19,6 +19,8 @@
     "core:webview:allow-webview-close",
     "core:webview:allow-webview-show",
     "core:webview:allow-webview-hide",
-    "dialog:default"
+    "dialog:default",
+    "process:default",
+    "updater:default"
   ]
 }

@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-04-28T10:00:00.536Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-04-28T16:00:00.967Z
 > Files: 519 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ./
@@ -52,35 +52,10 @@
 
 - `delegation-mcp-limitations.md` — Delegation MCP Limitations (~370 tok)
 - `provider-events.md` — Provider Event Contract (~507 tok)
-- `provider-picker-verification.md` — Empty Chat Provider Picker Verification (~918 tok)
+- `provider-picker-verification.md` — Empty Chat Provider Picker Verification (~1374 tok)
 - `provider-scaffold.md` — Provider Scaffold Guide (~742 tok)
 - `wake-training.md` — Training a Custom Wake Word ("T Six Four") (~2432 tok)
 - `widget-isolation-research.md` — Widget Isolation Research (~1086 tok)
-
-## src/components/widget/
-
-- `WidgetDialog.tsx` — Widget create/manage dialog with widget bridge API documentation and fresh widget creation flow (~18000 tok)
-- `useWidgetBridgeHost.ts` — Widget bridge host hook: handles iframe/native widget requests, resources, provider session bridge commands, and opt-in session event fanout (~36000 tok)
-
-## src/components/skill/
-
-- `SkillDialog.tsx` — Skill library create/browse dialog and skill-backed provider session creation flow (~16000 tok)
-
-## src/lib/
-
-- `providers.ts` — Provider manifests, provider id helpers, defaults, capability helpers, labels, and provider logo metadata (~18000 tok)
-- `providerRuntime.ts` — Provider-neutral runtime router for create/send/cancel/history operations (~6000 tok)
-- `tauriApi.ts` — Tauri IPC wrappers plus provider-neutral helper compatibility functions such as spawning sessions with prompts (~30000 tok)
-
-## src/stores/
-
-- `canvasStore.ts` — Zustand canvas/panel layout store for terminals, provider chats, widgets, browser panels, and active panel tracking (~15000 tok)
-- `claudeStore.ts` — Zustand provider session store with canonical providerState, compatibility mirrors, persistence, and provider lock/switch helpers (~45000 tok)
-
-## .wolf/
-
-- `buglog.json` — OpenWolf bug tracking log with top-level bugs array (~variable tok)
-- `memory.md` — OpenWolf session action log (~variable tok)
 
 ## mcp/
 
@@ -780,5 +755,3 @@
 - `__init__.py` (~34 tok)
 - `_build_config.py` — _build_config.py.in is converted into _build_config.py during the meson build process. (~569 tok)
 - `bokeh_renderer.py` — BokehRenderer: filled, grid, lines, mask + 5 more (~3954 tok)
-
-- `src-tauri/src/widget_instructions.rs` — Writes provider-readable Terminal 64 widget instructions into fresh widget folders as CLAUDE.md and AGENTS.md with no-overwrite semantics. (~6200 tok)

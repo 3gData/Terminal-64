@@ -53,6 +53,10 @@ function sessionProviderFor(sessionId: string): ProviderId {
 }
 
 type ProviderChatSessionView = Omit<ProviderSession, "streamingText">;
+type HandleSendOptions = {
+  fromDiscord?: boolean;
+  codexCollaborationMode?: "plan" | "default";
+};
 
 function canPickProviderBeforeStart(session: ProviderChatSessionView, hasStreamingText: boolean): boolean {
   const providerState = resolveSessionProviderState(session);
@@ -467,6 +471,9 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
   const supportsCompact = providerSupports(selectedProvider, "compact");
   const supportsHistoryFork = providerHistorySupports(selectedProvider, "fork");
   const supportsHistoryRewind = providerHistorySupports(selectedProvider, "rewind");
+  const planBuildCodexMode = selectedProvider === "openai"
+    ? ({ codexCollaborationMode: "default" } as const)
+    : undefined;
   const liveMcp = useProviderSessionStore((s) => s.sessions[sessionId]?.mcpServers);
   const [showFileTree, setShowFileTree] = useState(false);
   // Per-session model + effort persisted via the store. Falls back to the
@@ -797,7 +804,7 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
   }, [session?.activeLoop]);
 
   // Listen for Discord messages routed through the frontend pipeline
-  const handleSendRef = useRef<((text: string, permissionOverride?: PermissionMode, fromDiscord?: boolean) => Promise<void>) | null>(null);
+  const handleSendRef = useRef<((text: string, permissionOverride?: PermissionMode, opts?: HandleSendOptions) => Promise<void>) | null>(null);
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen<{ session_id: string; username: string; prompt: string }>(
@@ -807,7 +814,7 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
         const { username, prompt } = event.payload;
         const displayText = `[${username}]: ${prompt}`;
         if (handleSendRef.current) {
-          handleSendRef.current(displayText, undefined, true).catch((err) =>
+          handleSendRef.current(displayText, undefined, { fromDiscord: true }).catch((err) =>
             useProviderSessionStore.getState().setError(sessionId, String(err))
           );
         }
@@ -828,7 +835,8 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
   const rewindHistory = useChatRewind();
 
   const handleSend = useCallback(
-    async (text: string, permissionOverride?: PermissionMode, fromDiscord = false) => {
+    async (text: string, permissionOverride?: PermissionMode, opts?: HandleSendOptions) => {
+      const fromDiscord = opts?.fromDiscord ?? false;
       // Re-arm sticky so the user sees their own message + response.
       // MutationObserver will catch the DOM growth and do the actual
       // scroll after the new message is appended.
@@ -994,7 +1002,7 @@ Rules:
 
       let prompt = text;
       let displayPrompt = text;
-      let codexCollaborationMode: "plan" | "default" | undefined;
+      let codexCollaborationMode = opts?.codexCollaborationMode;
       const codexPlan = parseCodexPlanCommand(text, selectedProvider);
       if (codexPlan) {
         codexCollaborationMode = codexPlan.collaborationMode;
@@ -1732,6 +1740,7 @@ Rules:
                         displayText: buildPrompt,
                         providerPrompt: buildPrompt,
                         permissionOverride: "bypass_all",
+                        ...(planBuildCodexMode ? { codexCollaborationMode: planBuildCodexMode.codexCollaborationMode } : {}),
                         command: { kind: "plan-build", originalText: buildPrompt },
                       });
                       handleSend("/compact Keep the plan file and key decisions only. Discard everything else.", "bypass_all");
@@ -1742,7 +1751,8 @@ Rules:
                     selectPermissionId("bypass_all");
                     handleSend(
                       "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.",
-                      "bypass_all"
+                      "bypass_all",
+                      planBuildCodexMode,
                     );
                   }}
                   onToggleViewer={togglePlanViewer}
@@ -1892,7 +1902,8 @@ Rules:
                   selectPermissionId("accept_edits");
                   handleSend(
                     "Plan mode is over. You have full permissions now. Build the plan — execute every step described in the plan file. Do not skip anything.",
-                    "bypass_all"
+                    "bypass_all",
+                    planBuildCodexMode,
                   );
                 }}
                 onClose={clearPlanContent}

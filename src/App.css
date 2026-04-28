@@ -150,7 +150,9 @@ button:focus-visible {
 .header-update {
   display: flex;
   align-items: center;
+  justify-content: center;
   padding: 0 10px;
+  min-width: 58px;
   height: 24px;
   border: none;
   background: rgba(166, 227, 161, 0.12);
@@ -162,10 +164,29 @@ button:focus-visible {
   cursor: pointer;
   margin-right: 4px;
   transition: background 0.15s;
+  white-space: nowrap;
 }
 
-.header-update:hover {
+.header-update:hover:not(:disabled) {
   background: rgba(166, 227, 161, 0.2);
+}
+
+.header-update:disabled {
+  cursor: default;
+  opacity: 0.78;
+}
+
+.header-update--checking,
+.header-update--downloading,
+.header-update--installing,
+.header-update--restarting {
+  background: rgba(137, 180, 250, 0.12);
+  color: #89b4fa;
+}
+
+.header-update--failed {
+  background: rgba(243, 139, 168, 0.12);
+  color: #f38ba8;
 }
 
 .header-btn:hover {
@@ -268,4 +289,3 @@ button:focus-visible {
   font-family: 'Cascadia Code', Consolas, monospace;
   letter-spacing: 0.02em;
 }
-

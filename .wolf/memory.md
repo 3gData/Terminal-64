@@ -372,3 +372,6 @@
 | 12:07 | Hardened widget instruction command widget_id validation | src-tauri/src/lib.rs | rejects path-like IDs before writing instruction files | ~100 |
 | 12:07 | Re-ran targeted Rust test after widget_id validation | src-tauri/src/lib.rs src-tauri/src/widget_instructions.rs | cargo test widget_instructions passed | ~150 |
 | 12:08 | Cleaned old widget prompt and verified frontend types | src/components/widget/WidgetDialog.tsx; .wolf/cerebrum.md | Removed unused prompt block; `npm run typecheck` and `git diff --check -- WidgetDialog` passed | ~4200 |
+| 20:13 | read OpenWolf instructions and inspected updater/Codex entry points | .wolf/OPENWOLF.md, .wolf/cerebrum.md, src/lib/updater.ts, src/App.tsx, src/components/claude/ClaudeChat.tsx | implementation scope identified | ~20000 |
+| 20:23 | wired updater/process plugins and generated updater public key | src/lib/updater.ts, src/App.tsx, src-tauri/tauri.conf.json, /tmp/terminal64-updater.key.pub | updater install flow implemented; private key kept outside repo | ~12000 |
+| 20:24 | fixed Codex build-after-plan mode and ran verification | src/components/claude/ClaudeChat.tsx, src/lib/providerModularity.verification.ts, package deps, src-tauri/Cargo.toml | cargo fmt passed; typecheck/cargo check blocked by sandbox DNS for new deps | ~9000 |

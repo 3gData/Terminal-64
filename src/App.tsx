@@ -32,18 +32,73 @@ import {
   useProviderSessionStore,
   flushSave as flushProviderSessionSave,
 } from "./stores/claudeStore";
-import { checkForUpdate, type UpdateInfo } from "./lib/updater";
+import {
+  checkForUpdate,
+  downloadAndInstallUpdate,
+  relaunchApp,
+  type UpdateInfo,
+  type UpdateProgress,
+} from "./lib/updater";
 import "./App.css";
 
 const appWindow = getCurrentWindow();
 const isPopOut = new URLSearchParams(window.location.search).has("popout");
+
+type UpdateButtonState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "available"; update: UpdateInfo }
+  | { kind: "downloading"; update: UpdateInfo; progress: UpdateProgress }
+  | { kind: "installing"; update: UpdateInfo }
+  | { kind: "restarting"; update: UpdateInfo }
+  | { kind: "failed"; update: UpdateInfo; error: string };
+
+function updateButtonText(state: UpdateButtonState): string {
+  switch (state.kind) {
+    case "available":
+      return state.update.source === "tauri" ? `Update v${state.update.version}` : `v${state.update.version}`;
+    case "downloading":
+      return state.progress.percent === null ? "Downloading" : `${state.progress.percent}%`;
+    case "installing":
+      return "Installing";
+    case "restarting":
+      return "Restarting";
+    case "failed":
+      return "Update failed";
+    case "checking":
+      return "Checking";
+    case "idle":
+      return "";
+  }
+}
+
+function updateButtonTitle(state: UpdateButtonState): string {
+  switch (state.kind) {
+    case "available":
+      return state.update.source === "tauri"
+        ? `Install Terminal 64 v${state.update.version}`
+        : `Update available: v${state.update.version}. Open GitHub Releases.`;
+    case "downloading":
+      return "Downloading update";
+    case "installing":
+      return "Installing update";
+    case "restarting":
+      return "Restarting Terminal 64";
+    case "failed":
+      return state.error;
+    case "checking":
+      return "Checking for updates";
+    case "idle":
+      return "";
+  }
+}
 
 function App() {
   if (isPopOut) return <PopOutTerminal />;
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateButtonState>({ kind: "idle" });
   const [providerSessionDialogOpen, setProviderSessionDialogOpen] = useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = useState(false);
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
@@ -99,9 +154,60 @@ function App() {
   }, [anyOverlayOpen]);
 
   useEffect(() => {
-    checkForUpdate().then(setUpdate);
+    setUpdateState({ kind: "checking" });
+    checkForUpdate()
+      .then((available) => {
+        setUpdateState(available ? { kind: "available", update: available } : { kind: "idle" });
+      })
+      .catch((err) => {
+        console.warn("[updater] update check failed:", err);
+        setUpdateState({ kind: "idle" });
+      });
     ensureSkillsPlugin().catch(() => {});
   }, []);
+
+  const handleUpdateClick = async () => {
+    const current = updateState;
+    if (current.kind === "available" && current.update.source === "github") {
+      if (current.update.url) window.open(current.update.url);
+      return;
+    }
+    if (current.kind !== "available" && current.kind !== "failed") return;
+
+    const update = current.update;
+    if (update.source !== "tauri") {
+      if (update.url) window.open(update.url);
+      return;
+    }
+
+    try {
+      setUpdateState({
+        kind: "downloading",
+        update,
+        progress: { downloaded: 0, contentLength: 0, percent: null },
+      });
+      useCanvasStore.getState().saveSession();
+      flushProviderSessionSave();
+      useSettingsStore.getState().save();
+      await downloadAndInstallUpdate((progress) => {
+        setUpdateState(
+          progress.percent === 100
+            ? { kind: "installing", update }
+            : { kind: "downloading", update, progress },
+        );
+      });
+      setUpdateState({ kind: "installing", update });
+      useCanvasStore.getState().saveSession();
+      flushProviderSessionSave();
+      useSettingsStore.getState().save();
+      setUpdateState({ kind: "restarting", update });
+      await relaunchApp();
+    } catch (err) {
+      const message = String(err);
+      setUpdateState({ kind: "failed", update, error: message });
+      pushToast("Update failed", message);
+    }
+  };
 
   // Restore saved settings (theme, opacity) on startup
   useEffect(() => {
@@ -387,13 +493,14 @@ function App() {
 
         <div className="header-drag" data-tauri-drag-region />
 
-        {update && (
+        {updateState.kind !== "idle" && (
           <button
-            className="header-update"
-            onClick={() => window.open(update.url)}
-            title={`Update available: v${update.version}`}
+            className={`header-update header-update--${updateState.kind}`}
+            onClick={handleUpdateClick}
+            disabled={updateState.kind === "checking" || updateState.kind === "downloading" || updateState.kind === "installing" || updateState.kind === "restarting"}
+            title={updateButtonTitle(updateState)}
           >
-            v{update.version}
+            {updateButtonText(updateState)}
           </button>
         )}
 
