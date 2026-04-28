@@ -42,7 +42,7 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     // Seed the child store row before any async fork work. The new panel mounts
     // immediately after addClaudeTerminalAt; if ClaudeChat wins that race it will
     // create the session with the default Anthropic provider.
-    store.createSession(newPanel.terminalId, undefined, false, undefined, effectiveCwd, provider);
+    store.createSession(newPanel.terminalId, undefined, false, undefined, effectiveCwd, provider, true);
     store.setSelectedModel(newPanel.terminalId, providerState.selectedModel);
     store.setSelectedEffort(newPanel.terminalId, providerState.selectedEffort);
     store.setSelectedCodexPermission(newPanel.terminalId, openaiMetadata?.selectedCodexPermission ?? null);

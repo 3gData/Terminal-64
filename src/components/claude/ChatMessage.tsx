@@ -9,6 +9,7 @@ import {
   getProviderToolPaths,
 } from "../../contracts/providerEvents";
 import { readFileBase64 } from "../../lib/tauriApi";
+import { GROUPABLE_TOOLS } from "./toolGrouping";
 
 const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
 const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
@@ -619,8 +620,6 @@ function ToolCallCard({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: 
   );
 }
 
-const GROUPABLE_TOOLS = new Set(["Bash", "Read", "Grep", "Glob", "WebSearch", "WebFetch"]);
-
 function groupLabel(tcs: ToolCall[]): { icon: string; name: string; details: string } {
   const first = tcs[0]?.name;
   if (tcs.every((tc) => tc.name === first)) {
@@ -682,8 +681,6 @@ export function ToolGroupCard({ tcs }: { tcs: ToolCall[] }) {
     </div>
   );
 }
-
-export { GROUPABLE_TOOLS };
 
 function buildCopyText(message: ChatMessageType): string {
   if (message.role === "user") {

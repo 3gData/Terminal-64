@@ -199,6 +199,26 @@ function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) 
   if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
 }
 
+function resolveActiveProviderForWidgetBridge(): ProviderId | null {
+  const activeId = useCanvasStore.getState().activeTerminalId;
+  if (!activeId) return null;
+  const activeSession = useClaudeStore.getState().sessions[activeId];
+  return activeSession ? resolveSessionProviderState(activeSession).provider : null;
+}
+
+function resolveCreateSessionProvider(rawProvider: unknown, hasPrompt: boolean): {
+  provider: ProviderId;
+  providerLocked: boolean;
+} {
+  if (isProviderId(rawProvider)) {
+    return { provider: rawProvider, providerLocked: true };
+  }
+  if (hasPrompt) {
+    return { provider: resolveActiveProviderForWidgetBridge() ?? "anthropic", providerLocked: true };
+  }
+  return { provider: "anthropic", providerLocked: false };
+}
+
 export function useWidgetBridgeHost({
   widgetId,
   enabled,
@@ -717,13 +737,22 @@ export function useWidgetBridgeHost({
 
       case "t64:create-session": {
         const { cwd: sessCwd, name: sessName, prompt: sessPrompt, id: csId, provider: rawProvider } = msg.payload || {};
-        const provider: ProviderId = isProviderId(rawProvider) ? rawProvider : "anthropic";
+        const hasPrompt = typeof sessPrompt === "string" && sessPrompt.length > 0;
+        const { provider, providerLocked } = resolveCreateSessionProvider(rawProvider, hasPrompt);
         const panel = useCanvasStore.getState().addClaudeTerminalAt(
           sessCwd || ".", false, sessName || "Widget Session"
         );
         const sid = panel.terminalId;
-        useClaudeStore.getState().createSession(sid, sessName || "Widget Session", false, true, sessCwd || ".", provider);
-        if (sessPrompt) {
+        useClaudeStore.getState().createSession(
+          sid,
+          sessName || "Widget Session",
+          false,
+          true,
+          sessCwd || ".",
+          provider,
+          providerLocked,
+        );
+        if (hasPrompt) {
           setTimeout(() => {
             const store = useClaudeStore.getState();
             const createdSession = store.sessions[sid];

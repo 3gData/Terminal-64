@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { ChatMessage as ChatMessageData, ToolCall } from "../../lib/types";
-import { GROUPABLE_TOOLS } from "./ChatMessage";
+import { GROUPABLE_TOOLS } from "./toolGrouping";
 
 export type VisualRow =
   | { kind: "turnDivider"; key: string; dur: number }

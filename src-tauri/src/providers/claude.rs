@@ -554,14 +554,37 @@ impl ClaudeAdapter {
             req.mcp_config.as_deref().map(|s| &s[..s.len().min(80)])
         );
         let existing_jsonl = find_existing_claude_session_jsonl(&req.cwd, &resolved_id);
-        let session_flag = if existing_jsonl.is_some() {
+        let existing_jsonl_has_history = existing_jsonl
+            .as_ref()
+            .map(|_| match crate::load_session_history_impl(resolved_id.clone(), req.cwd.clone()) {
+                Ok(messages) => !messages.is_empty(),
+                Err(e) => {
+                    safe_eprintln!(
+                        "[claude] Failed to inspect existing JSONL for {}: {}; preserving resume behavior",
+                        resolved_id,
+                        e
+                    );
+                    true
+                }
+            })
+            .unwrap_or(false);
+        let session_flag = if existing_jsonl_has_history {
             "--resume"
         } else {
             "--session-id"
         };
-        if let Some(path) = existing_jsonl.as_ref() {
+        if let Some(path) = existing_jsonl
+            .as_ref()
+            .filter(|_| existing_jsonl_has_history)
+        {
             safe_eprintln!(
                 "[claude] Session id {} already has history at {}; using --resume for first visible turn",
+                resolved_id,
+                path.display()
+            );
+        } else if let Some(path) = existing_jsonl.as_ref() {
+            safe_eprintln!(
+                "[claude] Session id {} has JSONL at {} but no visible conversation; using --session-id",
                 resolved_id,
                 path.display()
             );
@@ -751,19 +774,11 @@ impl ProviderAdapter for ClaudeAdapter {
         let req: ClaudeHistoryTruncateRequest = serde_json::from_value(req)
             .map_err(|e| format!("Invalid Anthropic history truncate request: {}", e))?;
         if req.keep_messages == 0 {
-            let details = crate::truncate_session_jsonl_by_messages_impl(
-                req.session_id,
-                req.cwd,
-                req.keep_messages,
-            )?;
+            crate::delete_session_jsonl_impl(req.session_id, req.cwd)?;
             return Ok(serde_json::json!({
-                "status": details
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("applied"),
-                "method": "jsonl",
+                "status": "applied",
+                "method": "deleted_for_empty_rewind",
                 "resume_at_uuid": null,
-                "details": details,
             }));
         }
 

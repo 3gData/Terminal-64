@@ -37,7 +37,7 @@ export function useChatSend({
     ) => {
       const store = useClaudeStore.getState();
       const sess = store.sessions[sessionId];
-      const started = sess?.hasBeenStarted ?? false;
+      const started = (sess?.hasBeenStarted ?? false) && (sess?.promptCount ?? 0) > 0;
       const providerState = resolveSessionProviderState(sess);
       const provider = providerState.provider;
       const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);

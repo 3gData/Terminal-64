@@ -228,7 +228,7 @@ function App() {
           const terminals = useCanvasStore.getState().terminals;
           const newest = terminals[terminals.length - 1];
           if (newest?.panelType === "claude") {
-            useProviderSessionStore.getState().createSession(newest.terminalId, undefined, false, undefined, active.cwd, "openai");
+            useProviderSessionStore.getState().createSession(newest.terminalId, undefined, false, undefined, active.cwd, "openai", false);
           }
         }
       },
@@ -461,17 +461,18 @@ function App() {
       <ProviderSessionDialog
         isOpen={providerSessionDialogOpen}
         onClose={() => setProviderSessionDialogOpen(false)}
-        onConfirm={(cwd, _skip, sessionName, provider) => {
+        onConfirm={(cwd, _skip, sessionName, _provider) => {
           useCanvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
           {
             const terminals = useCanvasStore.getState().terminals;
             const newest = terminals[terminals.length - 1];
             if (newest?.panelType === "claude") {
               const sid = newest.terminalId;
-              // Pre-create the store session with the dialog's provider choice.
+              // Pre-create a blank unlocked session. The empty chat picker owns
+              // the pre-first-send provider choice; first send locks it.
               // The chat shell's createSession effect is idempotent, so this
-              // primes the provider before it can fall back to Anthropic.
-              useProviderSessionStore.getState().createSession(sid, sessionName, false, undefined, cwd, provider);
+              // primes name/cwd before the panel mounts.
+              useProviderSessionStore.getState().createSession(sid, sessionName, false, undefined, cwd, "anthropic", false);
               if (sessionName) {
                 // Auto-link to Discord (silently fails if bot not running)
                 linkSessionToDiscord(sid, sessionName, cwd).catch(() => {});
@@ -498,7 +499,7 @@ function App() {
           }
           const effectiveCwd = savedCwd || dialogCwd || ".";
           useCanvasStore.getState().addClaudeTerminal(effectiveCwd, false, name || undefined, sessionId);
-          useProviderSessionStore.getState().createSession(sessionId, name, false, undefined, effectiveCwd, provider);
+          useProviderSessionStore.getState().createSession(sessionId, name, false, undefined, effectiveCwd, provider, true);
           if (provider === "openai") {
             useProviderSessionStore.getState().setCodexThreadId(sessionId, sessionId);
           }

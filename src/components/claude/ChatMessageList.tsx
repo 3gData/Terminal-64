@@ -12,9 +12,17 @@ import {
   type WheelEventHandler,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { getProviderManifest, type ProviderId } from "../../lib/providers";
+import { getProviderManifest, listProviderManifests, type ProviderId } from "../../lib/providers";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { formatDuration } from "../../lib/constants";
+import { ProviderLogo } from "../ui/BrandLogos";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "../ui/DropdownMenu";
 import ChatMessage, { ToolGroupCard } from "./ChatMessage";
 import PromptIsland from "./PromptIsland";
 import type { UserPromptRow, VisualRow } from "./useChatRows";
@@ -92,6 +100,56 @@ interface ChatMessageListProps {
   onRewind?: (messageId: string, content: string) => void;
   onFork?: (messageId: string) => void;
   onEditClick: (tcId: string, filePath: string, oldStr: string, newStr: string) => void;
+  providerPickerUnlocked?: boolean;
+  onSelectProvider?: (provider: ProviderId) => void;
+}
+
+function EmptyProviderState({
+  provider,
+  unlocked,
+  onSelectProvider,
+}: {
+  provider: ProviderId;
+  unlocked: boolean;
+  onSelectProvider?: ((provider: ProviderId) => void) | undefined;
+}) {
+  const providerCfg = getProviderManifest(provider);
+
+  return (
+    <div className="cc-empty">
+      <div className="cc-empty-provider-icon">
+        <ProviderLogo provider={provider} size={32} />
+      </div>
+      {unlocked && onSelectProvider ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="cc-empty-provider-trigger" aria-label="Choose provider">
+              <ProviderLogo provider={provider} size={14} />
+              <span>{providerCfg.ui.emptyStateLabel}</span>
+              <span className="cc-empty-provider-chev">▾</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="center" className="cc-provider-picker-menu">
+            <DropdownMenuLabel>Provider</DropdownMenuLabel>
+            {listProviderManifests().map((manifest) => (
+              <DropdownMenuItem
+                key={manifest.id}
+                active={manifest.id === provider}
+                onSelect={() => onSelectProvider(manifest.id)}
+              >
+                <ProviderLogo provider={manifest.id} size={14} className="shadcn-menu-icon" />
+                <span className="shadcn-menu-text">{manifest.ui.emptyStateLabel}</span>
+                <span className="shadcn-menu-check">{manifest.id === provider ? "✓" : ""}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : (
+        <span className="cc-empty-text">{providerCfg.ui.emptyStateLabel}</span>
+      )}
+      <span className="cc-empty-sub">Send a message, type / for commands, or drop files</span>
+    </div>
+  );
 }
 
 export default function ChatMessageList({
@@ -119,6 +177,8 @@ export default function ChatMessageList({
   onRewind,
   onFork,
   onEditClick,
+  providerPickerUnlocked = false,
+  onSelectProvider,
 }: ChatMessageListProps) {
   const renderRow = useCallback(
     (_idx: number, row: VisualRow) => {
@@ -175,15 +235,11 @@ export default function ChatMessageList({
     <div className="cc-scroll-frame">
       {!hasMessages ? (
         <div className="cc-messages">
-          <div className="cc-empty">
-            <div className="cc-empty-icon">
-              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                <path d="M5 24L13 8L21 18L27 10" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </div>
-            <span className="cc-empty-text">{getProviderManifest(provider).ui.emptyStateLabel}</span>
-            <span className="cc-empty-sub">Send a message, type / for commands, or drop files</span>
-          </div>
+          <EmptyProviderState
+            provider={provider}
+            unlocked={providerPickerUnlocked}
+            onSelectProvider={onSelectProvider}
+          />
         </div>
       ) : (
         <LegendList<VisualRow>

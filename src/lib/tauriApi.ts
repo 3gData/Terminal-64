@@ -659,6 +659,10 @@ export async function createWidgetFolder(widgetId: string): Promise<string> {
   return invoke("create_widget_folder", { widgetId });
 }
 
+export async function writeWidgetInstructionFiles(widgetId: string): Promise<string[]> {
+  return invoke("write_widget_instruction_files", { widgetId });
+}
+
 export async function listWidgetFolders(): Promise<WidgetInfo[]> {
   return invoke("list_widget_folders");
 }
@@ -1033,7 +1037,7 @@ export function spawnProviderSessionWithPrompt(
 
   const sid = sessionPanel.terminalId;
   const skip = options?.skipOpenwolf;
-  claudeStore.getState().createSession(sid, sessionName, false, skip, cwd, provider);
+  claudeStore.getState().createSession(sid, sessionName, false, skip, cwd, provider, true);
   claudeStore.getState().addUserMessage(sid, prompt);
   // Small delay so the chat panel mounts and event listeners are ready.
   setTimeout(() => {

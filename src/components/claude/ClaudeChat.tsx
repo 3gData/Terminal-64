@@ -52,6 +52,26 @@ function sessionProviderFor(sessionId: string): ProviderId {
   return selectSessionProvider(sessionId);
 }
 
+type ProviderChatSessionView = Omit<ProviderSession, "streamingText">;
+
+function canPickProviderBeforeStart(session: ProviderChatSessionView, hasStreamingText: boolean): boolean {
+  const providerState = resolveSessionProviderState(session);
+  const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
+  return session.providerLocked === false
+    && !hasStreamingText
+    && !session.hasBeenStarted
+    && session.promptCount === 0
+    && session.messages.length === 0
+    && session.promptQueue.length === 0
+    && !session.isStreaming
+    && !session.pendingPermission
+    && !session.pendingQuestions
+    && !providerState.seedTranscript
+    && !session.resumeAtUuid
+    && !session.forkParentSessionId
+    && !openAiMetadata?.codexThreadId;
+}
+
 async function cancelByProvider(sessionId: string, provider: ProviderId): Promise<void> {
   return cancelProviderSession(sessionId, provider);
 }
@@ -477,6 +497,10 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
     setSelectedEffort(id);
     useSettingsStore.getState().set({ claudeEffort: id });
   }, [setSelectedEffort]);
+  const handleSelectPreStartProvider = useCallback((provider: ProviderId) => {
+    if (provider === selectedProvider) return;
+    useProviderSessionStore.getState().switchProviderBeforeStart(sessionId, provider);
+  }, [selectedProvider, sessionId]);
   const {
     permissionId: selectedProviderPermissionId,
     permissionMode,
@@ -1503,6 +1527,7 @@ Rules:
   if (!session) return <div className="cc-container cc-loading">Initializing...</div>;
 
   const hasMessages = session.messages.length > 0 || hasStreamingText;
+  const providerPickerUnlocked = !hasMessages && canPickProviderBeforeStart(session, hasStreamingText);
   const providerPermissionInputProps = buildProviderPermissionInputProps({
     provider: selectedProvider,
     permissionId: selectedProviderPermissionId,
@@ -1646,6 +1671,8 @@ Rules:
               sessionId={sessionId}
               provider={selectedProvider}
               hasMessages={hasMessages}
+              providerPickerUnlocked={providerPickerUnlocked}
+              {...(providerPickerUnlocked ? { onSelectProvider: handleSelectPreStartProvider } : {})}
               prompts={userPrompts}
               isScrolledUp={isScrolledUp}
               scrollProgress={scrollProgress}

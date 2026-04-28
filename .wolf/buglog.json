@@ -2178,6 +2178,133 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-04-28T07:47:09+02:00"
+    },
+    {
+      "id": "bug-112",
+      "timestamp": "2026-04-28T08:27:56+02:00",
+      "error_message": "After an empty Claude rewind, the chat wiped fully empty and follow-up sends failed with `No conversation found with session ID`.",
+      "file": "src-tauri/src/providers/claude.rs, src/hooks/useChatSend.ts, src/stores/claudeStore.ts",
+      "root_cause": "The `keep_messages=0` fallback still physically truncated Claude JSONL into a file with no visible conversation, while the frontend could keep treating the session as already started and send `--resume` against that invalid file.",
+      "fix": "Changed empty Claude rewind to delete the session JSONL, made zero-prompt sessions route through fresh create, made truncateFromMessage clear hasBeenStarted when promptCount reaches zero, and made Claude create ignore existing JSONL files that contain no visible conversation records.",
+      "tags": [
+        "claude",
+        "rewind",
+        "empty-rewind",
+        "jsonl",
+        "resume"
+      ],
+      "related_bugs": [
+        "bug-111"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T08:27:56+02:00"
+    },
+    {
+      "id": "bug-113",
+      "timestamp": "2026-04-28T08:27:56+02:00",
+      "error_message": "Vite Fast Refresh invalidated `ChatMessage.tsx` because its `GROUPABLE_TOOLS` export was incompatible with consistent component exports.",
+      "file": "src/components/claude/ChatMessage.tsx, src/components/claude/useChatRows.ts, src/components/claude/toolGrouping.ts",
+      "root_cause": "A React component module exported a non-component Set used by row construction, which violates vite-plugin-react's Fast Refresh export expectations.",
+      "fix": "Moved `GROUPABLE_TOOLS` into a small `toolGrouping.ts` helper module and updated chat message/row imports.",
+      "tags": [
+        "vite",
+        "hmr",
+        "fast-refresh",
+        "chatmessage"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T08:27:56+02:00"
+    },
+    {
+      "id": "bug-114",
+      "timestamp": "2026-04-28T08:40:00+02:00",
+      "error_message": "Claude rewind failed with `No transcript leaf found in JSONL` after a normal short chat.",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "Claude JSONL can contain attachment and hook records after assistant messages and between transcript messages. The rewind cursor lookup counted every record's parentUuid as a child, so a Stop-hook attachment made the latest assistant look non-leaf, while attachment-skipping chain parsing could also lose valid transcript ancestors.",
+      "fix": "Changed rewind cursor and active-history parsing to choose leaves using only user/assistant transcript references, while still recording all UUID parent links so chain traversal can pass through Claude attachment nodes.",
+      "tags": [
+        "claude",
+        "rewind",
+        "jsonl",
+        "attachments",
+        "resume-session-at"
+      ],
+      "related_bugs": [
+        "bug-111",
+        "bug-112"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T08:40:00+02:00"
+    },
+    {
+      "id": "bug-115",
+      "timestamp": "2026-04-28T11:26:00+02:00",
+      "error_message": "npm run typecheck failed with `src/components/claude/ClaudeChat.tsx(1528,77): ... Property 'streamingText' is missing ... but required in type 'ProviderSession'.`",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "A ProviderSession-shaped object literal in the empty-chat provider picker UI path omits the required streamingText field.",
+      "fix": "Reported to the team because ClaudeChat.tsx was owned by Agent 2 for the UI patch; a subsequent combined `npm run typecheck` passed after the UI shape was corrected.",
+      "tags": [
+        "typescript",
+        "provider-session",
+        "empty-chat-picker",
+        "team-coordination"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T11:26:00+02:00"
+    },
+    {
+      "id": "bug-116",
+      "timestamp": "2026-04-28T11:27:22+02:00",
+      "error_message": "npm run typecheck failed with `src/components/claude/ClaudeChat.tsx(1528,77): ... Property 'streamingText' is missing ... but required in type 'ProviderSession'.`",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "ProviderChat's shallow selector intentionally omits streamingText from the session object to avoid whole-chat rerenders during token streaming, but the new provider-picker eligibility helper required a full ProviderSession.",
+      "fix": "Changed the helper to accept the render-time session view (`Omit<ProviderSession, \"streamingText\">`) and kept streaming status as the separate boolean it already consumed.",
+      "tags": [
+        "typescript",
+        "provider-session",
+        "empty-chat-picker",
+        "selector-shape"
+      ],
+      "related_bugs": [
+        "bug-115"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T11:27:22+02:00"
+    },
+    {
+      "id": "bug-117",
+      "timestamp": "2026-04-28T11:27:00+02:00",
+      "error_message": "npx tsc --noEmit --pretty false failed with `src/stores/claudeStore.ts(1170,13): error TS2451: Cannot redeclare block-scoped variable 'providerState'.` and the same error at line 1188.",
+      "file": "src/stores/claudeStore.ts",
+      "root_cause": "The pre-start provider switch guard introduced a `providerState` constant, then the same block declared another `providerState` for the replacement defaults.",
+      "fix": "Renamed the replacement default state variable to `nextProviderState` and passed it as `providerState: nextProviderState`.",
+      "tags": [
+        "typescript",
+        "provider-lock",
+        "claudeStore"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T11:27:00+02:00"
+    },
+    {
+      "id": "bug-118",
+      "timestamp": "2026-04-28T10:06:01Z",
+      "error_message": "Widget bridge `t64:create-session` always defaulted invalid/missing providers to Anthropic and created provider-locked sessions, so no-prompt/no-provider widget requests could not open an unlocked empty chat.",
+      "file": "src/components/widget/useWidgetBridgeHost.ts",
+      "root_cause": "The bridge resolved `provider` with `isProviderId(rawProvider) ? rawProvider : \"anthropic\"` and passed a locked session creation path regardless of whether the widget supplied a prompt or explicit provider.",
+      "fix": "Added bridge-specific provider resolution: explicit provider payloads lock to that provider, prompt-only requests inherit the active provider or fall back to Anthropic and lock, and blank requests create an Anthropic-initialized but provider-unlocked empty chat.",
+      "tags": [
+        "widget-bridge",
+        "provider-lock",
+        "empty-chat-picker",
+        "create-session"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T10:06:01Z"
     }
   ]
 }

@@ -416,7 +416,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
                     const panels = useCanvasStore.getState().terminals;
                     const newChat = panels[panels.length - 1];
                     if (newChat?.panelType === "claude") {
-                      useProviderSessionStore.getState().createSession(newChat.terminalId, `Widget: ${term.title}`);
+                      useProviderSessionStore.getState().createSession(newChat.terminalId, `Widget: ${term.title}`, false, undefined, folderPath, "anthropic", true);
                     }
                   }).catch(() => {});
                 }

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, spawnProviderSessionWithPrompt, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
+import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, writeWidgetInstructionFiles, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
+import { useClaudeStore } from "../../stores/claudeStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { pushToast } from "../../lib/notifications";
 import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
@@ -16,237 +16,6 @@ import {
   type ApprovalRecord,
 } from "../../lib/pluginManifest";
 import "./Widget.css";
-
-const WIDGET_SYSTEM_PROMPT = `You are building a widget for Terminal 64, a canvas-based terminal emulator.
-
-A "widget" is a web panel that lives inside Terminal 64. Your job is to create files in this folder (starting with \`index.html\`) that Terminal 64 will hot-load into an iframe via a local HTTP server.
-
-**Rules:**
-- The entry point is always \`index.html\` — Terminal 64 loads it automatically
-- You can use MULTIPLE files: separate CSS, JS, images, JSON, sub-pages — anything served over HTTP works. Use relative paths (e.g. \`<script src="app.js">\`, \`<link href="style.css">\`)
-- The iframe is sandboxed with \`allow-scripts allow-same-origin allow-popups allow-forms allow-modals\` and has camera/microphone/geolocation/clipboard permissions
-- You CAN use external CDN imports, embed external iframes, and fetch from APIs
-- Terminal 64 auto-reloads the iframe whenever ANY file in the widget folder changes
-- Make it visually polished — use good typography, spacing, and color
-- The widget should be responsive and look good at any size (the user can resize the panel)
-- For simple widgets, a single \`index.html\` with inline CSS/JS is fine. For complex widgets, split into multiple files
-
-## Terminal 64 Widget API (postMessage bridge)
-
-Widgets communicate with Terminal 64 via \`window.parent.postMessage(msg, "*")\` and listen for responses via \`window.addEventListener("message", handler)\`. All async operations return results via response events. Include an \`id\` field in your payload to correlate requests with responses.
-
-\`\`\`js
-// Reusable helper — use this for all async bridge calls
-function t64(type, payload = {}) {
-  return new Promise((resolve) => {
-    const id = Math.random().toString(36).slice(2);
-    const handler = (e) => {
-      if (e.data?.payload?.id === id) {
-        window.removeEventListener("message", handler);
-        resolve(e.data.payload);
-      }
-    };
-    window.addEventListener("message", handler);
-    window.parent.postMessage({ type, payload: { ...payload, id } }, "*");
-  });
-}
-\`\`\`
-
----
-
-### 1. SHELL / SYSTEM — Run any command
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:exec\` | \`{ command, cwd?, id? }\` | \`t64:exec-result\` | \`{ id, stdout, stderr, code }\` |
-
-\`\`\`js
-const result = await t64("t64:exec", { command: "git log --oneline -20" });
-const ls = await t64("t64:exec", { command: "ls -la", cwd: "/Users/me/projects" });
-\`\`\`
-
----
-
-### 2. FILE SYSTEM — Read, write, list, search, delete
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:read-file\` | \`{ path, id? }\` | \`t64:file-content\` | \`{ id, path, content, error }\` |
-| \`t64:write-file\` | \`{ path, content, id? }\` | \`t64:file-written\` | \`{ id, path, error }\` |
-| \`t64:list-dir\` | \`{ path, id? }\` | \`t64:dir-listing\` | \`{ id, path, entries[], error }\` |
-| \`t64:search-files\` | \`{ cwd, query, id? }\` | \`t64:search-results\` | \`{ id, results[], error }\` |
-| \`t64:delete-files\` | \`{ paths[], id? }\` | \`t64:files-deleted\` | \`{ id, error }\` |
-
-\`\`\`js
-const file = await t64("t64:read-file", { path: "/Users/me/project/src/main.ts" });
-const dir = await t64("t64:list-dir", { path: "/Users/me/project/src" });
-// dir.entries = [{ name, is_dir, size, modified }, ...]
-\`\`\`
-
----
-
-### 3. TERMINAL — Create and control interactive terminals
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:create-terminal\` | \`{ cwd?, id? }\` | \`t64:terminal-created\` | \`{ id, terminalId }\` |
-| \`t64:write-terminal\` | \`{ terminalId, data }\` | none (fire & forget) | — |
-
-\`\`\`js
-const term = await t64("t64:create-terminal", { cwd: "/Users/me/project" });
-window.parent.postMessage({ type: "t64:write-terminal", payload: { terminalId: term.terminalId, data: "npm run dev\\r" } }, "*");
-\`\`\`
-
----
-
-### 4. AI SESSIONS — Create sessions and send prompts
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:create-session\` | \`{ cwd?, name?, prompt?, provider?, id? }\` | \`t64:session-spawned\` | \`{ id, sessionId }\` |
-| \`t64:send-prompt\` | \`{ sessionId, prompt, id? }\` | \`t64:prompt-sent\` | \`{ id, error }\` |
-| \`t64:request-state\` | none | \`t64:state\` | \`{ sessions, activeTerminals, theme }\` |
-| \`t64:request-messages\` | \`{ sessionId }\` | \`t64:messages\` | \`{ sessionId, messages[] }\` |
-| \`t64:subscribe-session-events\` | \`{ events?: "all" \| string[] }\` | \`t64:session-events-subscribed\` | \`{ events[] }\` |
-| \`t64:unsubscribe-session-events\` | \`{ events?: "all" \| string[] }\` | \`t64:session-events-unsubscribed\` | \`{ events[] }\` |
-
----
-
-### 5. REAL-TIME EVENTS — Listen to AI session activity
-
-Session activity events are opt-in. Send \`t64:subscribe-session-events\` first with \`"all"\` or any of \`"session"\`, \`"message"\`, \`"tool-result"\`, \`"streaming"\`, \`"streaming-text"\`.
-
-| \`event.data.type\` | Payload | When |
-|---|---|---|
-| \`t64:init\` | \`{ sessions, activeTerminals, theme }\` | On iframe load — full app state snapshot |
-| \`t64:state\` | Same as init | Response to \`t64:request-state\` |
-| \`t64:message\` | \`{ sessionId, messageId, role, content, toolCalls[] }\` | New message in any AI session |
-| \`t64:tool-result\` | \`{ sessionId, toolCallId, toolName, input, result, isError }\` | Tool call completed |
-| \`t64:streaming\` | \`{ sessionId, isStreaming }\` | A specific session starts/stops streaming |
-| \`t64:any-streaming\` | \`{ isStreaming }\` | True if ANY session is currently streaming |
-| \`t64:streaming-text\` | \`{ sessionId, text }\` | Live streaming text update |
-| \`t64:messages\` | \`{ sessionId, messages[] }\` | Response to \`t64:request-messages\` |
-| \`t64:session-created\` | \`{ sessionId, name, cwd }\` | New session created |
-
----
-
-### 6. EMBEDDED BROWSER — Load any webpage inside the widget
-
-| Request | Payload | Response |
-|---|---|---|
-| \`t64:embed-browser\` | \`{ url }\` | \`t64:browser-ready { browserId }\` |
-| \`t64:navigate-browser\` | \`{ url }\` | — |
-| \`t64:show-browser\` / \`t64:hide-browser\` | none | — |
-| \`t64:eval-browser\` | \`{ js }\` | — |
-| \`t64:close-browser\` | none | — |
-| \`t64:open-url\` | \`{ url, title? }\` | Opens a separate browser panel on canvas |
-
----
-
-### 7. FETCH PROXY — Bypass CORS restrictions
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:fetch\` | \`{ url, method?, headers?, body?, id? }\` | \`t64:fetch-result\` | \`{ id, status, ok, headers, body, is_base64, error }\` |
-
-Fetches any URL through the Rust backend, bypassing CORS. Binary responses are returned as base64 (\`is_base64: true\`). Max 50MB.
-
-\`\`\`js
-const res = await t64("t64:fetch", { url: "https://api.github.com/repos/owner/repo", headers: { "Accept": "application/json" } });
-const data = JSON.parse(res.body);
-\`\`\`
-
----
-
-### 8. PERSISTENT STATE — Save data across reloads
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:get-state\` | \`{ key?, id? }\` | \`t64:state-value\` | \`{ id, key, value, error }\` |
-| \`t64:set-state\` | \`{ key, value, id? }\` | \`t64:state-saved\` | \`{ id, error }\` |
-| \`t64:clear-state\` | \`{ id? }\` | \`t64:state-cleared\` | \`{ id, error }\` |
-
-State is stored per-widget in \`~/.terminal64/widgets/{id}/state.json\`. Omit \`key\` in get-state to retrieve all keys.
-
-\`\`\`js
-await t64("t64:set-state", { key: "lastQuery", value: "SELECT * FROM users" });
-const saved = await t64("t64:get-state", { key: "lastQuery" });
-// saved.value === "SELECT * FROM users"
-\`\`\`
-
----
-
-### 9. FILE OPEN — Open files in the Monaco editor overlay
-
-| Request | Payload | Response |
-|---|---|---|
-| \`t64:open-file\` | \`{ path }\` | — (opens in first available AI session's editor) |
-
-\`\`\`js
-window.parent.postMessage({ type: "t64:open-file", payload: { path: "/Users/me/project/src/main.ts" } }, "*");
-\`\`\`
-
----
-
-### 10. SYSTEM NOTIFICATIONS — macOS native alerts
-
-| Request | Payload | Response event | Response payload |
-|---|---|---|---|
-| \`t64:notify\` | \`{ title, body?, id? }\` | \`t64:notify-result\` | \`{ id, error }\` |
-
-\`\`\`js
-await t64("t64:notify", { title: "Build Complete", body: "No errors found" });
-\`\`\`
-
----
-
-### 11. INTER-WIDGET COMMUNICATION — Pub/sub between widgets
-
-| Request | Payload | Response |
-|---|---|---|
-| \`t64:subscribe\` | \`{ topic }\` | Receives \`t64:broadcast\` events with \`{ topic, data }\` |
-| \`t64:unsubscribe\` | \`{ topic }\` | — |
-| \`t64:broadcast\` | \`{ topic, data }\` | Sent to all OTHER widgets subscribed to that topic |
-
-\`\`\`js
-// Widget A: subscribe to "data-updates"
-window.parent.postMessage({ type: "t64:subscribe", payload: { topic: "data-updates" } }, "*");
-window.addEventListener("message", (e) => {
-  if (e.data?.type === "t64:broadcast" && e.data.payload?.topic === "data-updates") {
-    console.log("Got update:", e.data.payload.data);
-  }
-});
-
-// Widget B: broadcast to all subscribers
-window.parent.postMessage({ type: "t64:broadcast", payload: { topic: "data-updates", data: { count: 42 } } }, "*");
-\`\`\`
-
----
-
-### Theme colors (from \`t64:init\` payload.theme.ui):
-\`bg\`, \`bgSecondary\`, \`bgTertiary\`, \`fg\`, \`fgSecondary\`, \`fgMuted\`, \`border\`, \`accent\`, \`accentHover\`
-
----
-
-### Example: Git commit visualizer
-\`\`\`js
-const result = await t64("t64:exec", { command: "git log --oneline --graph --all -50" });
-document.getElementById("graph").textContent = result.stdout;
-
-setInterval(async () => {
-  const status = await t64("t64:exec", { command: "git status --porcelain" });
-  document.getElementById("status").textContent = status.stdout || "Clean";
-}, 3000);
-\`\`\`
-
-**IMPORTANT: Do NOT start building yet.** The folder name is just an identifier — it does NOT describe what the user wants. You must ask the user to describe what they want the widget to do, how it should look, and any specific features before you write any code.
-
-Ask: "What would you like this widget to do?"`;
-
-/** Remind Claude that theme is reactive — no hardcoded colors. */
-function buildWidgetContext(): string {
-  return `**Theme is reactive.** Do NOT hardcode colors. On load, listen for the \`t64:init\` event and read \`payload.theme.ui\` to get the current theme colors (bg, fg, accent, border, bgSecondary, fgMuted, etc.), then apply them as CSS variables or inline styles. The theme can change at any time — use the \`t64:init\` event each time the iframe reloads to stay in sync.`;
-}
 
 interface WidgetDialogProps {
   isOpen: boolean;
@@ -347,20 +116,27 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
     setCreating(true);
     try {
       const folderPath = await createWidgetFolder(id);
+      await writeWidgetInstructionFiles(id);
       const widgetName = name.trim();
+      const sessionName = `Widget: ${widgetName}`;
       // Open widget panel on canvas
       useCanvasStore.getState().addWidgetTerminal(id, widgetName);
-      // Open a provider-backed session pointed at the widget folder with the system prompt.
-      const fullPrompt = WIDGET_SYSTEM_PROMPT + "\n\n" + buildWidgetContext();
-      const activeId = useCanvasStore.getState().activeTerminalId;
-      const activeProvider = activeId
-        ? resolveSessionProviderState(useClaudeStore.getState().sessions[activeId]).provider
-        : undefined;
-      spawnProviderSessionWithPrompt(folderPath, `Widget: ${widgetName}`, fullPrompt, () => ({
-        canvasStore: useCanvasStore,
-        claudeStore: useClaudeStore,
-        settingsStore: useSettingsStore,
-      }), { skipOpenwolf: true, provider: activeProvider ?? "anthropic" });
+      // Open an empty, provider-unlocked chat. The first real user prompt
+      // chooses and locks Claude or Codex via the empty-chat provider picker.
+      useCanvasStore.getState().addClaudeTerminal(folderPath, false, sessionName);
+      const panels = useCanvasStore.getState().terminals;
+      const chatPanel = panels[panels.length - 1];
+      if (chatPanel?.panelType === "claude") {
+        useClaudeStore.getState().createSession(
+          chatPanel.terminalId,
+          sessionName,
+          false,
+          true,
+          folderPath,
+          undefined,
+          false,
+        );
+      }
       onClose();
     } catch (err) {
       console.warn("[widget] Failed to create:", err);

@@ -302,6 +302,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
         schemaVersion: 5,
         providerState: {
           provider: "openai",
+          providerLocked: true,
           selectedModel: "gpt-5.5",
           selectedEffort: "medium",
           seedTranscript: null,
@@ -327,6 +328,8 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
 
     assert(migrated, "legacy OpenAI metadata creates a session");
     assertEqual(migrated.providerState.provider, "openai", "legacy provider migrates into providerState");
+    assertEqual(migrated.providerState.providerLocked, true, "legacy saved metadata locks migrated provider");
+    assertEqual(migrated.providerLocked, true, "legacy provider lock mirror migrates");
     const migratedOpenAi = getOpenAiProviderSessionMetadata(migrated.providerState);
     assertEqual(migratedOpenAi?.codexThreadId, "thread-legacy", "legacy Codex thread id migrates");
     assertEqual(migratedOpenAi?.selectedCodexPermission, "yolo", "legacy Codex permission migrates");
@@ -337,6 +340,8 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
 
     assert(stateBacked, "schema v5 metadata creates a providerState-backed session");
     assertEqual(stateBacked.providerState.provider, "openai", "providerState provider wins over stale flat provider");
+    assertEqual(stateBacked.providerState.providerLocked, true, "providerState lock flag wins over saved metadata");
+    assertEqual(stateBacked.providerLocked, true, "provider lock mirror follows providerState");
     const stateBackedOpenAi = getOpenAiProviderSessionMetadata(stateBacked.providerState);
     assertEqual(stateBackedOpenAi?.codexThreadId, "thread-provider-state", "providerState thread id wins over stale flat mirror");
     assertEqual(stateBackedOpenAi?.selectedCodexPermission, "workspace", "providerState permission wins over stale flat mirror");
@@ -344,6 +349,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
 
     const hotReloadFallback = resolveSessionProviderState({
       provider: "openai",
+      providerLocked: true,
       codexThreadId: "thread-hot-reload",
       selectedModel: "gpt-5.4-mini",
       selectedEffort: "low",
@@ -351,11 +357,143 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
       seedTranscript: transcriptFixture.slice(0, 1),
     });
     assertEqual(hotReloadFallback.provider, "openai", "hot-reloaded flat provider falls back into providerState");
+    assertEqual(hotReloadFallback.providerLocked, true, "hot-reloaded flat provider lock falls back into providerState");
     const hotReloadFallbackOpenAi = getOpenAiProviderSessionMetadata(hotReloadFallback);
     assertEqual(hotReloadFallbackOpenAi?.codexThreadId, "thread-hot-reload", "hot-reloaded flat thread id falls back into providerState");
     assertEqual(hotReloadFallbackOpenAi?.selectedCodexPermission, "full-auto", "hot-reloaded flat permission falls back into providerState");
 
     return { name: "providerState legacy migration", ok: true };
+  } finally {
+    useClaudeStore.setState({ sessions: previousSessions });
+    if (previousStorage === null) {
+      localStorage.removeItem(STORAGE_KEY);
+    } else {
+      localStorage.setItem(STORAGE_KEY, previousStorage);
+    }
+  }
+}
+
+export function verifyProviderPickerLockFixtures(): VerificationResult {
+  assert(typeof localStorage !== "undefined", "provider picker fixture requires browser localStorage");
+
+  const previousStorage = localStorage.getItem(STORAGE_KEY);
+  const previousSessions = useClaudeStore.getState().sessions;
+  const store = useClaudeStore.getState();
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      "picker-legacy-openai": {
+        sessionId: "picker-legacy-openai",
+        name: "Legacy OpenAI",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 1,
+        schemaVersion: 4,
+        provider: "openai",
+        codexThreadId: "thread-legacy-picker",
+        selectedModel: "gpt-5.4",
+        selectedEffort: "high",
+        selectedCodexPermission: "workspace",
+      },
+      "picker-saved-openai": {
+        sessionId: "picker-saved-openai",
+        name: "Saved OpenAI",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 2,
+        schemaVersion: 5,
+        providerState: {
+          provider: "openai",
+          providerLocked: true,
+          selectedModel: "gpt-5.5",
+          selectedEffort: "medium",
+          seedTranscript: null,
+          providerMetadata: {
+            openai: {
+              codexThreadId: "thread-saved-picker",
+              selectedCodexPermission: "full-auto",
+            },
+          },
+        },
+      },
+    }));
+    useClaudeStore.setState({ sessions: {} });
+
+    store.createSession("picker-blank", undefined, true);
+    let blank = useClaudeStore.getState().sessions["picker-blank"];
+    assert(blank, "blank user-created session exists");
+    assertEqual(blank.providerState.provider, "anthropic", "blank user-created session defaults to Claude");
+    assertEqual(blank.providerState.providerLocked, false, "blank user-created session starts provider-unlocked");
+
+    assertEqual(store.switchProviderBeforeStart("picker-blank", "openai"), true, "blank session can switch to OpenAI before first send");
+    blank = useClaudeStore.getState().sessions["picker-blank"];
+    assert(blank, "switched blank session still exists");
+    const openaiManifest = getProviderManifest("openai");
+    const blankOpenAi = getOpenAiProviderSessionMetadata(blank.providerState);
+    assertEqual(blank.providerState.provider, "openai", "pre-send provider picker writes providerState provider");
+    assertEqual(blank.provider, "openai", "pre-send provider picker writes compatibility provider mirror");
+    assertEqual(blank.providerState.providerLocked, false, "pre-send provider switch keeps session unlocked");
+    assertEqual(blank.providerState.selectedModel, openaiManifest.defaultModel, "pre-send provider switch resets default model");
+    assertEqual(blank.providerState.selectedEffort, openaiManifest.defaultEffort, "pre-send provider switch resets default effort");
+    assertEqual(blankOpenAi?.selectedCodexPermission, openaiManifest.defaultPermission, "pre-send provider switch resets provider permission");
+    assertEqual(
+      providerTurnOperation(providerInput({
+        provider: blank.providerState.provider,
+        started: blank.hasBeenStarted && blank.promptCount > 0,
+        selectedModel: blank.providerState.selectedModel,
+        selectedEffort: blank.providerState.selectedEffort,
+        selectedCodexPermission: blankOpenAi?.selectedCodexPermission ?? undefined,
+      })),
+      "create",
+      "first send from provider-picked blank session routes through create for selected provider",
+    );
+
+    store.addUserMessage("picker-blank", "hello");
+    blank = useClaudeStore.getState().sessions["picker-blank"];
+    assert(blank, "blank session survives first user message");
+    assertEqual(blank.providerState.providerLocked, true, "first user message locks selected provider");
+    assertEqual(store.switchProviderBeforeStart("picker-blank", "anthropic"), false, "first-send-locked session rejects later provider switch");
+    assertEqual(useClaudeStore.getState().sessions["picker-blank"]?.providerState.provider, "openai", "rejected provider switch preserves selected provider");
+
+    store.createSession("picker-count-lock", undefined, true);
+    assertEqual(store.switchProviderBeforeStart("picker-count-lock", "openai"), true, "second blank session can switch before prompt count increments");
+    store.incrementPromptCount("picker-count-lock");
+    const counted = useClaudeStore.getState().sessions["picker-count-lock"];
+    assert(counted, "prompt-count lock fixture exists");
+    assertEqual(counted.hasBeenStarted, true, "prompt-count increment marks session started");
+    assertEqual(counted.providerState.providerLocked, true, "prompt-count increment locks provider");
+    assertEqual(store.switchProviderBeforeStart("picker-count-lock", "anthropic"), false, "started session cannot switch provider");
+
+    store.createSession("picker-explicit-locked", "Explicit OpenAI", true, false, "", "openai", true);
+    const explicitLocked = useClaudeStore.getState().sessions["picker-explicit-locked"];
+    assert(explicitLocked, "explicitly locked session exists");
+    assertEqual(explicitLocked.providerState.provider, "openai", "explicit provider survives createSession");
+    assertEqual(explicitLocked.providerState.providerLocked, true, "explicit provider lock survives createSession");
+    assertEqual(store.switchProviderBeforeStart("picker-explicit-locked", "anthropic"), false, "explicitly locked saved/forked session rejects provider switch");
+
+    store.createSession("picker-legacy-openai");
+    const legacy = useClaudeStore.getState().sessions["picker-legacy-openai"];
+    assert(legacy, "legacy saved session reopens");
+    assertEqual(legacy.providerState.provider, "openai", "legacy saved session reopens with known provider");
+    assertEqual(legacy.providerState.providerLocked, true, "legacy saved session reopens provider-locked");
+    assertEqual(store.switchProviderBeforeStart("picker-legacy-openai", "anthropic"), false, "legacy saved session rejects provider switch");
+
+    store.createSession("picker-saved-openai");
+    const saved = useClaudeStore.getState().sessions["picker-saved-openai"];
+    assert(saved, "providerState saved session reopens");
+    assertEqual(saved.providerState.provider, "openai", "providerState saved session reopens with known provider");
+    assertEqual(saved.providerState.providerLocked, true, "providerState saved session reopens provider-locked");
+
+    store.createSession("picker-disk-hydrated", undefined, true);
+    store.loadFromDisk("picker-disk-hydrated", transcriptFixture.slice(0, 2));
+    const diskHydrated = useClaudeStore.getState().sessions["picker-disk-hydrated"];
+    assert(diskHydrated, "disk-hydrated session exists");
+    assertEqual(diskHydrated.promptCount, 1, "disk hydration restores prompt count");
+    assertEqual(diskHydrated.hasBeenStarted, true, "disk hydration marks session started when user turns exist");
+    assertEqual(diskHydrated.providerState.providerLocked, true, "disk hydration locks sessions with provider history");
+    assertEqual(store.switchProviderBeforeStart("picker-disk-hydrated", "openai"), false, "disk-hydrated session rejects provider switch");
+
+    return { name: "empty-chat provider picker lock fixtures", ok: true };
   } finally {
     useClaudeStore.setState({ sessions: previousSessions });
     if (previousStorage === null) {
@@ -604,6 +742,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     parentSession: {
       providerState: {
         provider: "openai",
+        providerLocked: true,
         selectedModel: "gpt-5.4",
         selectedEffort: "medium",
         seedTranscript: null,
@@ -760,14 +899,17 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
   const currentProviderStateCannotUseOpenCode = {
     // @ts-expect-error current providerState is closed until the ProviderId and providerState shapes are extended.
     provider: "opencode",
+    providerLocked: false,
     selectedModel: null,
     selectedEffort: null,
     seedTranscript: null,
+    providerMetadata: {},
   } satisfies ProviderSessionState;
   void currentProviderStateCannotUseOpenCode;
 
   const futureProviderState = {
     provider: "opencode",
+    providerLocked: false,
     selectedModel: "stub-model",
     selectedEffort: "stub-effort",
     seedTranscript: null,
@@ -894,5 +1036,6 @@ export function runProviderModularityVerification(): VerificationResult[] {
     verifyCodexPermissionFixtures(),
     verifyProviderEventNormalizationFixtures(),
     verifyProviderStateMigrationFixture(),
+    verifyProviderPickerLockFixtures(),
   ];
 }

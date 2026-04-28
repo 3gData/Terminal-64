@@ -112,6 +112,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
           childRuntime.inheritSkipOpenwolf,
           appDir,
           childRuntime.provider,
+          true,
         );
         useClaudeStore.getState().setSelectedModel(childSessionId, childRuntime.selectedModel);
         useClaudeStore.getState().setSelectedEffort(childSessionId, childRuntime.selectedEffort);

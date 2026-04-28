@@ -34,6 +34,7 @@ mod types;
 mod voice;
 mod voice_manager;
 mod widget_bridge_broker;
+mod widget_instructions;
 mod widget_server;
 mod widget_webview_manager;
 
@@ -1527,6 +1528,10 @@ fn jsonl_uuid(line: &str) -> Option<String> {
     val["uuid"].as_str().map(str::to_string)
 }
 
+fn is_transcript_record(val: &serde_json::Value) -> bool {
+    matches!(val["type"].as_str(), Some("user") | Some("assistant"))
+}
+
 fn active_transcript_uuid_set(
     content: &str,
     leaf_uuid: Option<&str>,
@@ -1534,8 +1539,8 @@ fn active_transcript_uuid_set(
     use std::collections::{HashMap, HashSet};
 
     let mut parents: HashMap<String, Option<String>> = HashMap::new();
-    let mut ordered: Vec<String> = Vec::new();
-    let mut referenced: HashSet<String> = HashSet::new();
+    let mut transcript_ordered: Vec<String> = Vec::new();
+    let mut transcript_referenced: HashSet<String> = HashSet::new();
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -1545,17 +1550,16 @@ fn active_transcript_uuid_set(
             Ok(v) => v,
             Err(_) => continue,
         };
-        if !matches!(val["type"].as_str(), Some("user") | Some("assistant")) {
-            continue;
-        }
         let Some(uuid) = val["uuid"].as_str().map(str::to_string) else {
             continue;
         };
         let parent = val["parentUuid"].as_str().map(str::to_string);
-        if let Some(parent_uuid) = parent.as_ref() {
-            referenced.insert(parent_uuid.clone());
+        if is_transcript_record(&val) {
+            if let Some(parent_uuid) = parent.as_ref() {
+                transcript_referenced.insert(parent_uuid.clone());
+            }
+            transcript_ordered.push(uuid.clone());
         }
-        ordered.push(uuid.clone());
         parents.insert(uuid, parent);
     }
 
@@ -1563,10 +1567,10 @@ fn active_transcript_uuid_set(
         .filter(|uuid| parents.contains_key(*uuid))
         .map(str::to_string)
         .or_else(|| {
-            ordered
+            transcript_ordered
                 .iter()
                 .rev()
-                .find(|uuid| !referenced.contains(uuid.as_str()))
+                .find(|uuid| !transcript_referenced.contains(uuid.as_str()))
                 .cloned()
         });
 
@@ -2186,8 +2190,8 @@ pub(crate) fn find_rewind_uuid_impl(
     };
 
     let mut records: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut all_uuids: Vec<String> = Vec::new();
-    let mut children: HashSet<String> = HashSet::new();
+    let mut transcript_uuids: Vec<String> = Vec::new();
+    let mut transcript_children: HashSet<String> = HashSet::new();
 
     let mut first_line = true;
     for line in content.lines() {
@@ -2206,30 +2210,24 @@ pub(crate) fn find_rewind_uuid_impl(
         };
         if let Some(uuid) = val["uuid"].as_str() {
             let uuid = uuid.to_string();
-            if let Some(parent) = val["parentUuid"].as_str() {
-                children.insert(parent.to_string());
+            if is_transcript_record(&val) {
+                if let Some(parent) = val["parentUuid"].as_str() {
+                    transcript_children.insert(parent.to_string());
+                }
+                transcript_uuids.push(uuid.clone());
             }
-            all_uuids.push(uuid.clone());
             records.insert(uuid, val);
         }
     }
 
     // Find leaf: last TRANSCRIPT uuid not referenced as anyone's parentUuid.
-    // Only user/assistant records participate in the conversation chain — summary,
-    // task-summary, context-collapse and other metadata entries have their own UUIDs
-    // that would otherwise be picked as "leaves" and send the chain walk down a dead end.
-    let is_transcript = |v: &serde_json::Value| -> bool {
-        matches!(v["type"].as_str(), Some("user") | Some("assistant"))
-    };
-    let leaf = all_uuids
+    // Only user/assistant records participate in leaf selection. Claude can insert
+    // attachment/hook records after assistant messages; those must remain available
+    // for parent-chain traversal but must not make the transcript tail look non-leaf.
+    let leaf = transcript_uuids
         .iter()
         .rev()
-        .find(|u| {
-            if children.contains(u.as_str()) {
-                return false;
-            }
-            records.get(u.as_str()).map(is_transcript).unwrap_or(false)
-        })
+        .find(|u| !transcript_children.contains(u.as_str()))
         .cloned()
         .ok_or_else(|| "No transcript leaf found in JSONL".to_string())?;
 
@@ -3798,6 +3796,25 @@ fn create_widget_folder(widget_id: String) -> Result<String, String> {
     let dir = widgets_base_dir()?.join(&widget_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
     Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn write_widget_instruction_files(widget_id: String) -> Result<Vec<String>, String> {
+    if widget_id.is_empty()
+        || !widget_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("Invalid widget id".into());
+    }
+
+    let dir = widgets_base_dir()?.join(&widget_id);
+    widget_instructions::write_widget_instruction_files(&dir).map(|paths| {
+        paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect()
+    })
 }
 
 #[tauri::command]
@@ -6035,6 +6052,7 @@ pub fn run() {
             ensure_codex_mcp,
             create_mcp_config_file,
             create_widget_folder,
+            write_widget_instruction_files,
             read_widget_html,
             list_widget_folders,
             widget_file_modified,
@@ -6225,6 +6243,30 @@ mod stability_tests {
                 .map(|message| message.content.as_str())
                 .collect::<Vec<_>>(),
             vec!["first", "first done"]
+        );
+    }
+
+    #[test]
+    fn active_history_parser_walks_through_attachments_without_selecting_them_as_leaf_children() {
+        let content = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-04-27T00:00:00Z","message":{"role":"user","content":"first"}}"#,
+            r#"{"type":"attachment","uuid":"att1","parentUuid":"u1","timestamp":"2026-04-27T00:00:00Z","message":{"content":"skill attachment"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"att1","timestamp":"2026-04-27T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"first done"}]}}"#,
+            r#"{"type":"attachment","uuid":"hook1","parentUuid":"a1","timestamp":"2026-04-27T00:00:01Z","message":{"content":"stop hook"}}"#,
+            r#"{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-04-27T00:00:02Z","message":{"role":"user","content":"second"}}"#,
+            r#"{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"2026-04-27T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"second done"}]}}"#,
+            r#"{"type":"attachment","uuid":"hook2","parentUuid":"a2","timestamp":"2026-04-27T00:00:03Z","message":{"content":"stop hook"}}"#,
+        ]
+        .join("\n");
+
+        let messages = parse_active_session_history_lines(&content, None);
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "first done", "second", "second done"]
         );
     }
 }

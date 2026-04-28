@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage, ToolCall, McpTool, HookEvent, PermissionMode } from "../lib/types";
-import type { ProviderId } from "../lib/providers";
+import { getProviderManifest, type ProviderId } from "../lib/providers";
 import { hydrateProviderHistory } from "../lib/providerRuntime";
 import type { ProviderHydrateInput } from "../contracts/providerRuntime";
 
@@ -33,6 +33,7 @@ export type ProviderSessionMetadataMap = Partial<{
 
 export interface ProviderSessionState {
   provider: ProviderId;
+  providerLocked: boolean;
   selectedModel: string | null;
   selectedEffort: string | null;
   seedTranscript: ChatMessage[] | null;
@@ -41,6 +42,7 @@ export interface ProviderSessionState {
 
 interface ProviderCompatibilityFields {
   provider: ProviderId;
+  providerLocked: boolean;
   codexThreadId: string | null;
   seedTranscript: ChatMessage[] | null;
   selectedModel: string | null;
@@ -51,6 +53,7 @@ interface ProviderCompatibilityFields {
 type ProviderStateSource = {
   providerState?: ProviderSessionState | undefined;
   provider?: ProviderId | undefined;
+  providerLocked?: boolean | undefined;
   providerMetadata?: ProviderSessionMetadataMap | undefined;
   codexThreadId?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
@@ -100,6 +103,7 @@ function legacyOpenAiMetadataFromProviderState(value: unknown): OpenAiProviderSe
 
 function createProviderState({
   provider,
+  providerLocked,
   selectedModel,
   selectedEffort,
   seedTranscript,
@@ -108,6 +112,7 @@ function createProviderState({
   selectedCodexPermission,
 }: {
   provider: ProviderId;
+  providerLocked?: boolean | undefined;
   selectedModel?: string | null | undefined;
   selectedEffort?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
@@ -128,6 +133,7 @@ function createProviderState({
 
   return {
     provider,
+    providerLocked: providerLocked ?? false,
     selectedModel: selectedModel ?? null,
     selectedEffort: selectedEffort ?? null,
     seedTranscript: seedTranscript ?? null,
@@ -140,6 +146,7 @@ export function resolveSessionProviderState(session: ProviderStateSource | null 
     const legacyOpenAiMetadata = legacyOpenAiMetadataFromProviderState(session.providerState);
     return createProviderState({
       provider: session.providerState.provider,
+      providerLocked: session.providerState.providerLocked ?? session.providerLocked ?? false,
       selectedModel: session.providerState.selectedModel,
       selectedEffort: session.providerState.selectedEffort,
       seedTranscript: session.providerState.seedTranscript,
@@ -149,6 +156,7 @@ export function resolveSessionProviderState(session: ProviderStateSource | null 
   }
   return createProviderState({
     provider: session?.provider ?? "anthropic",
+    providerLocked: session?.providerLocked ?? false,
     selectedModel: session?.selectedModel ?? null,
     selectedEffort: session?.selectedEffort ?? null,
     seedTranscript: session?.seedTranscript ?? null,
@@ -190,6 +198,7 @@ function providerCompatibilityFields(providerState: ProviderSessionState): Provi
     : undefined;
   return {
     provider: providerState.provider,
+    providerLocked: providerState.providerLocked,
     codexThreadId: openaiMetadata?.codexThreadId ?? null,
     seedTranscript: providerState.seedTranscript,
     selectedModel: providerState.selectedModel,
@@ -208,6 +217,9 @@ function normalizeProviderState(
 ): ProviderSessionState {
   const source = patch.providerState ?? base;
   const provider = hasOwn(patch, "provider") ? (patch.provider as ProviderId) : source.provider;
+  const providerLocked = hasOwn(patch, "providerLocked")
+    ? (patch.providerLocked as boolean)
+    : source.providerLocked ?? false;
   const selectedModel = hasOwn(patch, "selectedModel")
     ? (patch.selectedModel as string | null)
     : source.selectedModel;
@@ -232,12 +244,27 @@ function normalizeProviderState(
 
   return createProviderState({
     provider,
+    providerLocked,
     selectedModel,
     selectedEffort,
     seedTranscript,
     providerMetadata,
     codexThreadId,
     selectedCodexPermission,
+  });
+}
+
+function createDefaultProviderState(provider: ProviderId, providerLocked: boolean): ProviderSessionState {
+  const manifest = getProviderManifest(provider);
+  return createProviderState({
+    provider,
+    providerLocked,
+    selectedModel: manifest.defaultModel,
+    selectedEffort: manifest.defaultEffort,
+    providerMetadata: {},
+    codexThreadId: null,
+    selectedCodexPermission: provider === "openai" ? manifest.defaultPermission : null,
+    seedTranscript: null,
   });
 }
 
@@ -254,6 +281,7 @@ export interface PersistedSessionMeta {
   schemaVersion: number;
   providerState?: ProviderSessionState;
   provider?: ProviderId;
+  providerLocked?: boolean;
   codexThreadId?: string | null;
   // Pre-rendered transcript inherited from a parent session when native
   // provider fork is unavailable. Persisted so a reload before the first turn
@@ -275,7 +303,7 @@ export interface PersistedSessionMeta {
 
 // Bump when the shape of PersistedSessionMeta changes. Older clients that
 // encounter a higher version refuse to overwrite — see downgradeLockActive.
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 // Flips true once we see persisted data written by a newer schema than we
 // understand. While active, saveToStorage is a no-op so a downgraded client
@@ -463,6 +491,11 @@ export interface ProviderSession {
   // from older metadata default to "anthropic" for backward compatibility.
   /** @deprecated Use providerState.provider. Kept as a compatibility mirror. */
   provider: ProviderId;
+  // False only for blank user-created sessions before the first send. Once a
+  // session has provider history, seed transcript, or an explicit lock, the UI
+  // must not allow switching providers.
+  /** @deprecated Use providerState.providerLocked. Kept as a compatibility mirror. */
+  providerLocked: boolean;
   // Codex's CLI mints its own thread id on `thread.started`; we capture it
   // here so follow-up `codex exec resume <id>` calls can find the thread.
   // Always null for anthropic sessions.
@@ -509,7 +542,9 @@ export interface ProviderSessionStoreState {
     skipOpenwolf?: boolean,
     cwd?: string,
     provider?: ProviderId,
+    providerLocked?: boolean,
   ) => void;
+  switchProviderBeforeStart: (sessionId: string, provider: ProviderId) => boolean;
   setCodexThreadId: (sessionId: string, threadId: string | null) => void;
   setSeedTranscript: (sessionId: string, messages: ChatMessage[]) => void;
   clearSeedTranscript: (sessionId: string) => void;
@@ -716,6 +751,11 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
   const legacyProvider: ProviderId = entry.provider === "openai" ? "openai" : "anthropic";
   const savedState = entry.providerState;
   const provider: ProviderId = savedState?.provider === "openai" ? "openai" : legacyProvider;
+  const providerLocked = typeof savedState?.providerLocked === "boolean"
+    ? savedState.providerLocked
+    : typeof entry.providerLocked === "boolean"
+      ? entry.providerLocked
+      : true;
   const savedOpenAiMetadata = legacyOpenAiMetadataFromProviderState(savedState);
   const selectedModel = typeof savedState?.selectedModel === "string"
     ? savedState.selectedModel
@@ -739,6 +779,7 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
 
   return createProviderState({
     provider,
+    providerLocked,
     selectedModel,
     selectedEffort,
     seedTranscript,
@@ -776,6 +817,7 @@ function buildPersistedMeta(
       schemaVersion: CURRENT_SCHEMA_VERSION,
       providerState: persistedProviderState,
       provider: compat.provider,
+      providerLocked: compat.providerLocked,
       codexThreadId: compat.codexThreadId,
       ...(!dropSeedTranscripts && compat.seedTranscript ? { seedTranscript: compat.seedTranscript } : {}),
       ...(compat.selectedModel ? { selectedModel: compat.selectedModel } : {}),
@@ -802,6 +844,7 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
     schemaVersion: (entry as { schemaVersion?: number }).schemaVersion ?? 0,
     providerState,
     provider: compat.provider,
+    providerLocked: compat.providerLocked,
     codexThreadId: compat.codexThreadId,
     // v2 blobs lack seedTranscript — leave undefined so consumers treat the
     // session as un-seeded. Stored as ChatMessage[] when present.
@@ -973,7 +1016,7 @@ function hydrateFromJsonl(sessionId: string, cwd: string) {
 const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
   sessions: {},
 
-  createSession: (sessionId, initialName, ephemeral, skipOpenwolf, cwd, provider) => {
+  createSession: (sessionId, initialName, ephemeral, skipOpenwolf, cwd, provider, providerLocked) => {
     const existing = get().sessions[sessionId];
     if (existing) {
       if (initialName && !existing.name) {
@@ -991,6 +1034,15 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
           return { sessions: updated };
         });
         if (!existing.jsonlLoaded) hydrateFromJsonl(sessionId, cwd);
+      }
+      if (providerLocked === true && !existing.providerLocked) {
+        set((s) => {
+          const current = s.sessions[sessionId];
+          if (!current) return s;
+          const updated = updateSession(s.sessions, sessionId, { providerLocked: true });
+          if (!current.ephemeral) saveToStorage(updated);
+          return { sessions: updated };
+        });
       }
       return;
     }
@@ -1014,12 +1066,16 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
         : null;
     const seededMessages: ChatMessage[] = seededTranscript ? [...seededTranscript] : [];
     const seededPromptCount = seededMessages.filter((m) => m.role === "user").length;
+    const seededProviderLocked = providerLocked !== undefined
+      ? providerLocked || seededPromptCount > 0
+      : (metaProviderState?.providerLocked ?? meta?.providerLocked ?? !!meta) || seededPromptCount > 0;
     const seededSelectedModel = metaProviderState?.selectedModel ?? meta?.selectedModel ?? null;
     const seededSelectedEffort = metaProviderState?.selectedEffort ?? meta?.selectedEffort ?? null;
     const seededSelectedCodexPermission =
       metaOpenAiMetadata?.selectedCodexPermission ?? meta?.selectedCodexPermission ?? null;
     const seededProviderState = createProviderState({
       provider: seededProvider,
+      providerLocked: seededProviderLocked,
       selectedModel: seededSelectedModel,
       selectedEffort: seededSelectedEffort,
       seedTranscript: seededTranscript,
@@ -1104,12 +1160,59 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
     });
   },
 
+  switchProviderBeforeStart: (sessionId, provider) => {
+    let switched = false;
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      const hasUserTurn = session.messages.some((m) => m.role === "user");
+      const hasSeedTranscript = (session.seedTranscript?.length ?? 0) > 0;
+      const providerState = resolveSessionProviderState(session);
+      const codexThreadId = getOpenAiProviderSessionMetadata(providerState)?.codexThreadId ?? session.codexThreadId;
+      if (
+        session.providerLocked ||
+        session.hasBeenStarted ||
+        session.promptCount > 0 ||
+        hasUserTurn ||
+        hasSeedTranscript ||
+        !!codexThreadId ||
+        !!session.forkParentSessionId
+      ) {
+        return s;
+      }
+      const currentProvider = providerState.provider;
+      if (currentProvider === provider) {
+        switched = true;
+        return s;
+      }
+      const nextProviderState = createDefaultProviderState(provider, false);
+      const updated = updateSession(s.sessions, sessionId, {
+        providerState: nextProviderState,
+        model: "",
+        contextUsed: 0,
+        contextMax: 0,
+        error: null,
+      });
+      if (!session.ephemeral) debouncedSave();
+      switched = true;
+      return { sessions: updated };
+    });
+    return switched;
+  },
+
   addUserMessage: (sessionId, text) => {
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
       const msg: ChatMessage = { id: uuidv4(), role: "user", content: text, timestamp: Date.now() };
-      return { sessions: updateSession(s.sessions, sessionId, { messages: [...session.messages, msg], error: null }) };
+      const shouldLockProvider = !session.providerLocked;
+      const updated = updateSession(s.sessions, sessionId, {
+        messages: [...session.messages, msg],
+        error: null,
+        providerLocked: true,
+      });
+      if (shouldLockProvider && !session.ephemeral) debouncedSave();
+      return { sessions: updated };
     });
   },
 
@@ -1256,7 +1359,14 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
     set((s) => {
       const session = s.sessions[sessionId];
       if (!session) return s;
-      return { sessions: updateSession(s.sessions, sessionId, { promptCount: session.promptCount + 1, hasBeenStarted: true }) };
+      const shouldLockProvider = !session.providerLocked;
+      const updated = updateSession(s.sessions, sessionId, {
+        promptCount: session.promptCount + 1,
+        hasBeenStarted: true,
+        providerLocked: true,
+      });
+      if (shouldLockProvider && !session.ephemeral) debouncedSave();
+      return { sessions: updated };
     });
   },
 
@@ -1449,13 +1559,18 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       if (!session) return s;
       if (session.messages.length >= messages.length) {
         // Still flip the loaded flag — callers rely on it to stop "loading" UI.
-        return { sessions: updateSession(s.sessions, sessionId, { jsonlLoaded: true }) };
+        const hasUserTurn = messages.some((m) => m.role === "user") || session.promptCount > 0;
+        return { sessions: updateSession(s.sessions, sessionId, {
+          jsonlLoaded: true,
+          providerLocked: session.providerLocked || hasUserTurn,
+        }) };
       }
       const promptCount = messages.filter((m) => m.role === "user").length;
       return { sessions: updateSession(s.sessions, sessionId, {
         messages,
         promptCount,
         hasBeenStarted: promptCount > 0,
+        providerLocked: session.providerLocked || promptCount > 0,
         jsonlLoaded: true,
       }) };
     });
@@ -1476,6 +1591,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
         messages,
         promptCount,
         hasBeenStarted: promptCount > 0,
+        providerLocked: session.providerLocked || promptCount > 0,
         jsonlLoaded: true,
       }) };
     });
@@ -1497,6 +1613,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
         messages: merged,
         promptCount,
         hasBeenStarted: promptCount > 0,
+        providerLocked: session.providerLocked || promptCount > 0,
         jsonlLoaded: true,
       }) };
     });
@@ -1578,7 +1695,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       const messages = session.messages.slice(0, idx);
       const promptCount = messages.filter((m) => m.role === "user").length;
       return { sessions: updateSession(s.sessions, sessionId, {
-        messages, promptCount, streamingText: "", isStreaming: false, error: null,
+        messages, promptCount, hasBeenStarted: promptCount > 0, streamingText: "", isStreaming: false, error: null,
         pendingPermission: null, pendingQuestions: null, activeLoop: null, promptQueue: [],
       }) };
     });
