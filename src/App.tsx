@@ -6,12 +6,12 @@ import Canvas from "./components/canvas/Canvas";
 import CommandPalette from "./components/command-palette/CommandPalette";
 import SettingsPanel from "./components/settings/SettingsPanel";
 import PopOutTerminal from "./components/canvas/PopOutTerminal";
-import ClaudeDialog from "./components/canvas/ClaudeDialog";
+import { ProviderSessionDialog } from "./components/canvas/ClaudeDialog";
 import WidgetDialog from "./components/widget/WidgetDialog";
 import SkillDialog from "./components/skill/SkillDialog";
 import { useTheme } from "./hooks/useTheme";
 import { useKeybindings } from "./hooks/useKeybindings";
-import { useClaudeEvents } from "./hooks/useClaudeEvents";
+import { useProviderEvents } from "./hooks/useClaudeEvents";
 import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
 import { usePartyMode } from "./hooks/usePartyMode";
 import { useVoiceControl } from "./hooks/useVoiceControl";
@@ -26,7 +26,12 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { closeTerminal, closeProviderSession, linkSessionToDiscord, unlinkSessionFromDiscord, renameDiscordSession, startDiscordBot, discordCleanupOrphaned, setAllBrowsersVisible, setAllWidgetWebviewsVisible, ensureSkillsPlugin, installWidgetZip, openwolfDaemonSwitch, openwolfProjectCwd, installBundledWidget } from "./lib/tauriApi";
 import { pushToast } from "./lib/notifications";
 import { useDelegationStore } from "./stores/delegationStore";
-import { resolveSessionProviderState, useClaudeStore, flushSave as flushClaudeSave, STORAGE_KEY } from "./stores/claudeStore";
+import {
+  PROVIDER_SESSIONS_STORAGE_KEY,
+  resolveSessionProviderState,
+  useProviderSessionStore,
+  flushSave as flushProviderSessionSave,
+} from "./stores/claudeStore";
 import { checkForUpdate, type UpdateInfo } from "./lib/updater";
 import "./App.css";
 
@@ -39,13 +44,13 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [claudeDialogOpen, setClaudeDialogOpen] = useState(false);
+  const [providerSessionDialogOpen, setProviderSessionDialogOpen] = useState(false);
   const [widgetDialogOpen, setWidgetDialogOpen] = useState(false);
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
 
   useTheme();
   useKeybindings();
-  useClaudeEvents();
+  useProviderEvents();
   useDelegationOrchestrator();
   usePartyMode();
   useVoiceControl();
@@ -87,7 +92,7 @@ function App() {
   }, []);
 
   // Hide all native browser webviews when any overlay is open (they render above DOM)
-  const anyOverlayOpen = settingsOpen || paletteOpen || claudeDialogOpen || widgetDialogOpen || skillDialogOpen;
+  const anyOverlayOpen = settingsOpen || paletteOpen || providerSessionDialogOpen || widgetDialogOpen || skillDialogOpen;
   useEffect(() => {
     setAllBrowsersVisible(!anyOverlayOpen).catch(() => {});
     setAllWidgetWebviewsVisible(!anyOverlayOpen).catch(() => {});
@@ -115,12 +120,12 @@ function App() {
         // is a stale snapshot that isn't updated when the user renames a session.
         let savedSessions: Record<string, { name?: string; cwd?: string }> = {};
         try {
-          const raw = localStorage.getItem(STORAGE_KEY);
+          const raw = localStorage.getItem(PROVIDER_SESSIONS_STORAGE_KEY);
           if (raw) savedSessions = JSON.parse(raw);
         } catch (e) {
           console.warn("[discord] Failed to read session store:", e);
         }
-        const providerSessions = useClaudeStore.getState().sessions;
+        const providerSessions = useProviderSessionStore.getState().sessions;
 
         for (const t of terminals) {
           if (t.panelType !== "claude") continue;
@@ -156,7 +161,7 @@ function App() {
         .then((widgetCwd) => {
           let cwd = widgetCwd;
           if (!cwd) {
-            const providerSessions = useClaudeStore.getState().sessions;
+            const providerSessions = useProviderSessionStore.getState().sessions;
             cwd = Object.values(providerSessions).find((s) => s.cwd)?.cwd ?? null;
           }
           if (cwd) openwolfDaemonSwitch(cwd).catch(() => {});
@@ -170,7 +175,7 @@ function App() {
     let unlistenFn: (() => void) | undefined;
     appWindow.onCloseRequested(() => {
       useCanvasStore.getState().saveSession();
-      flushClaudeSave();
+      flushProviderSessionSave();
     }).then((fn) => { unlistenFn = fn; });
     return () => { unlistenFn?.(); };
   }, []);
@@ -223,7 +228,7 @@ function App() {
           const terminals = useCanvasStore.getState().terminals;
           const newest = terminals[terminals.length - 1];
           if (newest?.panelType === "claude") {
-            useClaudeStore.getState().createSession(newest.terminalId, undefined, false, undefined, active.cwd, "openai");
+            useProviderSessionStore.getState().createSession(newest.terminalId, undefined, false, undefined, active.cwd, "openai");
           }
         }
       },
@@ -241,7 +246,7 @@ function App() {
 
   // Reactively rename Discord channels when a provider-backed session's name/cwd changes.
   useEffect(() => {
-    const unsub = useClaudeStore.subscribe((state, prev) => {
+    const unsub = useProviderSessionStore.subscribe((state, prev) => {
       for (const [sid, sess] of Object.entries(state.sessions)) {
         const before = prev.sessions[sid];
         if (!before) continue;
@@ -262,13 +267,13 @@ function App() {
       for (const t of prev.terminals) {
         if (!currentIds.has(t.terminalId) && !t.poppedOut) {
           if (t.panelType === "claude") {
-            const sess = useClaudeStore.getState().sessions[t.terminalId];
+            const sess = useProviderSessionStore.getState().sessions[t.terminalId];
             closeProviderSession(t.terminalId, resolveSessionProviderState(sess).provider).catch(() => {});
             unlinkSessionFromDiscord(t.terminalId).catch(() => {});
             // Only remove unnamed/disposable sessions — named ones (e.g. widget chats)
             // stay in memory so they can be reopened with messages intact
             if (!sess?.name) {
-              useClaudeStore.getState().removeSession(t.terminalId);
+              useProviderSessionStore.getState().removeSession(t.terminalId);
             }
             // Cancel delegation task if this was a child session
             const delStore = useDelegationStore.getState();
@@ -345,7 +350,7 @@ function App() {
 
         <button
           className="header-action header-action--claude"
-          onClick={() => setClaudeDialogOpen(true)}
+          onClick={() => setProviderSessionDialogOpen(true)}
           title="New Code Session"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -453,9 +458,9 @@ function App() {
       {/* Overlays */}
       <CommandPalette isOpen={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <ClaudeDialog
-        isOpen={claudeDialogOpen}
-        onClose={() => setClaudeDialogOpen(false)}
+      <ProviderSessionDialog
+        isOpen={providerSessionDialogOpen}
+        onClose={() => setProviderSessionDialogOpen(false)}
         onConfirm={(cwd, _skip, sessionName, provider) => {
           useCanvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
           {
@@ -466,7 +471,7 @@ function App() {
               // Pre-create the store session with the dialog's provider choice.
               // The chat shell's createSession effect is idempotent, so this
               // primes the provider before it can fall back to Anthropic.
-              useClaudeStore.getState().createSession(sid, sessionName, false, undefined, cwd, provider);
+              useProviderSessionStore.getState().createSession(sid, sessionName, false, undefined, cwd, provider);
               if (sessionName) {
                 // Auto-link to Discord (silently fails if bot not running)
                 linkSessionToDiscord(sid, sessionName, cwd).catch(() => {});
@@ -477,11 +482,12 @@ function App() {
         onReopen={(sessionId, dialogCwd, provider) => {
           // Pull the cached name + cwd metadata out of localStorage so we can
           // spawn the panel with the right label + working dir. Messages no
-          // longer live here — claudeStore.createSession loads them from JSONL.
+          // longer live here; the provider session store hydrates them from
+          // the provider history backend.
           let name: string | undefined;
           let savedCwd = "";
           try {
-            const raw = localStorage.getItem(STORAGE_KEY);
+            const raw = localStorage.getItem(PROVIDER_SESSIONS_STORAGE_KEY);
             if (raw) {
               const d = JSON.parse(raw);
               name = d[sessionId]?.name;
@@ -492,9 +498,9 @@ function App() {
           }
           const effectiveCwd = savedCwd || dialogCwd || ".";
           useCanvasStore.getState().addClaudeTerminal(effectiveCwd, false, name || undefined, sessionId);
-          useClaudeStore.getState().createSession(sessionId, name, false, undefined, effectiveCwd, provider);
+          useProviderSessionStore.getState().createSession(sessionId, name, false, undefined, effectiveCwd, provider);
           if (provider === "openai") {
-            useClaudeStore.getState().setCodexThreadId(sessionId, sessionId);
+            useProviderSessionStore.getState().setCodexThreadId(sessionId, sessionId);
           }
           if (name) linkSessionToDiscord(sessionId, name, effectiveCwd).catch(() => {});
         }}

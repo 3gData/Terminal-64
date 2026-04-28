@@ -1,6 +1,11 @@
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
+import {
+  getOpenAiProviderSessionMetadata,
+  resolveSessionProviderState,
+  useClaudeStore,
+  type ClaudeSession,
+} from "../../stores/claudeStore";
 import { runProviderTurn } from "../../lib/providerRuntime";
 import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 import "./Delegation.css";
@@ -15,16 +20,17 @@ function providerTurnForSession(
   prompt: string,
 ): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
+  const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
   return {
     provider: providerState.provider,
     sessionId,
     cwd: session.cwd || ".",
     prompt,
     started: session.hasBeenStarted,
-    threadId: providerState.openai?.codexThreadId ?? null,
+    threadId: openaiMetadata?.codexThreadId ?? null,
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? "workspace",
+    selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? "workspace",
     permissionMode: "auto",
     permissionOverride: "bypass_all",
     skipOpenwolf: session.skipOpenwolf,

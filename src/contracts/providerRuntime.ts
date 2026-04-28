@@ -86,6 +86,7 @@ export interface ProviderHydrateInput {
   sessionId: string;
   cwd: string;
   codexThreadId?: string | null | undefined;
+  resumeAtUuid?: string | null | undefined;
   cacheEntry?: ProviderHydrationCacheEntry | null | undefined;
 }
 

@@ -39,14 +39,25 @@ export interface ProviderToolResult {
 export type NormalizedProviderEvent =
   | { kind: "session_started"; threadId?: string; model?: string; contextMax?: number }
   | { kind: "mcp_status"; servers: unknown[] }
-  | { kind: "turn_started" }
+  | { kind: "turn_started"; resetStreamingText?: boolean }
   | { kind: "assistant_delta"; text: string }
-  | { kind: "assistant_message"; text: string; toolCalls?: ProviderToolCall[] }
+  | { kind: "assistant_message"; text: string; toolCalls?: ProviderToolCall[]; useBufferedText?: boolean }
   | { kind: "tool_call"; toolCall: ProviderToolCall }
   | { kind: "tool_update"; id: string; patch: ProviderToolPatch; result?: ProviderToolResult }
-  | { kind: "usage"; inputTokens: number; contextMax?: number }
-  | { kind: "turn_completed"; usage?: { input_tokens?: number; output_tokens?: number }; error?: string }
-  | { kind: "error"; message: string };
+  | { kind: "tool_result"; toolResult: ProviderToolResult }
+  | { kind: "usage"; inputTokens: number; outputTokens?: number; totalTokens?: number; contextMax?: number }
+  | {
+      kind: "turn_completed";
+      usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+      costUsd?: number;
+      contextMax?: number;
+      isError?: boolean;
+      error?: string;
+    }
+  | { kind: "error"; message: string; terminal?: boolean };
 
 export function buildProviderToolCall(input: {
   id: string;

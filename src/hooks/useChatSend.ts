@@ -2,7 +2,11 @@ import { useCallback } from "react";
 import { createCheckpoint, readFile } from "../lib/tauriApi";
 import { runProviderTurn } from "../lib/providerRuntime";
 import { isAbsolutePath, joinPath } from "../lib/platform";
-import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
+import {
+  getOpenAiProviderSessionMetadata,
+  resolveSessionProviderState,
+  useClaudeStore,
+} from "../stores/claudeStore";
 import type { PermissionMode } from "../lib/types";
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
 
@@ -12,7 +16,7 @@ interface UseChatSendOptions {
   permissionMode: PermissionMode;
   selectedModel: string;
   selectedEffort: string;
-  selectedCodexPermission: string;
+  selectedProviderPermissionId: string;
   incrementPromptCount: (sessionId: string) => void;
 }
 
@@ -22,7 +26,7 @@ export function useChatSend({
   permissionMode,
   selectedModel,
   selectedEffort,
-  selectedCodexPermission,
+  selectedProviderPermissionId,
   incrementPromptCount,
 }: UseChatSendOptions) {
   return useCallback(
@@ -36,7 +40,8 @@ export function useChatSend({
       const started = sess?.hasBeenStarted ?? false;
       const providerState = resolveSessionProviderState(sess);
       const provider = providerState.provider;
-      const codexThreadId = providerState.openai?.codexThreadId ?? null;
+      const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
+      const codexThreadId = openAiMetadata?.codexThreadId ?? null;
       const seedTranscript = providerState.seedTranscript;
       try {
         if (!started && (!effectiveCwd || effectiveCwd === ".")) {
@@ -81,7 +86,7 @@ export function useChatSend({
           threadId: codexThreadId,
           selectedModel,
           selectedEffort,
-          selectedCodexPermission,
+          selectedCodexPermission: selectedProviderPermissionId,
           permissionMode,
           skipOpenwolf: sess?.skipOpenwolf || false,
           seedTranscript,
@@ -105,6 +110,6 @@ export function useChatSend({
         currentStore.setError(sessionId, String(err));
       }
     },
-    [sessionId, effectiveCwd, permissionMode, selectedModel, selectedEffort, selectedCodexPermission, incrementPromptCount],
+    [sessionId, effectiveCwd, permissionMode, selectedModel, selectedEffort, selectedProviderPermissionId, incrementPromptCount],
   );
 }

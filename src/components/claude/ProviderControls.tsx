@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { getProviderManifest, type ProviderId } from "../../lib/providers";
-import type { McpServer, PermissionMode } from "../../lib/types";
+import { getProviderPermissionInputPresentation } from "../../lib/providerPermissions";
+import type { McpServer } from "../../lib/types";
 import type { McpServerStatus } from "../../stores/claudeStore";
 import {
   DropdownMenu,
@@ -26,13 +27,8 @@ interface ProviderControlsProps {
 
 interface ProviderPermissionInputArgs {
   provider: ProviderId;
-  anthropicPermission: {
-    id: PermissionMode;
-    color: string;
-  };
-  codexPermissionId: string;
-  onCycleAnthropicPermission: () => void;
-  onCycleCodexPermission: () => void;
+  permissionId: string;
+  onCyclePermission: () => void;
 }
 
 export interface ProviderPermissionInputProps {
@@ -43,26 +39,14 @@ export interface ProviderPermissionInputProps {
 
 export function buildProviderPermissionInputProps({
   provider,
-  anthropicPermission,
-  codexPermissionId,
-  onCycleAnthropicPermission,
-  onCycleCodexPermission,
+  permissionId,
+  onCyclePermission,
 }: ProviderPermissionInputArgs): ProviderPermissionInputProps {
-  const manifest = getProviderManifest(provider);
-  const permissionIdByProvider: Record<ProviderId, string> = {
-    anthropic: anthropicPermission.id,
-    openai: codexPermissionId,
-  };
-  const cycleByProvider: Record<ProviderId, () => void> = {
-    anthropic: onCycleAnthropicPermission,
-    openai: onCycleCodexPermission,
-  };
-  const current = manifest.permissions.find((p) => p.id === permissionIdByProvider[provider]) ?? manifest.permissions[0]!;
-  const label = current.inputLabel ?? current.label.toLowerCase();
+  const presentation = getProviderPermissionInputPresentation(provider, permissionId);
   return {
-    permLabel: `${label} ${manifest.ui.inputPermissionSuffix}`,
-    permColor: current.color || anthropicPermission.color,
-    onCyclePerm: cycleByProvider[provider],
+    permLabel: presentation.label,
+    permColor: presentation.color,
+    onCyclePerm: onCyclePermission,
   };
 }
 

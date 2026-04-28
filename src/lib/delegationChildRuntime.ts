@@ -1,9 +1,12 @@
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
 import type { ProviderSessionState } from "../stores/claudeStore";
-import { resolveSessionProviderState } from "../stores/claudeStore";
+import { getOpenAiProviderSessionMetadata, resolveSessionProviderState } from "../stores/claudeStore";
 import type { ChatMessage, DelegationChildRuntimeMetadata } from "./types";
 import { createMcpConfigFile } from "./tauriApi";
-import { PROVIDER_CONFIG, type ProviderId } from "./providers";
+import { getProviderDelegationPolicy, getProviderManifest, type ProviderId } from "./providers";
+import type { DelegationMcpTransport } from "./providers";
+
+export type { DelegationMcpTransport } from "./providers";
 
 interface DelegationParentSessionSource {
   providerState?: ProviderSessionState | undefined;
@@ -54,44 +57,8 @@ export interface PrepareDelegationChildTurnOptions extends DelegationChildRuntim
   mcp: DelegationMcpConnection;
 }
 
-export type DelegationMcpTransport = "temp-config" | "env";
-type DelegationPermissionPresetSource = "selected" | "bypass_all";
-
-function assertNeverProvider(provider: never): never {
-  throw new Error(`Unhandled delegation provider: ${String(provider)}`);
-}
-
-const DELEGATION_PROVIDER_CONFIG: Record<ProviderId, {
-  mcpTransport: DelegationMcpTransport;
-  forceSkipOpenwolf: boolean;
-  noSessionPersistence: boolean;
-  skipGitRepoCheck: boolean;
-  permissionPresetSource: DelegationPermissionPresetSource;
-}> = {
-  anthropic: {
-    mcpTransport: "temp-config",
-    forceSkipOpenwolf: false,
-    noSessionPersistence: true,
-    skipGitRepoCheck: false,
-    permissionPresetSource: "bypass_all",
-  },
-  openai: {
-    mcpTransport: "env",
-    forceSkipOpenwolf: true,
-    noSessionPersistence: false,
-    skipGitRepoCheck: true,
-    permissionPresetSource: "selected",
-  },
-};
-
-function getDelegationProviderConfig(provider: ProviderId): (typeof DELEGATION_PROVIDER_CONFIG)[ProviderId] {
-  const config = DELEGATION_PROVIDER_CONFIG[provider];
-  if (config) return config;
-  return assertNeverProvider(provider as never);
-}
-
 export function getDelegationMcpTransport(provider: ProviderId): DelegationMcpTransport {
-  return getDelegationProviderConfig(provider).mcpTransport;
+  return getProviderDelegationPolicy(provider).mcpTransport;
 }
 
 export function resolveDelegationChildRuntimeSettings({
@@ -102,15 +69,16 @@ export function resolveDelegationChildRuntimeSettings({
   selectedCodexPermission,
 }: ResolveDelegationChildRuntimeSettingsOptions): DelegationChildRuntimeSettings {
   const parentProviderState = resolveSessionProviderState(parentSession);
+  const parentOpenAiMetadata = getOpenAiProviderSessionMetadata(parentProviderState);
   const provider = parentSession ? parentProviderState.provider : selectedProvider;
 
   return {
     provider,
     selectedModel: parentProviderState.selectedModel ?? selectedModel,
     selectedEffort: parentProviderState.selectedEffort ?? selectedEffort,
-    selectedCodexPermission: parentProviderState.openai?.selectedCodexPermission
+    selectedCodexPermission: parentOpenAiMetadata?.selectedCodexPermission
       ?? selectedCodexPermission
-      ?? PROVIDER_CONFIG.openai.defaultPermission,
+      ?? getProviderManifest("openai").defaultPermission,
     inheritSkipOpenwolf: !!parentSession?.skipOpenwolf,
   };
 }
@@ -142,7 +110,7 @@ export function buildDelegationChildProviderTurnInput({
   mcpConfigPath,
   mcpEnv,
 }: DelegationChildTurnOptions): ProviderTurnInput {
-  const config = getDelegationProviderConfig(provider);
+  const policy = getProviderDelegationPolicy(provider);
   return {
     provider,
     sessionId,
@@ -153,11 +121,11 @@ export function buildDelegationChildProviderTurnInput({
     selectedEffort,
     selectedCodexPermission,
     permissionOverride: "bypass_all",
-    skipOpenwolf: config.forceSkipOpenwolf ? true : inheritSkipOpenwolf,
-    ...(config.mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
-    ...(config.mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
-    ...(config.noSessionPersistence ? { noSessionPersistence: true } : {}),
-    ...(config.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
+    skipOpenwolf: policy.skipOpenwolf === "always" ? true : inheritSkipOpenwolf,
+    ...(policy.mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
+    ...(policy.mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
+    ...(policy.noSessionPersistence ? { noSessionPersistence: true } : {}),
+    ...(policy.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
   };
 }
 
@@ -165,11 +133,12 @@ export function buildDelegationChildRuntimeMetadata(
   settings: DelegationChildRuntimeSettings,
   cwd: string,
 ): DelegationChildRuntimeMetadata {
+  const policy = getProviderDelegationPolicy(settings.provider);
   return {
     providerId: settings.provider,
     model: settings.selectedModel,
     effort: settings.selectedEffort,
-    permissionPreset: getDelegationProviderConfig(settings.provider).permissionPresetSource === "selected"
+    permissionPreset: policy.childRuntime.permissionPreset === "selected"
       ? settings.selectedCodexPermission
       : "bypass_all",
     cwd,

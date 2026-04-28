@@ -409,3 +409,73 @@ pub enum ProviderEvent {
         payload: serde_json::Value,
     },
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn base(provider: ProviderKind) -> ProviderEventBase {
+        ProviderEventBase {
+            event_id: "event-1".to_string(),
+            provider,
+            thread_id: "thread-1".to_string(),
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            item_id: None,
+            request_id: None,
+            provider_refs: Some(json!({ "nativeId": "provider-event-1" })),
+            raw: None,
+        }
+    }
+
+    #[test]
+    fn provider_event_serializes_normalized_type_and_flattened_base() {
+        let event = ProviderEvent::TurnCompleted {
+            base: base(ProviderKind::Codex),
+            payload: json!({
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 4,
+                    "total_tokens": 16
+                }
+            }),
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "turn.completed");
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["eventId"], "event-1");
+        assert_eq!(value["threadId"], "thread-1");
+        assert_eq!(value["turnId"], "turn-1");
+        assert_eq!(value["providerRefs"]["nativeId"], "provider-event-1");
+        assert_eq!(value["usage"]["total_tokens"], 16);
+    }
+
+    #[test]
+    fn provider_event_deserializes_request_event_without_provider_specific_shape() {
+        let value = json!({
+            "type": "request.opened",
+            "eventId": "event-2",
+            "provider": "claudeAgent",
+            "threadId": "thread-2",
+            "createdAt": "2026-04-28T00:00:01Z",
+            "requestId": "request-1",
+            "tool": "Edit",
+            "raw": { "providerSpecific": true }
+        });
+
+        let event: ProviderEvent = serde_json::from_value(value).unwrap();
+        match event {
+            ProviderEvent::RequestOpened { base, payload } => {
+                assert_eq!(base.provider, ProviderKind::ClaudeAgent);
+                assert_eq!(base.request_id.as_deref(), Some("request-1"));
+                assert_eq!(base.raw, Some(json!({ "providerSpecific": true })));
+                assert_eq!(payload["tool"], "Edit");
+            }
+            other => panic!("expected request.opened, got {other:?}"),
+        }
+    }
+}

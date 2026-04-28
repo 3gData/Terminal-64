@@ -5,7 +5,8 @@ should consume normalized events and tool calls.
 
 ## Boundary
 
-- Provider IPC listeners parse raw provider events.
+- `src/lib/providerEventIngestion.ts` owns raw provider IPC subscriptions and
+  routes each provider's stream through its decoder.
 - Provider decoders translate raw shapes into `NormalizedProviderEvent` and
   `ProviderToolCall`/`ProviderToolResult` objects from
   `src/contracts/providerEvents.ts`.

@@ -99,8 +99,8 @@ use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
 use providers::{
-    ClaudeAdapter, CodexAdapter, ProviderCommandContext, ProviderCommandRequest,
-    ProviderHistoryCapabilities, ProviderKind, ProviderRegistry,
+    ClaudeAdapter, CodexAdapter, ProviderCommandContext, ProviderCommandRequest, ProviderKind,
+    ProviderRegistry,
 };
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
@@ -440,74 +440,6 @@ fn prepare_provider_command_context(
     ))
 }
 
-#[derive(serde::Deserialize)]
-struct ClaudeHistoryTruncateRequest {
-    session_id: String,
-    cwd: String,
-    keep_messages: usize,
-}
-
-#[derive(serde::Deserialize)]
-struct CodexHistoryTruncateRequest {
-    thread_id: String,
-    cwd: String,
-    num_turns: u32,
-}
-
-#[derive(serde::Deserialize)]
-struct ClaudeHistoryForkRequest {
-    parent_session_id: String,
-    new_session_id: String,
-    cwd: String,
-    keep_messages: usize,
-}
-
-#[derive(serde::Deserialize)]
-struct CodexHistoryForkRequest {
-    thread_id: String,
-    cwd: String,
-    drop_turns: u32,
-}
-
-#[derive(serde::Deserialize)]
-struct ClaudeHistoryHydrateRequest {
-    session_id: String,
-    cwd: String,
-}
-
-#[derive(serde::Deserialize)]
-struct CodexHistoryHydrateRequest {
-    thread_id: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ClaudeHistoryDeleteRequest {
-    session_id: String,
-    cwd: String,
-}
-
-#[derive(serde::Deserialize)]
-struct CodexHistoryDeleteRequest {
-    thread_id: Option<String>,
-}
-
-fn provider_history_unsupported(kind: ProviderKind, operation: &str) -> serde_json::Value {
-    serde_json::json!({
-        "status": "unsupported",
-        "method": "unsupported",
-        "messages": [],
-        "stat": null,
-        "reason": format!("Provider {:?} does not support history {}", kind, operation),
-    })
-}
-
-fn provider_history_capabilities(
-    state: &AppState,
-    kind: ProviderKind,
-) -> ProviderHistoryCapabilities {
-    state.providers.history_capabilities(kind)
-}
-
 fn provider_create_impl(
     state: &AppState,
     app_handle: &tauri::AppHandle,
@@ -680,81 +612,7 @@ fn provider_history_truncate(
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let kind = provider_kind_from_frontend_id(&provider)?;
-    if !provider_history_capabilities(state.inner(), kind).rewind {
-        return Ok(provider_history_unsupported(kind, "rewind"));
-    }
-    match kind {
-        ProviderKind::ClaudeAgent => {
-            let req: ClaudeHistoryTruncateRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid Anthropic history truncate request: {}", e))?;
-            let details =
-                truncate_session_jsonl_by_messages(req.session_id, req.cwd, req.keep_messages)?;
-            Ok(serde_json::json!({
-                "status": details
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("applied"),
-                "method": "jsonl",
-                "resume_at_uuid": null,
-                "details": details,
-            }))
-        }
-        ProviderKind::Codex => {
-            let req: CodexHistoryTruncateRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid OpenAI history truncate request: {}", e))?;
-            if req.thread_id.trim().is_empty() {
-                return Ok(serde_json::json!({
-                    "status": "unsupported",
-                    "method": "unsupported",
-                    "turns": 0,
-                    "reason": "thread_id_required",
-                }));
-            }
-            if req.num_turns == 0 {
-                return Ok(serde_json::json!({
-                    "status": "skipped",
-                    "method": "noop",
-                    "turns": 0,
-                    "reason": "no_turns_to_drop",
-                }));
-            }
-            match state
-                .codex
-                .rollback_thread(&req.thread_id, &req.cwd, req.num_turns)
-            {
-                Ok(()) => Ok(serde_json::json!({
-                    "status": "applied",
-                    "method": "app_server",
-                    "turns": req.num_turns,
-                })),
-                Err(rollback_error) => {
-                    safe_eprintln!(
-                        "[provider-history] Codex rollback failed ({}); falling back to rollout truncation",
-                        rollback_error
-                    );
-                    let turns = providers::codex::truncate_codex_rollout_by_turns(
-                        &req.thread_id,
-                        req.num_turns,
-                    )
-                    .map_err(|truncate_error| {
-                        format!(
-                            "Codex rollback failed ({}); rollout truncation failed ({})",
-                            rollback_error, truncate_error
-                        )
-                    })?;
-                    Ok(serde_json::json!({
-                        "status": "applied",
-                        "method": "rollout",
-                        "turns": turns,
-                        "rollback_error": rollback_error,
-                    }))
-                }
-            }
-        }
-        ProviderKind::Cursor | ProviderKind::OpenCode => {
-            Ok(provider_history_unsupported(kind, "rewind"))
-        }
-    }
+    state.providers.history_truncate(kind, req)
 }
 
 #[tauri::command]
@@ -764,46 +622,7 @@ fn provider_history_fork(
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let kind = provider_kind_from_frontend_id(&provider)?;
-    if !provider_history_capabilities(state.inner(), kind).fork {
-        return Ok(provider_history_unsupported(kind, "fork"));
-    }
-    match kind {
-        ProviderKind::ClaudeAgent => {
-            let req: ClaudeHistoryForkRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid Anthropic history fork request: {}", e))?;
-            let resume_at_uuid = fork_session_jsonl(
-                req.parent_session_id,
-                req.new_session_id,
-                req.cwd,
-                req.keep_messages,
-            )?;
-            Ok(serde_json::json!({
-                "status": "applied",
-                "resume_at_uuid": resume_at_uuid,
-            }))
-        }
-        ProviderKind::Codex => {
-            let req: CodexHistoryForkRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid OpenAI history fork request: {}", e))?;
-            if req.thread_id.trim().is_empty() {
-                return Ok(serde_json::json!({
-                    "status": "unsupported",
-                    "reason": "thread_id_required",
-                }));
-            }
-            let codex_thread_id =
-                state
-                    .codex
-                    .fork_thread(&req.thread_id, &req.cwd, req.drop_turns)?;
-            Ok(serde_json::json!({
-                "status": "applied",
-                "codex_thread_id": codex_thread_id,
-            }))
-        }
-        ProviderKind::Cursor | ProviderKind::OpenCode => {
-            Ok(provider_history_unsupported(kind, "fork"))
-        }
-    }
+    state.providers.history_fork(kind, req)
 }
 
 #[tauri::command]
@@ -813,53 +632,7 @@ fn provider_history_hydrate(
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let kind = provider_kind_from_frontend_id(&provider)?;
-    if !provider_history_capabilities(state.inner(), kind).hydrate {
-        return Ok(provider_history_unsupported(kind, "hydrate"));
-    }
-    match kind {
-        ProviderKind::ClaudeAgent => {
-            let req: ClaudeHistoryHydrateRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid Anthropic history hydrate request: {}", e))?;
-            let stat = stat_session_jsonl(req.session_id.clone(), req.cwd.clone())?;
-            let messages = load_session_history(req.session_id, req.cwd)?;
-            let status = if messages.is_empty() {
-                "empty"
-            } else {
-                "messages"
-            };
-            Ok(serde_json::json!({
-                "status": status,
-                "messages": messages,
-                "stat": stat,
-            }))
-        }
-        ProviderKind::Codex => {
-            let req: CodexHistoryHydrateRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid OpenAI history hydrate request: {}", e))?;
-            if req.thread_id.trim().is_empty() {
-                return Ok(serde_json::json!({
-                    "status": "skipped",
-                    "messages": [],
-                    "stat": null,
-                    "reason": "thread_id_required",
-                }));
-            }
-            let messages = load_codex_session_history(req.thread_id)?;
-            let status = if messages.is_empty() {
-                "empty"
-            } else {
-                "messages"
-            };
-            Ok(serde_json::json!({
-                "status": status,
-                "messages": messages,
-                "stat": null,
-            }))
-        }
-        ProviderKind::Cursor | ProviderKind::OpenCode => {
-            Ok(provider_history_unsupported(kind, "hydrate"))
-        }
-    }
+    state.providers.history_hydrate(kind, req)
 }
 
 #[tauri::command]
@@ -869,41 +642,7 @@ fn provider_history_delete(
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let kind = provider_kind_from_frontend_id(&provider)?;
-    if !provider_history_capabilities(state.inner(), kind).delete {
-        return Ok(provider_history_unsupported(kind, "delete"));
-    }
-    match kind {
-        ProviderKind::ClaudeAgent => {
-            let req: ClaudeHistoryDeleteRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid Anthropic history delete request: {}", e))?;
-            delete_session_jsonl(req.session_id, req.cwd)?;
-            Ok(serde_json::json!({
-                "status": "applied",
-                "method": "deleted",
-            }))
-        }
-        ProviderKind::Codex => {
-            let req: CodexHistoryDeleteRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid OpenAI history delete request: {}", e))?;
-            let reason = if req
-                .thread_id
-                .as_deref()
-                .is_some_and(|thread_id| !thread_id.trim().is_empty())
-            {
-                "codex_rollout_delete_is_not_safe"
-            } else {
-                "codex_thread_id_missing"
-            };
-            Ok(serde_json::json!({
-                "status": "skipped",
-                "method": "skipped",
-                "reason": reason,
-            }))
-        }
-        ProviderKind::Cursor | ProviderKind::OpenCode => {
-            Ok(provider_history_unsupported(kind, "delete"))
-        }
-    }
+    state.providers.history_delete(kind, req)
 }
 
 #[tauri::command]
@@ -1597,6 +1336,21 @@ fn strip_bom(s: &str) -> &str {
 
 #[tauri::command]
 fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMessage>, String> {
+    load_session_history_impl(session_id, cwd)
+}
+
+pub(crate) fn load_session_history_impl(
+    session_id: String,
+    cwd: String,
+) -> Result<Vec<HistoryMessage>, String> {
+    load_session_history_at_impl(session_id, cwd, None)
+}
+
+pub(crate) fn load_session_history_at_impl(
+    session_id: String,
+    cwd: String,
+    leaf_uuid: Option<String>,
+) -> Result<Vec<HistoryMessage>, String> {
     let Some(path) = existing_session_jsonl_path(&cwd, &session_id)? else {
         return Ok(vec![]);
     };
@@ -1605,7 +1359,10 @@ fn load_session_history(session_id: String, cwd: String) -> Result<Vec<HistoryMe
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(format!("read: {}", e)),
     };
-    Ok(parse_session_history_lines(content.lines()))
+    Ok(parse_active_session_history_lines(
+        &content,
+        leaf_uuid.as_deref(),
+    ))
 }
 
 /// Shared JSONL → HistoryMessage pipeline used by both the full loader and
@@ -1765,6 +1522,80 @@ fn parse_session_history_lines<'a>(
     messages
 }
 
+fn jsonl_uuid(line: &str) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_str(strip_bom(line)).ok()?;
+    val["uuid"].as_str().map(str::to_string)
+}
+
+fn active_transcript_uuid_set(
+    content: &str,
+    leaf_uuid: Option<&str>,
+) -> std::collections::HashSet<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut parents: HashMap<String, Option<String>> = HashMap::new();
+    let mut ordered: Vec<String> = Vec::new();
+    let mut referenced: HashSet<String> = HashSet::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: serde_json::Value = match serde_json::from_str(strip_bom(line)) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !matches!(val["type"].as_str(), Some("user") | Some("assistant")) {
+            continue;
+        }
+        let Some(uuid) = val["uuid"].as_str().map(str::to_string) else {
+            continue;
+        };
+        let parent = val["parentUuid"].as_str().map(str::to_string);
+        if let Some(parent_uuid) = parent.as_ref() {
+            referenced.insert(parent_uuid.clone());
+        }
+        ordered.push(uuid.clone());
+        parents.insert(uuid, parent);
+    }
+
+    let leaf = leaf_uuid
+        .filter(|uuid| parents.contains_key(*uuid))
+        .map(str::to_string)
+        .or_else(|| {
+            ordered
+                .iter()
+                .rev()
+                .find(|uuid| !referenced.contains(uuid.as_str()))
+                .cloned()
+        });
+
+    let mut active = HashSet::new();
+    let mut current = leaf;
+    while let Some(uuid) = current {
+        if !active.insert(uuid.clone()) {
+            break;
+        }
+        current = parents.get(&uuid).and_then(Clone::clone);
+    }
+    active
+}
+
+fn parse_active_session_history_lines(
+    content: &str,
+    leaf_uuid: Option<&str>,
+) -> Vec<HistoryMessage> {
+    let active = active_transcript_uuid_set(content, leaf_uuid);
+    if active.is_empty() {
+        return parse_session_history_lines(content.lines());
+    }
+    parse_session_history_lines(content.lines().filter(|line| {
+        jsonl_uuid(line)
+            .map(|uuid| active.contains(uuid.as_str()))
+            .unwrap_or(false)
+    }))
+}
+
 /// Read up to `limit` complete trailing lines from `path` without parsing the
 /// whole file. Seeks to EOF and reads backward in 64 KiB chunks until we
 /// either collect `limit` complete lines (separated by `\n`) or reach byte 0.
@@ -1908,6 +1739,13 @@ fn load_session_history_tail(
 /// missing (fresh session or never persisted).
 #[tauri::command]
 fn stat_session_jsonl(session_id: String, cwd: String) -> Result<Option<SessionJsonlStat>, String> {
+    stat_session_jsonl_impl(session_id, cwd)
+}
+
+pub(crate) fn stat_session_jsonl_impl(
+    session_id: String,
+    cwd: String,
+) -> Result<Option<SessionJsonlStat>, String> {
     let Some(path) = existing_session_jsonl_path(&cwd, &session_id)? else {
         return Ok(None);
     };
@@ -2009,6 +1847,14 @@ fn truncate_session_jsonl(
 /// This matches the frontend's message count precisely — no turn-counting mismatches.
 #[tauri::command]
 fn truncate_session_jsonl_by_messages(
+    session_id: String,
+    cwd: String,
+    keep_messages: usize,
+) -> Result<serde_json::Value, String> {
+    truncate_session_jsonl_by_messages_impl(session_id, cwd, keep_messages)
+}
+
+pub(crate) fn truncate_session_jsonl_by_messages_impl(
     session_id: String,
     cwd: String,
     keep_messages: usize,
@@ -2228,6 +2074,15 @@ fn fork_session_jsonl(
     cwd: String,
     keep_messages: usize,
 ) -> Result<String, String> {
+    fork_session_jsonl_impl(parent_session_id, new_session_id, cwd, keep_messages)
+}
+
+pub(crate) fn fork_session_jsonl_impl(
+    parent_session_id: String,
+    new_session_id: String,
+    cwd: String,
+    keep_messages: usize,
+) -> Result<String, String> {
     let src = session_jsonl_path(&cwd, &parent_session_id)?;
     let dest = session_jsonl_path(&cwd, &new_session_id)?;
     check_rewrite_size_limit(&src)?;
@@ -2255,7 +2110,9 @@ fn fork_session_jsonl(
     // cause resume-at to reference a parent UUID that's not at the fork point.
     // Roll back by removing dest (best-effort; log if cleanup itself fails)
     // and bubble up the truncate error so the caller can surface or retry.
-    if let Err(e) = truncate_session_jsonl_by_messages(new_session_id.clone(), cwd, keep_messages) {
+    if let Err(e) =
+        truncate_session_jsonl_by_messages_impl(new_session_id.clone(), cwd, keep_messages)
+    {
         if let Err(rm_err) = std::fs::remove_file(&dest) {
             safe_eprintln!(
                 "[fork] rollback: failed to remove dest {} after truncate error: {}",
@@ -2282,6 +2139,10 @@ fn fork_session_jsonl(
 /// write in the first place.
 #[tauri::command]
 fn delete_session_jsonl(session_id: String, cwd: String) -> Result<(), String> {
+    delete_session_jsonl_impl(session_id, cwd)
+}
+
+pub(crate) fn delete_session_jsonl_impl(session_id: String, cwd: String) -> Result<(), String> {
     let path = session_jsonl_path(&cwd, &session_id)?;
     match std::fs::remove_file(&path) {
         Ok(()) => {
@@ -2298,6 +2159,14 @@ fn delete_session_jsonl(session_id: String, cwd: String) -> Result<(), String> {
 /// Correct even after prior rewinds leave orphaned branches in append-only JSONL.
 #[tauri::command]
 fn find_rewind_uuid(
+    session_id: String,
+    cwd: String,
+    keep_messages: usize,
+) -> Result<String, String> {
+    find_rewind_uuid_impl(session_id, cwd, keep_messages)
+}
+
+pub(crate) fn find_rewind_uuid_impl(
     session_id: String,
     cwd: String,
     keep_messages: usize,
@@ -6313,5 +6182,49 @@ mod stability_tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].result.as_deref(), Some("hi"));
         assert!(!tool_calls[0].is_error);
+    }
+
+    #[test]
+    fn active_history_parser_omits_orphaned_rewind_branch() {
+        let content = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-04-27T00:00:00Z","message":{"role":"user","content":"first"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-04-27T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"first done"}]}}"#,
+            r#"{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-04-27T00:00:02Z","message":{"role":"user","content":"old future"}}"#,
+            r#"{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"2026-04-27T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"old future done"}]}}"#,
+            r#"{"type":"user","uuid":"u3","parentUuid":"a1","timestamp":"2026-04-27T00:00:04Z","message":{"role":"user","content":"new branch"}}"#,
+            r#"{"type":"assistant","uuid":"a3","parentUuid":"u3","timestamp":"2026-04-27T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"new branch done"}]}}"#,
+        ]
+        .join("\n");
+
+        let messages = parse_active_session_history_lines(&content, None);
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "first done", "new branch", "new branch done"]
+        );
+    }
+
+    #[test]
+    fn active_history_parser_can_stop_at_rewind_cursor() {
+        let content = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-04-27T00:00:00Z","message":{"role":"user","content":"first"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-04-27T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"first done"}]}}"#,
+            r#"{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-04-27T00:00:02Z","message":{"role":"user","content":"future"}}"#,
+            r#"{"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"2026-04-27T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"future done"}]}}"#,
+        ]
+        .join("\n");
+
+        let messages = parse_active_session_history_lines(&content, Some("a1"));
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "first done"]
+        );
     }
 }

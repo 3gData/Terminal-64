@@ -29,7 +29,12 @@ import { isProviderId, type ProviderId } from "../../lib/providers";
 import { widgetBus } from "../../lib/widgetBus";
 import { invokePlugin, onPluginEvent, type PluginStreamHandle } from "../../lib/pluginApi";
 import { startVoice as startVoiceCapture, stopVoice as stopVoiceCapture, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
-import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../../stores/claudeStore";
+import {
+  getOpenAiProviderSessionMetadata,
+  resolveSessionProviderState,
+  useClaudeStore,
+  type ClaudeSession,
+} from "../../stores/claudeStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useVoiceStore } from "../../stores/voiceStore";
@@ -168,16 +173,17 @@ function providerTurnForSession(
   opts?: { started?: boolean; defaultCodexPermission?: string },
 ): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
+  const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
   return {
     provider: providerState.provider,
     sessionId,
     cwd: session.cwd || ".",
     prompt,
     started: opts?.started ?? session.hasBeenStarted,
-    threadId: providerState.openai?.codexThreadId ?? null,
+    threadId: openaiMetadata?.codexThreadId ?? null,
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? opts?.defaultCodexPermission ?? "full-auto",
+    selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? opts?.defaultCodexPermission ?? "full-auto",
     permissionMode: "auto",
     skipOpenwolf: session.skipOpenwolf,
     seedTranscript: providerState.seedTranscript,

@@ -16,8 +16,9 @@ use std::sync::Arc;
 use tauri::AppHandle;
 
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterError, ProviderCreateSessionRequest,
-    ProviderHistoryCapabilities, ProviderKind, ProviderSendPromptRequest,
+    provider_history_unsupported_response, ProviderAdapter, ProviderAdapterError,
+    ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
+    ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
 };
 
 pub struct ProviderRegistry {
@@ -94,6 +95,66 @@ impl ProviderRegistry {
             .unwrap_or(ProviderHistoryCapabilities::NONE)
     }
 
+    fn history_adapter_or_unsupported(
+        &self,
+        kind: ProviderKind,
+        operation: &str,
+        supports: impl Fn(ProviderHistoryCapabilities) -> bool,
+    ) -> Result<Arc<dyn ProviderAdapter>, ProviderHistoryResponse> {
+        let Some(adapter) = self.get(kind) else {
+            return Err(provider_history_unsupported_response(kind, operation));
+        };
+        if supports(adapter.capabilities().history) {
+            Ok(adapter)
+        } else {
+            Err(provider_history_unsupported_response(kind, operation))
+        }
+    }
+
+    pub fn history_truncate(
+        &self,
+        kind: ProviderKind,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        match self.history_adapter_or_unsupported(kind, "rewind", |history| history.rewind) {
+            Ok(adapter) => adapter.history_truncate(req),
+            Err(response) => Ok(response),
+        }
+    }
+
+    pub fn history_fork(
+        &self,
+        kind: ProviderKind,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        match self.history_adapter_or_unsupported(kind, "fork", |history| history.fork) {
+            Ok(adapter) => adapter.history_fork(req),
+            Err(response) => Ok(response),
+        }
+    }
+
+    pub fn history_hydrate(
+        &self,
+        kind: ProviderKind,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        match self.history_adapter_or_unsupported(kind, "hydrate", |history| history.hydrate) {
+            Ok(adapter) => adapter.history_hydrate(req),
+            Err(response) => Ok(response),
+        }
+    }
+
+    pub fn history_delete(
+        &self,
+        kind: ProviderKind,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        match self.history_adapter_or_unsupported(kind, "delete", |history| history.delete) {
+            Ok(adapter) => adapter.history_delete(req),
+            Err(response) => Ok(response),
+        }
+    }
+
     /// Typed accessor for the Claude adapter.
     pub fn claude(&self) -> Option<Arc<dyn ProviderAdapter>> {
         self.get(ProviderKind::ClaudeAgent)
@@ -142,5 +203,410 @@ impl ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::providers::events::ProviderEvent;
+    use crate::providers::traits::{
+        ProviderAdapterCapabilities, ProviderApprovalDecision, ProviderCommandAdapter,
+        ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
+        ProviderSessionStartInput, ProviderThreadSnapshot, ProviderThreadTurnSnapshot,
+        ProviderTurnStartResult, ProviderUserInputAnswers,
+    };
+
+    struct MockAdapter {
+        kind: ProviderKind,
+        capabilities: ProviderAdapterCapabilities,
+        calls: Arc<Mutex<Vec<String>>>,
+        stop_all_error: Option<String>,
+    }
+
+    impl MockAdapter {
+        fn new(
+            kind: ProviderKind,
+            history: ProviderHistoryCapabilities,
+            calls: Arc<Mutex<Vec<String>>>,
+        ) -> Self {
+            Self {
+                kind,
+                capabilities: ProviderAdapterCapabilities {
+                    session_model_switch: ProviderSessionModelSwitchMode::InSession,
+                    history,
+                },
+                calls,
+                stop_all_error: None,
+            }
+        }
+
+        fn with_stop_all_error(mut self, error: &str) -> Self {
+            self.stop_all_error = Some(error.to_string());
+            self
+        }
+
+        fn record(&self, call: impl Into<String>) {
+            self.calls.lock().unwrap().push(call.into());
+        }
+    }
+
+    impl ProviderCommandAdapter for MockAdapter {
+        fn create_session(
+            &self,
+            _app_handle: &tauri::AppHandle,
+            req: ProviderCreateSessionRequest,
+        ) -> Result<String, ProviderAdapterError> {
+            self.record(format!("create:{}", req.payload));
+            Ok("created-session".to_string())
+        }
+
+        fn send_prompt(
+            &self,
+            _app_handle: &tauri::AppHandle,
+            req: ProviderSendPromptRequest,
+        ) -> Result<(), ProviderAdapterError> {
+            self.record(format!("send:{}", req.payload));
+            Ok(())
+        }
+
+        fn cancel_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
+            self.record(format!("cancel:{session_id}"));
+            Ok(())
+        }
+
+        fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
+            self.record(format!("close:{session_id}"));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for MockAdapter {
+        fn provider(&self) -> ProviderKind {
+            self.kind
+        }
+
+        fn capabilities(&self) -> &ProviderAdapterCapabilities {
+            &self.capabilities
+        }
+
+        fn history_truncate(
+            &self,
+            req: ProviderHistoryRequest,
+        ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+            self.record(format!("history-rewind:{req}"));
+            Ok(json!({ "status": "applied", "method": "mock", "operation": "rewind" }))
+        }
+
+        fn history_fork(
+            &self,
+            req: ProviderHistoryRequest,
+        ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+            self.record(format!("history-fork:{req}"));
+            Ok(json!({ "status": "applied", "method": "mock", "operation": "fork" }))
+        }
+
+        fn history_hydrate(
+            &self,
+            req: ProviderHistoryRequest,
+        ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+            self.record(format!("history-hydrate:{req}"));
+            Ok(
+                json!({ "status": "messages", "method": "mock", "operation": "hydrate", "messages": [] }),
+            )
+        }
+
+        fn history_delete(
+            &self,
+            req: ProviderHistoryRequest,
+        ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+            self.record(format!("history-delete:{req}"));
+            Ok(json!({ "status": "applied", "method": "deleted", "operation": "delete" }))
+        }
+
+        async fn start_session(
+            &self,
+            input: ProviderSessionStartInput,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.record(format!("start:{input}"));
+            Ok(json!({ "id": "thread-1", "provider": format!("{:?}", self.kind) }))
+        }
+
+        async fn send_turn(
+            &self,
+            input: ProviderSendTurnInput,
+        ) -> Result<ProviderTurnStartResult, ProviderAdapterError> {
+            self.record(format!("turn:{input}"));
+            Ok(json!({ "turnId": "turn-1" }))
+        }
+
+        async fn interrupt_turn(
+            &self,
+            thread_id: &str,
+            _turn_id: Option<&str>,
+        ) -> Result<(), ProviderAdapterError> {
+            self.record(format!("interrupt:{thread_id}"));
+            Ok(())
+        }
+
+        async fn respond_to_request(
+            &self,
+            thread_id: &str,
+            request_id: &str,
+            _decision: ProviderApprovalDecision,
+        ) -> Result<(), ProviderAdapterError> {
+            self.record(format!("request:{thread_id}:{request_id}"));
+            Ok(())
+        }
+
+        async fn respond_to_user_input(
+            &self,
+            thread_id: &str,
+            request_id: &str,
+            _answers: ProviderUserInputAnswers,
+        ) -> Result<(), ProviderAdapterError> {
+            self.record(format!("user-input:{thread_id}:{request_id}"));
+            Ok(())
+        }
+
+        async fn stop_session(&self, thread_id: &str) -> Result<(), ProviderAdapterError> {
+            self.record(format!("stop:{thread_id}"));
+            Ok(())
+        }
+
+        async fn list_sessions(&self) -> Vec<ProviderSession> {
+            vec![json!({ "id": "thread-1" })]
+        }
+
+        async fn has_session(&self, thread_id: &str) -> bool {
+            thread_id == "thread-1"
+        }
+
+        async fn read_thread(
+            &self,
+            thread_id: &str,
+        ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
+            Ok(ProviderThreadSnapshot {
+                thread_id: thread_id.to_string(),
+                provider: self.kind,
+                turns: vec![ProviderThreadTurnSnapshot {
+                    turn_id: "turn-1".to_string(),
+                    items: Vec::new(),
+                    usage: None,
+                    metadata: None,
+                }],
+                metadata: None,
+            })
+        }
+
+        async fn rollback_thread(
+            &self,
+            thread_id: &str,
+            num_turns: u32,
+        ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
+            self.record(format!("rollback:{thread_id}:{num_turns}"));
+            self.read_thread(thread_id).await
+        }
+
+        async fn stop_all(&self) -> Result<(), ProviderAdapterError> {
+            self.record(format!("stop-all:{:?}", self.kind));
+            if let Some(error) = &self.stop_all_error {
+                Err(error.clone())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn stream_events(&self) -> mpsc::Receiver<ProviderEvent> {
+            let (_tx, rx) = mpsc::channel(1);
+            rx
+        }
+    }
+
+    #[test]
+    fn provider_history_capability_constants_are_explicit() {
+        let none = ProviderHistoryCapabilities::NONE;
+        assert!(!none.hydrate);
+        assert!(!none.fork);
+        assert!(!none.rewind);
+        assert!(!none.delete);
+
+        let full = ProviderHistoryCapabilities::FULL;
+        assert!(full.hydrate);
+        assert!(full.fork);
+        assert!(full.rewind);
+        assert!(full.delete);
+    }
+
+    #[test]
+    fn registry_routes_registered_lifecycle_and_history_capabilities() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(MockAdapter::new(
+            ProviderKind::OpenCode,
+            ProviderHistoryCapabilities::FULL,
+            calls.clone(),
+        ));
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::OpenCode, adapter);
+
+        let capabilities = registry.history_capabilities(ProviderKind::OpenCode);
+        assert!(capabilities.hydrate);
+        assert!(capabilities.fork);
+        assert!(capabilities.rewind);
+        assert!(capabilities.delete);
+
+        registry
+            .cancel_session(ProviderKind::OpenCode, "session-1")
+            .unwrap();
+        registry
+            .close_session(ProviderKind::OpenCode, "session-1")
+            .unwrap();
+        let rewind = registry
+            .history_truncate(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+        let fork = registry
+            .history_fork(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+        let hydrate = registry
+            .history_hydrate(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+        let delete = registry
+            .history_delete(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+
+        assert_eq!(rewind["operation"], "rewind");
+        assert_eq!(fork["operation"], "fork");
+        assert_eq!(hydrate["operation"], "hydrate");
+        assert_eq!(delete["operation"], "delete");
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                "cancel:session-1".to_string(),
+                "close:session-1".to_string(),
+                "history-rewind:{\"session_id\":\"session-1\"}".to_string(),
+                "history-fork:{\"session_id\":\"session-1\"}".to_string(),
+                "history-hydrate:{\"session_id\":\"session-1\"}".to_string(),
+                "history-delete:{\"session_id\":\"session-1\"}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_fails_closed_for_unregistered_future_provider() {
+        let registry = ProviderRegistry::new();
+
+        let capabilities = registry.history_capabilities(ProviderKind::OpenCode);
+        assert!(!capabilities.hydrate);
+        assert!(!capabilities.fork);
+        assert!(!capabilities.rewind);
+        assert!(!capabilities.delete);
+
+        let err = match registry.require(ProviderKind::OpenCode) {
+            Ok(_) => panic!("OpenCode adapter should not be registered"),
+            Err(err) => err,
+        };
+        assert!(err.contains("No provider adapter registered for OpenCode"));
+
+        let cancel_err = registry
+            .cancel_session(ProviderKind::OpenCode, "missing")
+            .unwrap_err();
+        assert!(cancel_err.contains("No provider adapter registered for OpenCode"));
+
+        let close_err = registry
+            .close_session(ProviderKind::OpenCode, "missing")
+            .unwrap_err();
+        assert!(close_err.contains("No provider adapter registered for OpenCode"));
+
+        let history = registry
+            .history_delete(ProviderKind::OpenCode, json!({ "session_id": "missing" }))
+            .unwrap();
+        assert_eq!(history["status"], "unsupported");
+        assert_eq!(history["method"], "unsupported");
+        assert!(history["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("history delete")));
+    }
+
+    #[test]
+    fn registry_history_methods_fail_closed_when_capability_disabled() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(MockAdapter::new(
+            ProviderKind::OpenCode,
+            ProviderHistoryCapabilities {
+                hydrate: true,
+                fork: false,
+                rewind: false,
+                delete: false,
+            },
+            calls.clone(),
+        ));
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::OpenCode, adapter);
+
+        let hydrate = registry
+            .history_hydrate(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+        let rewind = registry
+            .history_truncate(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+        let fork = registry
+            .history_fork(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+        let delete = registry
+            .history_delete(ProviderKind::OpenCode, json!({ "session_id": "session-1" }))
+            .unwrap();
+
+        assert_eq!(hydrate["operation"], "hydrate");
+        assert_eq!(rewind["status"], "unsupported");
+        assert_eq!(fork["status"], "unsupported");
+        assert_eq!(delete["status"], "unsupported");
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["history-hydrate:{\"session_id\":\"session-1\"}".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_stop_all_collects_provider_errors() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            ProviderKind::ClaudeAgent,
+            Arc::new(MockAdapter::new(
+                ProviderKind::ClaudeAgent,
+                ProviderHistoryCapabilities::FULL,
+                calls.clone(),
+            )),
+        );
+        registry.register(
+            ProviderKind::Codex,
+            Arc::new(
+                MockAdapter::new(
+                    ProviderKind::Codex,
+                    ProviderHistoryCapabilities::FULL,
+                    calls.clone(),
+                )
+                .with_stop_all_error("codex stop failed"),
+            ),
+        );
+
+        let errors = registry.stop_all().await.unwrap_err();
+        assert_eq!(errors, vec!["codex stop failed".to_string()]);
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|call| call == "stop-all:ClaudeAgent"));
+        assert!(calls.iter().any(|call| call == "stop-all:Codex"));
     }
 }

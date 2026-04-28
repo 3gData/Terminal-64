@@ -1,5 +1,10 @@
 import { useEffect } from "react";
-import { resolveSessionProviderState, useClaudeStore, type ClaudeSession } from "../stores/claudeStore";
+import {
+  getOpenAiProviderSessionMetadata,
+  resolveSessionProviderState,
+  useClaudeStore,
+  type ClaudeSession,
+} from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
 import { useCanvasStore } from "../stores/canvasStore";
 import { cleanupDelegationGroup, clearT64DelegationEnv } from "../lib/tauriApi";
@@ -61,18 +66,19 @@ function providerTurnForSession({
   permissionMode: PermissionMode;
   permissionOverride?: PermissionMode;
   defaultCodexPermission?: string;
-}): ProviderTurnInput {
-  const providerState = resolveSessionProviderState(session);
-  const input: ProviderTurnInput = {
-    provider: providerState.provider,
+  }): ProviderTurnInput {
+    const providerState = resolveSessionProviderState(session);
+    const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
+    const input: ProviderTurnInput = {
+      provider: providerState.provider,
     sessionId,
     cwd: session.cwd || ".",
     prompt,
     started: session.hasBeenStarted,
-    threadId: providerState.openai?.codexThreadId ?? null,
-    selectedModel: providerState.selectedModel,
-    selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? defaultCodexPermission,
+      threadId: openaiMetadata?.codexThreadId ?? null,
+      selectedModel: providerState.selectedModel,
+      selectedEffort: providerState.selectedEffort,
+      selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? defaultCodexPermission,
     permissionMode,
     skipOpenwolf: session.skipOpenwolf,
     seedTranscript: providerState.seedTranscript,
@@ -114,6 +120,7 @@ function purgeDelegationChildren(groupId: string) {
     // Kill the CLI subprocess if still alive
     const childSession = claudeStore.sessions[childId];
     const childProviderState = childSession ? resolveSessionProviderState(childSession) : null;
+    const childOpenAiMetadata = getOpenAiProviderSessionMetadata(childProviderState);
     const fallbackProviderState = resolveSessionProviderState(parentSession);
     const childProvider = childProviderState?.provider
       ?? providerIdFromRuntimeMetadata(task.childRuntime?.providerId)
@@ -128,7 +135,7 @@ function purgeDelegationChildren(groupId: string) {
         provider: childProvider,
         sessionId: childId,
         cwd: cleanupCwd,
-        codexThreadId: childProviderState?.openai?.codexThreadId ?? null,
+        codexThreadId: childOpenAiMetadata?.codexThreadId ?? null,
       })
         .finally(() => delStore.setTaskCleanupState(groupId, task.id, "purged"))
         .catch(() => {});

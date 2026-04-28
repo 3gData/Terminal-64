@@ -22,6 +22,7 @@
 //! re-attaches with `codex exec resume <thread_id>`.
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -31,13 +32,15 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
+use crate::providers::emit_provider_event;
 use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
     ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
-    ProviderKind, ProviderSendPromptRequest, ProviderSendTurnInput, ProviderSession,
-    ProviderSessionModelSwitchMode, ProviderSessionStartInput, ProviderThreadSnapshot,
-    ProviderTurnStartResult, ProviderUserInputAnswers,
+    ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
+    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
+    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
+    ProviderUserInputAnswers,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
 use crate::types::{
@@ -534,6 +537,7 @@ fn emit_app_server_diagnostic(
 
 fn emit_codex_json(app_handle: &AppHandle, session_id: &str, value: JsonValue) {
     let data = cap_event_size(value.to_string());
+    emit_provider_event(app_handle, "openai", session_id, &data);
     if let Err(e) = app_handle.emit(
         "codex-event",
         CodexEvent {
@@ -1187,6 +1191,7 @@ fn spawn_and_stream(
                     had_output = true;
                     for event_line in codex_exec_line_to_frontend_lines(&line) {
                         let data = cap_event_size(event_line);
+                        emit_provider_event(&handle, "openai", &sid, &data);
                         if let Err(e) = handle.emit(
                             "codex-event",
                             CodexEvent {
@@ -1217,15 +1222,17 @@ fn spawn_and_stream(
                 sid,
                 &error_msg[..error_msg.len().min(200)]
             );
+            let data = serde_json::json!({
+                "type": "error",
+                "message": error_msg,
+            })
+            .to_string();
+            emit_provider_event(&handle, "openai", &sid, &data);
             if let Err(e) = handle.emit(
                 "codex-event",
                 CodexEvent {
                     session_id: sid.clone(),
-                    data: serde_json::json!({
-                        "type": "error",
-                        "message": error_msg,
-                    })
-                    .to_string(),
+                    data,
                 },
             ) {
                 safe_eprintln!("[codex] Failed to emit error event for {}: {}", sid, e);
@@ -1772,6 +1779,30 @@ pub struct CodexAdapter {
     capabilities: ProviderAdapterCapabilities,
 }
 
+#[derive(Deserialize)]
+struct CodexHistoryTruncateRequest {
+    thread_id: String,
+    cwd: String,
+    num_turns: u32,
+}
+
+#[derive(Deserialize)]
+struct CodexHistoryForkRequest {
+    thread_id: String,
+    cwd: String,
+    drop_turns: u32,
+}
+
+#[derive(Deserialize)]
+struct CodexHistoryHydrateRequest {
+    thread_id: String,
+}
+
+#[derive(Deserialize)]
+struct CodexHistoryDeleteRequest {
+    thread_id: Option<String>,
+}
+
 impl CodexAdapter {
     pub fn new() -> Self {
         Self {
@@ -2059,6 +2090,124 @@ impl ProviderAdapter for CodexAdapter {
 
     fn capabilities(&self) -> &ProviderAdapterCapabilities {
         &self.capabilities
+    }
+
+    fn history_truncate(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: CodexHistoryTruncateRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid OpenAI history truncate request: {}", e))?;
+        if req.thread_id.trim().is_empty() {
+            return Ok(json!({
+                "status": "unsupported",
+                "method": "unsupported",
+                "turns": 0,
+                "reason": "thread_id_required",
+            }));
+        }
+        if req.num_turns == 0 {
+            return Ok(json!({
+                "status": "skipped",
+                "method": "noop",
+                "turns": 0,
+                "reason": "no_turns_to_drop",
+            }));
+        }
+        match self.rollback_thread(&req.thread_id, &req.cwd, req.num_turns) {
+            Ok(()) => Ok(json!({
+                "status": "applied",
+                "method": "app_server",
+                "turns": req.num_turns,
+            })),
+            Err(rollback_error) => {
+                safe_eprintln!(
+                    "[provider-history] Codex rollback failed ({}); falling back to rollout truncation",
+                    rollback_error
+                );
+                let turns = truncate_codex_rollout_by_turns(&req.thread_id, req.num_turns)
+                    .map_err(|truncate_error| {
+                        format!(
+                            "Codex rollback failed ({}); rollout truncation failed ({})",
+                            rollback_error, truncate_error
+                        )
+                    })?;
+                Ok(json!({
+                    "status": "applied",
+                    "method": "rollout",
+                    "turns": turns,
+                    "rollback_error": rollback_error,
+                }))
+            }
+        }
+    }
+
+    fn history_fork(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: CodexHistoryForkRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid OpenAI history fork request: {}", e))?;
+        if req.thread_id.trim().is_empty() {
+            return Ok(json!({
+                "status": "unsupported",
+                "reason": "thread_id_required",
+            }));
+        }
+        let codex_thread_id = self.fork_thread(&req.thread_id, &req.cwd, req.drop_turns)?;
+        Ok(json!({
+            "status": "applied",
+            "codex_thread_id": codex_thread_id,
+        }))
+    }
+
+    fn history_hydrate(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: CodexHistoryHydrateRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid OpenAI history hydrate request: {}", e))?;
+        if req.thread_id.trim().is_empty() {
+            return Ok(json!({
+                "status": "skipped",
+                "messages": [],
+                "stat": null,
+                "reason": "thread_id_required",
+            }));
+        }
+        let messages = load_codex_history_by_thread(&req.thread_id);
+        let status = if messages.is_empty() {
+            "empty"
+        } else {
+            "messages"
+        };
+        Ok(json!({
+            "status": status,
+            "messages": messages,
+            "stat": null,
+        }))
+    }
+
+    fn history_delete(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: CodexHistoryDeleteRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid OpenAI history delete request: {}", e))?;
+        let reason = if req
+            .thread_id
+            .as_deref()
+            .is_some_and(|thread_id| !thread_id.trim().is_empty())
+        {
+            "codex_rollout_delete_is_not_safe"
+        } else {
+            "codex_thread_id_missing"
+        };
+        Ok(json!({
+            "status": "skipped",
+            "method": "skipped",
+            "reason": reason,
+        }))
     }
 
     async fn start_session(

@@ -1,6 +1,7 @@
 import {
   buildProviderToolCall,
   buildProviderToolResult,
+  type NormalizedProviderEvent,
   providerToolChangedPaths,
   type ProviderToolCall,
   type ProviderToolChange,
@@ -77,6 +78,13 @@ export interface CodexPendingItem {
   text: string;
   outputText: string;
   inputArgs: Record<string, unknown>;
+}
+
+function appendOrReplaceAccumulated(prev: string, next: string): string {
+  if (!next) return prev;
+  if (!prev) return next;
+  if (next.startsWith(prev)) return next;
+  return prev + next;
 }
 
 export function classifyCodexItem(itemType: string | undefined): CodexPendingItem["kind"] {
@@ -304,4 +312,286 @@ export function getCodexContextWindow(model: string | undefined | null): number 
   if (m.startsWith("gpt-5")) return 400_000;
   if (m.startsWith("o3") || m.startsWith("o4")) return 200_000;
   return 256_000;
+}
+
+function codexUsageEvent(
+  usage: CodexUsage | undefined,
+  contextWindow: number | null | undefined,
+): NormalizedProviderEvent | null {
+  if (!usage || typeof usage.input_tokens !== "number") return null;
+  const inputTokens = usage.input_tokens;
+  const event: NormalizedProviderEvent = {
+    kind: "usage",
+    inputTokens,
+    ...(typeof usage.output_tokens === "number" ? { outputTokens: usage.output_tokens } : {}),
+    ...(typeof usage.total_tokens === "number" ? { totalTokens: usage.total_tokens } : {}),
+    ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextMax: contextWindow } : {}),
+  };
+  return event;
+}
+
+export class CodexLiveEventDecoder {
+  private readonly pending = new Map<string, Map<string, CodexPendingItem>>();
+  private readonly assistantFinalized = new Set<string>();
+  private readonly parseErrorCounts = new Map<string, number>();
+
+  resetSession(sessionId: string) {
+    this.pending.delete(sessionId);
+    this.assistantFinalized.delete(sessionId);
+    this.parseErrorCounts.delete(sessionId);
+  }
+
+  decode(sessionId: string, data: string): NormalizedProviderEvent[] {
+    let parsed: CodexNdjsonEvent;
+    try {
+      parsed = JSON.parse(data) as CodexNdjsonEvent;
+    } catch (err) {
+      const count = (this.parseErrorCounts.get(sessionId) || 0) + 1;
+      this.parseErrorCounts.set(sessionId, count);
+      console.warn("[codex] Dropped malformed stream event:", data.slice(0, 200), err);
+      return [];
+    }
+    this.parseErrorCounts.delete(sessionId);
+
+    const type = parsed.type || "";
+    if (!type) return [];
+
+    if (type === "thread.started" || type === "session_configured") {
+      const threadId = parsed.thread_id || parsed.threadId;
+      this.pending.delete(sessionId);
+      this.assistantFinalized.delete(sessionId);
+      return [{
+        kind: "session_started",
+        ...(threadId ? { threadId } : {}),
+      }];
+    }
+
+    if (type === "mcp.status.updated") {
+      const mcpEvent = parsed as CodexNdjsonEvent & Record<string, unknown>;
+      const servers: unknown[] = Array.isArray(mcpEvent.mcp_servers)
+        ? mcpEvent.mcp_servers
+        : Array.isArray(mcpEvent.servers)
+          ? mcpEvent.servers
+          : mcpEvent.server
+            ? [mcpEvent.server]
+            : [mcpEvent];
+      return [{ kind: "mcp_status", servers }];
+    }
+
+    if (type === "turn.started") {
+      this.assistantFinalized.delete(sessionId);
+      return [{ kind: "turn_started" }];
+    }
+
+    if (type === "token_usage.updated") {
+      const event = codexUsageEvent(parsed.usage ?? parsed.payload?.usage, parsed.context_window);
+      return event ? [event] : [];
+    }
+
+    if (type === "item.started") {
+      const item = parsed.item;
+      if (!item || !item.id) return [];
+      const kind = classifyCodexItem(item.item_type ?? item.type);
+      const itemMap = this.getItemMap(sessionId);
+      itemMap.set(item.id, {
+        itemId: item.id,
+        kind,
+        toolName: codexItemDisplayName(item),
+        text: typeof item.text === "string" ? item.text : "",
+        outputText: "",
+        inputArgs: codexItemInput(item),
+      });
+
+      if (kind === "tool") {
+        const toolCall = codexItemToProviderToolCall(item);
+        if (!toolCall) return [];
+        this.assistantFinalized.add(sessionId);
+        return [{ kind: "tool_call", toolCall }];
+      }
+      return [];
+    }
+
+    if (type === "item.updated" || type === "content.delta") {
+      const item = parsed.item;
+      if (!item?.id) return [];
+      const itemMap = this.getItemMap(sessionId);
+      const tracked = itemMap.get(item.id);
+      if (tracked && tracked.kind === "agent_message") {
+        const candidateText =
+          (typeof parsed.delta === "string" ? parsed.delta : "") ||
+          (typeof parsed.text === "string" ? parsed.text : "") ||
+          (typeof item.text === "string" ? item.text : "");
+        const deltaText =
+          typeof parsed.delta === "string" || typeof parsed.text === "string"
+            ? candidateText
+            : candidateText.startsWith(tracked.text)
+              ? candidateText.slice(tracked.text.length)
+              : candidateText;
+        if (!deltaText) return [];
+        tracked.text = appendOrReplaceAccumulated(tracked.text, candidateText || deltaText);
+        return [{ kind: "assistant_delta", text: deltaText }];
+      }
+      if (tracked && tracked.kind === "tool") {
+        const patch = codexItemToProviderToolPatch(item);
+        const input = patch.input ?? {};
+        tracked.inputArgs = { ...tracked.inputArgs, ...input };
+        const resultDelta = codexItemResultText(item);
+        const hasResultDelta = resultDelta.length > 0 || codexItemIsError(item);
+        if (!hasResultDelta) {
+          return [{ kind: "tool_update", id: item.id, patch }];
+        }
+        tracked.outputText =
+          typeof parsed.delta === "string"
+            ? tracked.outputText + resultDelta
+            : appendOrReplaceAccumulated(tracked.outputText, resultDelta);
+        const result = codexItemToProviderToolResult(item, {
+          result: tracked.outputText,
+          input,
+          ...(patch.name !== undefined ? { name: patch.name } : {}),
+        });
+        return [{
+          kind: "tool_update",
+          id: item.id,
+          patch,
+          ...(result ? { result } : {}),
+        }];
+      }
+      return [];
+    }
+
+    if (type === "agent_message") {
+      const text = parsed.text || parsed.message || "";
+      if (!text) return [];
+      this.assistantFinalized.add(sessionId);
+      return [{ kind: "assistant_message", text }];
+    }
+
+    if (type === "agent_reasoning") {
+      return [];
+    }
+
+    if (type === "item.completed") {
+      return this.decodeCompletedItem(sessionId, parsed.item);
+    }
+
+    if (type === "tool_use" || type === "tool_call_begin") {
+      const item = parsed.item || {};
+      const id = item.id || parsed.thread_id || `${type}-${Date.now()}`;
+      const toolCall = codexItemToProviderToolCall(item, id);
+      if (!toolCall) return [];
+      this.assistantFinalized.add(sessionId);
+      return [{ kind: "tool_call", toolCall }];
+    }
+
+    if (type === "tool_result" || type === "tool_call_end") {
+      const item = parsed.item || {};
+      const id = item.id || "";
+      if (!id) return [];
+      const result =
+        (typeof parsed.output === "string" ? parsed.output : "") ||
+        codexItemResultText(item);
+      const toolResult = codexItemToProviderToolResult(item, { id, result });
+      return toolResult ? [{ kind: "tool_result", toolResult }] : [];
+    }
+
+    if (type === "turn.completed" || type === "task_complete" || type === "task.completed") {
+      const usage = parsed.usage ?? parsed.payload?.usage;
+      const inputTokens = usage?.input_tokens ?? 0;
+      const outputTokens = usage?.output_tokens ?? 0;
+      const totalTokens = usage?.total_tokens ?? inputTokens + outputTokens;
+      const completionError =
+        (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
+        parsed.message ||
+        "";
+      this.resetSession(sessionId);
+      const events: NormalizedProviderEvent[] = [];
+      const usageEvent = codexUsageEvent(usage, parsed.context_window);
+      if (usageEvent) events.push(usageEvent);
+      events.push({
+        kind: "turn_completed",
+        ...(usage ? { usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: totalTokens } } : {}),
+        ...(usage ? { inputTokens, outputTokens, totalTokens } : {}),
+        ...(typeof parsed.context_window === "number" && parsed.context_window > 0 ? { contextMax: parsed.context_window } : {}),
+        ...(completionError ? { error: completionError } : {}),
+      });
+      return events;
+    }
+
+    if (type === "turn.failed" || type === "turn.aborted" || type === "error") {
+      const message =
+        (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
+        parsed.message ||
+        "Codex reported an error.";
+      this.resetSession(sessionId);
+      return [{ kind: "error", message }];
+    }
+
+    return [];
+  }
+
+  private getItemMap(sessionId: string): Map<string, CodexPendingItem> {
+    let map = this.pending.get(sessionId);
+    if (!map) {
+      map = new Map();
+      this.pending.set(sessionId, map);
+    }
+    return map;
+  }
+
+  private decodeCompletedItem(sessionId: string, item: CodexItem | undefined): NormalizedProviderEvent[] {
+    if (!item || !item.id) return [];
+    const itemMap = this.getItemMap(sessionId);
+    const tracked = itemMap.get(item.id);
+    const kind = tracked?.kind ?? classifyCodexItem(item.item_type ?? item.type);
+
+    if (kind === "agent_message") {
+      itemMap.delete(item.id);
+      const finalText =
+        (typeof item.text === "string" && item.text) ||
+        tracked?.text ||
+        "";
+      if (!finalText.trim()) return [{ kind: "assistant_message", text: "" }];
+      this.assistantFinalized.add(sessionId);
+      return [{ kind: "assistant_message", text: finalText.trim() }];
+    }
+
+    if (kind !== "tool") {
+      itemMap.delete(item.id);
+      return [];
+    }
+
+    const events: NormalizedProviderEvent[] = [];
+    const completedResult = codexItemResultText(item);
+    const completedPatch = codexItemToProviderToolPatch(item);
+    const completedInput = completedPatch.input ?? {};
+    const patchedInput = tracked
+      ? { ...tracked.inputArgs, ...completedInput }
+      : completedInput;
+    const completedName = completedPatch.name ?? "";
+    const completedInputIsEmpty = Object.keys(completedInput).length === 0;
+    const patchedName = tracked?.toolName && (completedInputIsEmpty || completedName === "dynamic_tool_call")
+      ? tracked.toolName
+      : completedName || tracked?.toolName || "tool";
+
+    if (!tracked) {
+      const toolCall = codexItemToProviderToolCall(item);
+      if (toolCall) {
+        events.push({
+          kind: "tool_call",
+          toolCall: { ...toolCall, name: patchedName, input: patchedInput },
+        });
+      }
+      this.assistantFinalized.add(sessionId);
+    }
+
+    const result = completedResult || tracked?.outputText || "";
+    const toolResult = codexItemToProviderToolResult(item, {
+      result,
+      input: patchedInput,
+      name: patchedName,
+    });
+    if (toolResult) events.push({ kind: "tool_result", toolResult });
+    itemMap.delete(item.id);
+    return events;
+  }
 }

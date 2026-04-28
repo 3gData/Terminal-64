@@ -2014,6 +2014,170 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-28T05:23:21+02:00"
+    },
+    {
+      "id": "bug-103",
+      "timestamp": "2026-04-28T05:46:45+02:00",
+      "error_message": "npm run typecheck failed during the parallel providerMetadata migration because delegation fixtures still referenced providerState.openai.",
+      "file": "src/lib/delegationChildRuntime.ts, src/lib/providerModularity.verification.ts",
+      "root_cause": "ProviderSessionState moved OpenAI-specific session data under providerMetadata.openai, while the delegation helper and verification fixture still read the removed providerState.openai field.",
+      "fix": "Changed delegation child runtime inheritance and verification assertions to use getOpenAiProviderSessionMetadata(), and changed fixture providerState rows to providerMetadata.openai.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "delegation",
+        "provider-metadata",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:46:45+02:00"
+    },
+    {
+      "id": "bug-104",
+      "timestamp": "2026-04-28T05:48:40+02:00",
+      "error_message": "npx tsc --noEmit failed during parallel provider refactors with ClaudeChat permission-control type errors.",
+      "file": "src/components/claude/ClaudeChat.tsx",
+      "root_cause": "The permission-control refactor briefly left ClaudeChat using stale permission constants and prop names while Agent 2's metadata migration was already typechecking the combined worktree.",
+      "fix": "Agent 3 completed the permission helper integration and updated ClaudeChat/useChatSend call sites; a follow-up npx tsc --noEmit run passed.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "parallel-agents",
+        "provider-permissions",
+        "claudechat"
+      ],
+      "related_bugs": [
+        "bug-103"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:48:40+02:00"
+    },
+    {
+      "id": "bug-105",
+      "timestamp": "2026-04-28T05:50:34+02:00",
+      "error_message": "npm run typecheck failed because useClaudeEvents.ts still read providerState.openai after ProviderSessionState moved OpenAI metadata under providerMetadata.",
+      "file": "src/hooks/useClaudeEvents.ts",
+      "root_cause": "The auto-compact provider turn path was added in the event hook while the provider metadata migration removed the direct providerState.openai field.",
+      "fix": "Imported getOpenAiProviderSessionMetadata() and used it to populate Codex thread id and selected permission fallback for the auto-compact provider turn.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "provider-metadata",
+        "provider-events",
+        "parallel-agents"
+      ],
+      "related_bugs": [
+        "bug-103",
+        "bug-104"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:50:34+02:00"
+    },
+    {
+      "id": "bug-106",
+      "timestamp": "2026-04-28T04:13:37.683Z",
+      "error_message": "cargo check failed with duplicate Tauri command macro symbols: __cmd__load_session_history, __cmd__stat_session_jsonl, __cmd__truncate_session_jsonl_by_messages, __cmd__fork_session_jsonl, and __cmd__delete_session_jsonl.",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "Provider history adapters needed to call Claude JSONL helpers, but making existing #[tauri::command] handlers pub(crate) caused Tauri to emit duplicate command macro symbols.",
+      "fix": "Restored private Tauri command handlers and added separate pub(crate) *_impl helpers for provider adapter calls; cargo check and cargo clippy --all-targets -- -D warnings passed.",
+      "tags": [
+        "cargo-check",
+        "rust",
+        "tauri-command",
+        "parallel-agents",
+        "provider-history"
+      ],
+      "related_bugs": [],
+      "occurrences": 3,
+      "last_seen": "2026-04-28T04:15:47Z"
+    },
+    {
+      "id": "bug-107",
+      "timestamp": "2026-04-28T06:17:27+02:00",
+      "error_message": "Manual `rustfmt --check src-tauri/src/providers/registry.rs src-tauri/src/providers/events.rs` failed with `async fn is not permitted in Rust 2015`.",
+      "file": "src-tauri/src/providers/registry.rs, src-tauri/src/providers/events.rs",
+      "root_cause": "Direct rustfmt invocations outside Cargo default to Rust 2015 unless an edition is supplied, while these provider modules use async functions from the Rust 2021 crate.",
+      "fix": "Re-ran the targeted formatter check with `rustfmt --edition 2021 --check ...`, then formatted the touched provider files with `rustfmt --edition 2021 ...`; the targeted check passed.",
+      "tags": [
+        "rustfmt",
+        "rust",
+        "edition",
+        "provider-tests"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T06:17:27+02:00"
+    },
+    {
+      "id": "bug-108",
+      "timestamp": "2026-04-28T06:18:19+02:00",
+      "error_message": "Provider scaffold generator needed follow-up fixes after the first draft would generate `Opencode*` symbols and duplicate `ProviderKind::OpenCode` in the checklist for an OpenCode scaffold.",
+      "file": "scripts/scaffold-provider.mjs",
+      "root_cause": "The initial generator derived code symbols only from the lowercase provider id and always emitted a new ProviderKind enum variant snippet, ignoring the human label and existing OpenCode backend variant.",
+      "fix": "Added a PascalCase `--symbol`/label-derived symbol prefix, used it for generated TypeScript/Rust identifiers, and made the backend ProviderKind checklist conditional when the requested kind already exists as OpenCode.",
+      "tags": [
+        "provider-scaffold",
+        "generator",
+        "documentation",
+        "opencode"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T06:18:19+02:00"
+    },
+    {
+      "id": "bug-109",
+      "timestamp": "2026-04-28T06:18:29+02:00",
+      "error_message": "Initial apply_patch attempts for provider-neutral claudeStore/buglog updates failed because expected context no longer matched the active parallel worktree.",
+      "file": "src/stores/claudeStore.ts, .wolf/buglog.json",
+      "root_cause": "Parallel edits shifted the surrounding store and OpenWolf buglog context, so broad multi-hunk patches used stale trailing lines.",
+      "fix": "Read the current file context and applied smaller scoped patches for storage key/type/store aliases plus this buglog entry; npm run typecheck passed after the code changes.",
+      "tags": [
+        "apply-patch",
+        "parallel-agents",
+        "provider-naming",
+        "openwolf"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T06:18:29+02:00"
+    },
+    {
+      "id": "bug-110",
+      "timestamp": "2026-04-28T06:54:22+02:00",
+      "error_message": "`npm run tauri dev` failed while linking with `ld: library 'clang_rt.osx' not found` and a stale `/Library/Developer/CommandLineTools/usr/lib/clang/15.0.0/lib/darwin` search path.",
+      "file": "src-tauri/build.rs",
+      "root_cause": "The macOS Command Line Tools on this machine provide Clang 21, but Rust's linker invocation still included an old Clang 15 runtime search path, so `-lclang_rt.osx` could not resolve even though the current CLT runtime existed.",
+      "fix": "Updated the Tauri build script to query the active compiler resource directory and add its `lib/darwin` directory as a native Rust link-search path when `libclang_rt.osx.a` is present.",
+      "tags": [
+        "tauri-dev",
+        "macos",
+        "linker",
+        "clang-runtime",
+        "build-rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T06:54:22+02:00"
+    },
+    {
+      "id": "bug-111",
+      "timestamp": "2026-04-28T07:47:09+02:00",
+      "error_message": "Claude rewind should work like t3code rollback instead of physically truncating JSONL and then resuming without a valid branch cursor.",
+      "file": "src-tauri/src/providers/claude.rs, src-tauri/src/lib.rs, src/lib/providerRuntimes/anthropic.ts, src/stores/claudeStore.ts",
+      "root_cause": "The Claude provider history path rewrote the session JSONL and returned no resume cursor, while the frontend runtime also failed to pass `resume_session_at` to Claude sends. Refreshing from JSONL could then replay future/orphaned messages instead of the active branch.",
+      "fix": "Changed non-empty Claude rewind to return the active `--resume-session-at` UUID without rewriting JSONL, passed that cursor on the next send, and made Claude history hydration parse the active parentUuid chain or the pending rewind cursor so orphaned future turns stay hidden.",
+      "tags": [
+        "claude",
+        "rewind",
+        "resume-session-at",
+        "jsonl",
+        "t3code"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T07:47:09+02:00"
     }
   ]
 }

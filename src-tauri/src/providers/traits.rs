@@ -86,6 +86,21 @@ pub type ProviderApprovalDecision = serde_json::Value;
 pub type ProviderUserInputAnswers = serde_json::Value;
 pub type ProviderSession = serde_json::Value;
 pub type ProviderTurnStartResult = serde_json::Value;
+pub type ProviderHistoryRequest = serde_json::Value;
+pub type ProviderHistoryResponse = serde_json::Value;
+
+pub fn provider_history_unsupported_response(
+    kind: ProviderKind,
+    operation: &str,
+) -> ProviderHistoryResponse {
+    serde_json::json!({
+        "status": "unsupported",
+        "method": "unsupported",
+        "messages": [],
+        "stat": null,
+        "reason": format!("Provider {:?} does not support history {}", kind, operation),
+    })
+}
 
 /// Sidecar data produced by provider-agnostic command setup. Concrete
 /// adapters decide which fields, if any, apply to their payload.
@@ -174,6 +189,48 @@ pub trait ProviderAdapter: ProviderCommandAdapter + Send + Sync {
 
     /// `capabilities` — ProviderAdapter.ts:49.
     fn capabilities(&self) -> &ProviderAdapterCapabilities;
+
+    /// Current Tauri history IPC bridge. Concrete providers own request
+    /// parsing and response shaping; the registry guards calls by capability.
+    fn history_truncate(
+        &self,
+        _req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        Ok(provider_history_unsupported_response(
+            self.provider(),
+            "rewind",
+        ))
+    }
+
+    fn history_fork(
+        &self,
+        _req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        Ok(provider_history_unsupported_response(
+            self.provider(),
+            "fork",
+        ))
+    }
+
+    fn history_hydrate(
+        &self,
+        _req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        Ok(provider_history_unsupported_response(
+            self.provider(),
+            "hydrate",
+        ))
+    }
+
+    fn history_delete(
+        &self,
+        _req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        Ok(provider_history_unsupported_response(
+            self.provider(),
+            "delete",
+        ))
+    }
 
     /// Start a provider-backed session. ProviderAdapter.ts:54–57.
     async fn start_session(

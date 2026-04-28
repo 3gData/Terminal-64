@@ -5,19 +5,38 @@ import type { ProviderId } from "../lib/providers";
 import { hydrateProviderHistory } from "../lib/providerRuntime";
 import type { ProviderHydrateInput } from "../contracts/providerRuntime";
 
-export const STORAGE_KEY = "terminal64-claude-sessions";
+// Keep the persisted key stable for existing installs; the exported
+// provider-neutral name is the preferred surface for new callers.
+export const PROVIDER_SESSIONS_STORAGE_KEY = "terminal64-claude-sessions";
+/** @deprecated Use PROVIDER_SESSIONS_STORAGE_KEY. */
+export const STORAGE_KEY = PROVIDER_SESSIONS_STORAGE_KEY;
 const STALE_UNNAMED_META_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_PERSISTED_META_ENTRIES = 160;
+
+export interface OpenAiProviderSessionMetadata {
+  codexThreadId: string | null;
+  selectedCodexPermission: string | null;
+}
+
+export interface ProviderSessionMetadataRegistry {
+  anthropic: Record<string, never>;
+  openai: OpenAiProviderSessionMetadata;
+}
+
+export type ProviderSessionMetadataFor<P extends ProviderId> = P extends keyof ProviderSessionMetadataRegistry
+  ? ProviderSessionMetadataRegistry[P]
+  : Record<string, unknown>;
+
+export type ProviderSessionMetadataMap = Partial<{
+  [P in ProviderId]: ProviderSessionMetadataFor<P>;
+}>;
 
 export interface ProviderSessionState {
   provider: ProviderId;
   selectedModel: string | null;
   selectedEffort: string | null;
   seedTranscript: ChatMessage[] | null;
-  openai?: {
-    codexThreadId: string | null;
-    selectedCodexPermission: string | null;
-  };
+  providerMetadata: ProviderSessionMetadataMap;
 }
 
 interface ProviderCompatibilityFields {
@@ -32,6 +51,7 @@ interface ProviderCompatibilityFields {
 type ProviderStateSource = {
   providerState?: ProviderSessionState | undefined;
   provider?: ProviderId | undefined;
+  providerMetadata?: ProviderSessionMetadataMap | undefined;
   codexThreadId?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
   selectedModel?: string | null | undefined;
@@ -39,57 +59,142 @@ type ProviderStateSource = {
   selectedCodexPermission?: string | null | undefined;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function openAiMetadataFromUnknown(
+  value: unknown,
+  fallback?: Partial<OpenAiProviderSessionMetadata>,
+): OpenAiProviderSessionMetadata {
+  const record = isRecord(value) ? value : {};
+  const codexThreadId = typeof record.codexThreadId === "string" || record.codexThreadId === null
+    ? record.codexThreadId
+    : fallback?.codexThreadId ?? null;
+  const selectedCodexPermission =
+    typeof record.selectedCodexPermission === "string" || record.selectedCodexPermission === null
+      ? record.selectedCodexPermission
+      : fallback?.selectedCodexPermission ?? null;
+  return { codexThreadId, selectedCodexPermission };
+}
+
+function providerMetadataFromUnknown(value: unknown): ProviderSessionMetadataMap {
+  if (!isRecord(value)) return {};
+  const metadata = { ...value } as ProviderSessionMetadataMap;
+  if (isRecord(value.openai)) {
+    metadata.openai = openAiMetadataFromUnknown(value.openai);
+  }
+  return metadata;
+}
+
+function legacyOpenAiMetadataFromProviderState(value: unknown): OpenAiProviderSessionMetadata | null {
+  if (!isRecord(value)) return null;
+  if (isRecord(value.providerMetadata) && isRecord(value.providerMetadata.openai)) {
+    return openAiMetadataFromUnknown(value.providerMetadata.openai);
+  }
+  if (isRecord(value.openai)) {
+    return openAiMetadataFromUnknown(value.openai);
+  }
+  return null;
+}
+
 function createProviderState({
   provider,
   selectedModel,
   selectedEffort,
   seedTranscript,
+  providerMetadata,
   codexThreadId,
   selectedCodexPermission,
 }: {
   provider: ProviderId;
-  selectedModel?: string | null;
-  selectedEffort?: string | null;
-  seedTranscript?: ChatMessage[] | null;
-  codexThreadId?: string | null;
-  selectedCodexPermission?: string | null;
+  selectedModel?: string | null | undefined;
+  selectedEffort?: string | null | undefined;
+  seedTranscript?: ChatMessage[] | null | undefined;
+  providerMetadata?: ProviderSessionMetadataMap | undefined;
+  codexThreadId?: string | null | undefined;
+  selectedCodexPermission?: string | null | undefined;
 }): ProviderSessionState {
+  const metadata = providerMetadataFromUnknown(providerMetadata);
+  if (provider === "openai") {
+    const existingOpenAi = openAiMetadataFromUnknown(metadata.openai);
+    metadata.openai = {
+      codexThreadId: codexThreadId !== undefined ? codexThreadId : existingOpenAi.codexThreadId,
+      selectedCodexPermission: selectedCodexPermission !== undefined
+        ? selectedCodexPermission
+        : existingOpenAi.selectedCodexPermission,
+    };
+  }
+
   return {
     provider,
     selectedModel: selectedModel ?? null,
     selectedEffort: selectedEffort ?? null,
     seedTranscript: seedTranscript ?? null,
-    ...(provider === "openai"
-      ? {
-          openai: {
-            codexThreadId: codexThreadId ?? null,
-            selectedCodexPermission: selectedCodexPermission ?? null,
-          },
-        }
-      : {}),
+    providerMetadata: metadata,
   };
 }
 
 export function resolveSessionProviderState(session: ProviderStateSource | null | undefined): ProviderSessionState {
-  if (session?.providerState) return session.providerState;
+  if (session?.providerState) {
+    const legacyOpenAiMetadata = legacyOpenAiMetadataFromProviderState(session.providerState);
+    return createProviderState({
+      provider: session.providerState.provider,
+      selectedModel: session.providerState.selectedModel,
+      selectedEffort: session.providerState.selectedEffort,
+      seedTranscript: session.providerState.seedTranscript,
+      providerMetadata: session.providerState.providerMetadata,
+      ...(legacyOpenAiMetadata ? legacyOpenAiMetadata : {}),
+    });
+  }
   return createProviderState({
     provider: session?.provider ?? "anthropic",
     selectedModel: session?.selectedModel ?? null,
     selectedEffort: session?.selectedEffort ?? null,
     seedTranscript: session?.seedTranscript ?? null,
+    providerMetadata: session?.providerMetadata,
     codexThreadId: session?.codexThreadId ?? null,
     selectedCodexPermission: session?.selectedCodexPermission ?? null,
   });
 }
 
+export function getProviderSessionMetadata<P extends ProviderId>(
+  providerState: ProviderSessionState | null | undefined,
+  provider: P,
+): ProviderSessionMetadataFor<P> | undefined {
+  return providerState?.providerMetadata[provider] as ProviderSessionMetadataFor<P> | undefined;
+}
+
+export function resolveProviderSessionMetadata<P extends ProviderId>(
+  session: ProviderStateSource | null | undefined,
+  provider: P,
+): ProviderSessionMetadataFor<P> | undefined {
+  return getProviderSessionMetadata(resolveSessionProviderState(session), provider);
+}
+
+export function getOpenAiProviderSessionMetadata(
+  providerState: ProviderSessionState | null | undefined,
+): OpenAiProviderSessionMetadata | undefined {
+  return getProviderSessionMetadata(providerState, "openai");
+}
+
+export function resolveOpenAiProviderSessionMetadata(
+  session: ProviderStateSource | null | undefined,
+): OpenAiProviderSessionMetadata | undefined {
+  return resolveProviderSessionMetadata(session, "openai");
+}
+
 function providerCompatibilityFields(providerState: ProviderSessionState): ProviderCompatibilityFields {
+  const openaiMetadata = providerState.provider === "openai"
+    ? getOpenAiProviderSessionMetadata(providerState)
+    : undefined;
   return {
     provider: providerState.provider,
-    codexThreadId: providerState.openai?.codexThreadId ?? null,
+    codexThreadId: openaiMetadata?.codexThreadId ?? null,
     seedTranscript: providerState.seedTranscript,
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? null,
+    selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? null,
   };
 }
 
@@ -112,27 +217,34 @@ function normalizeProviderState(
   const seedTranscript = hasOwn(patch, "seedTranscript")
     ? (patch.seedTranscript as ChatMessage[] | null)
     : source.seedTranscript;
+  const sourceMetadata = source.providerMetadata ?? {};
+  const patchMetadata = hasOwn(patch, "providerMetadata")
+    ? (patch.providerMetadata as ProviderSessionMetadataMap | undefined)
+    : undefined;
+  const providerMetadata = patchMetadata ? { ...sourceMetadata, ...patchMetadata } : sourceMetadata;
+  const sourceOpenAiMetadata = getOpenAiProviderSessionMetadata(source);
   const codexThreadId = hasOwn(patch, "codexThreadId")
     ? (patch.codexThreadId as string | null)
-    : source.openai?.codexThreadId ?? null;
+    : sourceOpenAiMetadata?.codexThreadId ?? null;
   const selectedCodexPermission = hasOwn(patch, "selectedCodexPermission")
     ? (patch.selectedCodexPermission as string | null)
-    : source.openai?.selectedCodexPermission ?? null;
+    : sourceOpenAiMetadata?.selectedCodexPermission ?? null;
 
   return createProviderState({
     provider,
     selectedModel,
     selectedEffort,
     seedTranscript,
+    providerMetadata,
     codexThreadId,
     selectedCodexPermission,
   });
 }
 
-// localStorage now stores only lightweight UI/metadata. Messages and token/cost
-// counters are derived from the JSONL files in ~/.claude/projects/... — they are
-// the authoritative source of truth. Wiping localStorage must never lose chat
-// history; dropping this metadata costs only a draft prompt and a friendly name.
+// localStorage stores only lightweight provider-session UI metadata. Messages
+// and token/cost counters are derived from each provider's history backend, so
+// wiping localStorage must never lose chat history; dropping this metadata costs
+// only a draft prompt and a friendly name.
 export interface PersistedSessionMeta {
   sessionId: string;
   name: string;
@@ -150,8 +262,8 @@ export interface PersistedSessionMeta {
   // Per-session model + reasoning-effort, persisted so flipping models in
   // one chat doesn't bleed into other sessions and so a reload restores the
   // user's pick. Null/undefined falls back to settings-store defaults.
-  // (Distinct from `ClaudeSession.model` which is the runtime-reported value
-  // from the CLI's `system` init event.)
+  // (Distinct from `ProviderSession.model` which is the runtime-reported value
+  // from the provider's init/start event.)
   selectedModel?: string | null;
   selectedEffort?: string | null;
   // Codex sandbox/approval preset id ("read-only" | "workspace" | "full-auto"
@@ -172,12 +284,15 @@ let downgradeLockActive = false;
 let persistedMetaCache: Record<string, PersistedSessionMeta> | null = null;
 let lastPersistedMetaJson: string | null = null;
 
-export interface ClaudeTask {
+export interface ProviderTask {
   id: string;
   subject: string;
   description?: string;
   status: "pending" | "in_progress" | "completed" | "deleted";
 }
+
+/** @deprecated Use ProviderTask. */
+export type ClaudeTask = ProviderTask;
 
 export interface QuestionOption {
   label: string;
@@ -302,10 +417,10 @@ export interface McpServerStatus {
   toolCount?: number;
 }
 
-export interface ClaudeSession {
+export interface ProviderSession {
   sessionId: string;
   messages: ChatMessage[];
-  tasks: ClaudeTask[];
+  tasks: ProviderTask[];
   isStreaming: boolean;
   streamingText: string;
   streamingStartedAt: number | null;
@@ -351,7 +466,7 @@ export interface ClaudeSession {
   // Codex's CLI mints its own thread id on `thread.started`; we capture it
   // here so follow-up `codex exec resume <id>` calls can find the thread.
   // Always null for anthropic sessions.
-  /** @deprecated Use providerState.openai?.codexThreadId. */
+  /** @deprecated Use getOpenAiProviderSessionMetadata(providerState)?.codexThreadId. */
   codexThreadId: string | null;
   // Fork-time prelude. When non-null, these messages were rendered into
   // `messages` at session-create time; the send path may also splice them
@@ -370,9 +485,12 @@ export interface ClaudeSession {
   selectedEffort: string | null;
   // Codex sandbox/approval preset id. Null on Anthropic sessions; defaults
   // to PROVIDER_CONFIG.openai.defaultPermission for OpenAI.
-  /** @deprecated Use providerState.openai?.selectedCodexPermission. */
+  /** @deprecated Use getOpenAiProviderSessionMetadata(providerState)?.selectedCodexPermission. */
   selectedCodexPermission: string | null;
 }
+
+/** @deprecated Use ProviderSession. */
+export type ClaudeSession = ProviderSession;
 
 export interface ActiveLoop {
   prompt: string;
@@ -381,8 +499,8 @@ export interface ActiveLoop {
   iteration: number;
 }
 
-interface ClaudeState {
-  sessions: Record<string, ClaudeSession>;
+export interface ProviderSessionStoreState {
+  sessions: Record<string, ProviderSession>;
 
   createSession: (
     sessionId: string,
@@ -413,8 +531,8 @@ interface ClaudeState {
   setContextUsage: (sessionId: string, used: number, max: number) => void;
   setError: (sessionId: string, error: string | null) => void;
   incrementPromptCount: (sessionId: string) => void;
-  addTask: (sessionId: string, task: ClaudeTask) => void;
-  updateTask: (sessionId: string, taskId: string, update: Partial<ClaudeTask>) => void;
+  addTask: (sessionId: string, task: ProviderTask) => void;
+  updateTask: (sessionId: string, taskId: string, update: Partial<ProviderTask>) => void;
   setPlanMode: (sessionId: string, active: boolean) => void;
   setPendingQuestions: (sessionId: string, questions: PendingQuestions | null) => void;
   setPendingPermission: (sessionId: string, permission: PendingPermission | null) => void;
@@ -447,11 +565,14 @@ interface ClaudeState {
   removeSubagent: (sessionId: string, subagentId: string) => void;
 }
 
+/** @deprecated Use ProviderSessionStoreState. */
+export type ClaudeState = ProviderSessionStoreState;
+
 function updateSession(
-  sessions: Record<string, ClaudeSession>,
+  sessions: Record<string, ProviderSession>,
   sessionId: string,
-  update: Partial<ClaudeSession>
-): Record<string, ClaudeSession> {
+  update: Partial<ProviderSession>
+): Record<string, ProviderSession> {
   const session = sessions[sessionId];
   if (!session) return sessions;
   const baseProviderState = resolveSessionProviderState(session);
@@ -595,6 +716,7 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
   const legacyProvider: ProviderId = entry.provider === "openai" ? "openai" : "anthropic";
   const savedState = entry.providerState;
   const provider: ProviderId = savedState?.provider === "openai" ? "openai" : legacyProvider;
+  const savedOpenAiMetadata = legacyOpenAiMetadataFromProviderState(savedState);
   const selectedModel = typeof savedState?.selectedModel === "string"
     ? savedState.selectedModel
     : typeof entry.selectedModel === "string"
@@ -610,9 +732,9 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
     : Array.isArray(entry.seedTranscript)
       ? entry.seedTranscript
       : null;
-  const codexThreadId = savedState?.openai?.codexThreadId ?? entry.codexThreadId ?? null;
+  const codexThreadId = savedOpenAiMetadata?.codexThreadId ?? entry.codexThreadId ?? null;
   const selectedCodexPermission =
-    savedState?.openai?.selectedCodexPermission ??
+    savedOpenAiMetadata?.selectedCodexPermission ??
     (typeof entry.selectedCodexPermission === "string" ? entry.selectedCodexPermission : null);
 
   return createProviderState({
@@ -620,13 +742,14 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
     selectedModel,
     selectedEffort,
     seedTranscript,
+    providerMetadata: providerMetadataFromUnknown(savedState?.providerMetadata),
     codexThreadId,
     selectedCodexPermission,
   });
 }
 
 function buildPersistedMeta(
-  sessions: Record<string, ClaudeSession>,
+  sessions: Record<string, ProviderSession>,
   dropSeedTranscripts: boolean,
   aggressivePrune: boolean,
 ): Record<string, PersistedSessionMeta> {
@@ -638,14 +761,7 @@ function buildPersistedMeta(
   for (const [id, s] of Object.entries(sessions)) {
     if (s.ephemeral) continue;
     activeSessionIds.add(id);
-    const baseProviderState = s.providerState ?? createProviderState({
-      provider: s.provider ?? "anthropic",
-      selectedModel: s.selectedModel,
-      selectedEffort: s.selectedEffort,
-      seedTranscript: s.seedTranscript,
-      codexThreadId: s.codexThreadId,
-      selectedCodexPermission: s.selectedCodexPermission,
-    });
+    const baseProviderState = resolveSessionProviderState(s);
     const providerState = normalizeProviderState(baseProviderState, s);
     const persistedProviderState = dropSeedTranscripts
       ? { ...providerState, seedTranscript: null }
@@ -699,7 +815,7 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
 
 // Write only lightweight metadata. Messages live in JSONL and are reloaded on
 // demand, so this payload stays small and cannot exhaust the storage quota.
-function saveToStorage(sessions: Record<string, ClaudeSession>) {
+function saveToStorage(sessions: Record<string, ProviderSession>) {
   if (downgradeLockActive) return;
   try {
     const data = buildPersistedMeta(sessions, false, false);
@@ -742,7 +858,7 @@ function debouncedSave() {
   }, 1000);
 }
 
-function patchSession(sessionId: string, patch: Partial<ClaudeSession>) {
+function patchSession(sessionId: string, patch: Partial<ProviderSession>) {
   useClaudeStore.setState((s) => ({ sessions: updateSession(s.sessions, sessionId, patch) }));
 }
 
@@ -787,14 +903,17 @@ function rememberHydration(sessionId: string, mtimeMs: number, size: number, mes
 function buildProviderHydrateInput(sessionId: string, cwd: string): ProviderHydrateInput | null {
   const sess = useClaudeStore.getState().sessions[sessionId];
   if (!sess) return null;
-  const providerState = sess?.providerState;
-  const provider = providerState?.provider ?? sess?.provider ?? "anthropic";
-  const codexThreadId = providerState?.openai?.codexThreadId ?? sess?.codexThreadId ?? null;
+  const providerState = resolveSessionProviderState(sess);
+  const provider = providerState.provider;
+  const codexThreadId = getOpenAiProviderSessionMetadata(providerState)?.codexThreadId ?? sess?.codexThreadId ?? null;
   const input: ProviderHydrateInput = {
     provider,
     sessionId,
     cwd,
   };
+  if (sess.resumeAtUuid) {
+    input.resumeAtUuid = sess.resumeAtUuid;
+  }
   if (codexThreadId !== undefined) {
     input.codexThreadId = codexThreadId;
   }
@@ -851,7 +970,7 @@ function hydrateFromJsonl(sessionId: string, cwd: string) {
 }
 
 
-export const useClaudeStore = create<ClaudeState>((set, get) => ({
+const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
   sessions: {},
 
   createSession: (sessionId, initialName, ephemeral, skipOpenwolf, cwd, provider) => {
@@ -882,7 +1001,8 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     const seededDraft = meta?.draftPrompt ?? "";
     const metaProviderState = meta?.providerState;
     const seededProvider: ProviderId = provider ?? metaProviderState?.provider ?? meta?.provider ?? "anthropic";
-    const seededCodexThreadId = metaProviderState?.openai?.codexThreadId ?? meta?.codexThreadId ?? null;
+    const metaOpenAiMetadata = getOpenAiProviderSessionMetadata(metaProviderState);
+    const seededCodexThreadId = metaOpenAiMetadata?.codexThreadId ?? meta?.codexThreadId ?? null;
     // Fork plumbing: a parent session can stash a transcript in metadata
     // before the child is created. We pre-render those messages so the UI
     // shows the inherited history immediately; the actual model context for
@@ -897,12 +1017,13 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     const seededSelectedModel = metaProviderState?.selectedModel ?? meta?.selectedModel ?? null;
     const seededSelectedEffort = metaProviderState?.selectedEffort ?? meta?.selectedEffort ?? null;
     const seededSelectedCodexPermission =
-      metaProviderState?.openai?.selectedCodexPermission ?? meta?.selectedCodexPermission ?? null;
+      metaOpenAiMetadata?.selectedCodexPermission ?? meta?.selectedCodexPermission ?? null;
     const seededProviderState = createProviderState({
       provider: seededProvider,
       selectedModel: seededSelectedModel,
       selectedEffort: seededSelectedEffort,
       seedTranscript: seededTranscript,
+      providerMetadata: metaProviderState?.providerMetadata,
       codexThreadId: seededCodexThreadId,
       selectedCodexPermission: seededSelectedCodexPermission,
     });
@@ -957,8 +1078,8 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     });
 
     // Kick off JSONL hydration when we know where to look. Ephemeral and
-    // cwd-less sessions skip this; ClaudeChat calls createSession again with
-    // a cwd (or calls setCwd) once the panel mounts with its working dir.
+    // cwd-less sessions skip this; the provider chat shell calls createSession
+    // again with a cwd (or calls setCwd) once the panel mounts with its working dir.
     if (!ephemeral && seededCwd) {
       hydrateFromJsonl(sessionId, seededCwd);
     }
@@ -970,8 +1091,8 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
       const removed = s.sessions[sessionId];
       const { [sessionId]: _, ...rest } = s.sessions;
       // Only unnamed or ephemeral sessions get purged from disk. Named sessions
-      // remain in metadata so the Claude dialog can reopen them with history
-      // pulled back from JSONL.
+      // remain in metadata so the provider-session dialog can reopen them with
+      // history pulled back from the provider backend.
       if (!removed?.name || removed?.ephemeral) {
         try {
           deletePersistedMeta(sessionId);
@@ -1219,8 +1340,10 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
     let hydrateCwd = "";
     set((s) => {
       const session = s.sessions[sessionId];
-      if (!session || session.codexThreadId === threadId) return s;
-      shouldHydrate = (session.providerState?.provider ?? session.provider) === "openai" && !!threadId && !!session.cwd && session.jsonlLoaded;
+      const providerState = resolveSessionProviderState(session);
+      const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
+      if (!session || openaiMetadata?.codexThreadId === threadId) return s;
+      shouldHydrate = providerState.provider === "openai" && !!threadId && !!session.cwd && session.jsonlLoaded;
       hydrateCwd = session.cwd;
       const updated = updateSession(s.sessions, sessionId, { codexThreadId: threadId });
       if (!session.ephemeral) debouncedSave();
@@ -1276,7 +1399,8 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
   setSelectedCodexPermission: (sessionId, permission) => {
     set((s) => {
       const session = s.sessions[sessionId];
-      if (!session || session.selectedCodexPermission === permission) return s;
+      const openaiMetadata = resolveOpenAiProviderSessionMetadata(session);
+      if (!session || openaiMetadata?.selectedCodexPermission === permission) return s;
       const updated = updateSession(s.sessions, sessionId, { selectedCodexPermission: permission });
       if (!session.ephemeral) debouncedSave();
       return { sessions: updated };
@@ -1508,6 +1632,10 @@ export const useClaudeStore = create<ClaudeState>((set, get) => ({
   },
 }));
 
+export const useProviderSessionStore = providerSessionStore;
+/** @deprecated Use useProviderSessionStore. */
+export const useClaudeStore = useProviderSessionStore;
+
 // Provider routing selector. Returns "anthropic" for any unknown / missing
 // session so the legacy Claude path stays the safe default.
 export function selectSessionProvider(sessionId: string): ProviderId {
@@ -1518,6 +1646,13 @@ export function selectSessionProvider(sessionId: string): ProviderId {
 export function selectSessionProviderState(sessionId: string): ProviderSessionState {
   const session = useClaudeStore.getState().sessions[sessionId];
   return resolveSessionProviderState(session);
+}
+
+export function selectSessionProviderMetadata<P extends ProviderId>(
+  sessionId: string,
+  provider: P,
+): ProviderSessionMetadataFor<P> | undefined {
+  return getProviderSessionMetadata(selectSessionProviderState(sessionId), provider);
 }
 
 // Lightweight selector for voice/fuzzy session matching.

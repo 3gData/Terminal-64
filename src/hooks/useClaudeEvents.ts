@@ -1,41 +1,32 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  onClaudeEvent,
-  onClaudeDone,
-  cancelClaude,
-  onCodexEvent,
-  onCodexDone,
-} from "../lib/tauriApi";
-import { resolveSessionProviderState, useClaudeStore, type ClaudeTask, type McpServerStatus, type PendingQuestionItem } from "../stores/claudeStore";
-import { useSettingsStore } from "../stores/settingsStore";
-import { getProviderManifest, providerSupports } from "../lib/providers";
+  providerToolChangedPaths,
+  type NormalizedProviderEvent,
+  type ProviderToolCall,
+  type ProviderToolInput,
+  type ProviderToolResult,
+} from "../contracts/providerEvents";
+import { publishProviderLifecycleFromProviderEvent } from "../lib/providerLifecycleBus";
+import {
+  getProviderEventContextWindow,
+  subscribeProviderEventIngestion,
+  type ProviderIngestionMessage,
+} from "../lib/providerEventIngestion";
+import { cancelProviderSession } from "../lib/tauriApi";
+import { getProviderManifest, providerSupports, type ProviderId } from "../lib/providers";
 import { runProviderTurn } from "../lib/providerRuntime";
-import type { ToolCall, HookEventPayload, HookEvent, HookEventType } from "../lib/types";
+import type { HookEvent, HookEventPayload, HookEventType, ToolCall } from "../lib/types";
+import type { PermissionRequestPayload } from "../lib/claudeEventDecoder";
+import { useSettingsStore } from "../stores/settingsStore";
 import {
-  claudeBlockToProviderToolCall,
-  claudeBlockToProviderToolResult,
-  getClaudeContextWindowForModel,
-  type ClaudeContentBlock,
-  type ClaudeQuestion,
-  type ClaudeStreamEvent,
-  type ClaudeUsage,
-  type PermissionRequestPayload,
-} from "../lib/claudeEventDecoder";
-import {
-  classifyCodexItem,
-  codexInputChangedPaths,
-  codexItemDisplayName,
-  codexItemInput,
-  codexItemIsError,
-  codexItemResultText,
-  codexItemToProviderToolCall,
-  codexItemToProviderToolPatch,
-  codexItemToProviderToolResult,
-  getCodexContextWindow,
-  type CodexNdjsonEvent,
-  type CodexPendingItem,
-} from "../lib/codexEventDecoder";
+  getOpenAiProviderSessionMetadata,
+  resolveSessionProviderState,
+  useProviderSessionStore,
+  type ProviderTask,
+  type McpServerStatus,
+  type PendingQuestionItem,
+} from "../stores/claudeStore";
 
 const sessionToolMaps = new Map<string, Map<string, string>>();
 const sessionFilePathMaps = new Map<string, Map<string, string>>();
@@ -57,34 +48,6 @@ function evictIfNeeded<V>(map: Map<string, V>) {
     for (let i = 0; i < excess; i++) { map.delete(iter.next().value!); }
   }
 }
-
-// ── Codex NDJSON event shapes ─────────────────────────────
-//
-// `codex exec --json` emits one JSON object per line. The exact schema is
-// documented in `codex-rs/exec/src/exec_events.rs` upstream; we decode
-// defensively because field names have shifted across CLI releases.
-//
-// Variants we handle:
-//   thread.started        → { thread_id }            — capture for resume()
-//   turn.started          → mark streaming           (no-op fields)
-//   item.started          → push tool call (pending) (item.item_type, item.id, ...)
-//   item.updated          → optional streaming delta on agent_message item
-//   item.completed        → finalize text / mark tool result
-//   turn.completed        → setStreaming(false)
-//   turn.failed | error   → setError + stop streaming
-//
-// Older event names that some CLI builds emit at the top level
-// (`agent_message`, `agent_reasoning`, `tool_use`, `tool_result`,
-// `task_complete`, `session_configured`) are accepted as aliases.
-// Per-session in-flight item state — mirrors the Claude pendingBlocks map.
-// When `item.started` for an agent_message arrives we treat its incremental
-// text as streaming; tool items get tracked so the matching `item.completed`
-// can flip status to completed with output.
-const codexPending = new Map<string, Map<string, CodexPendingItem>>();
-// Tracks whether the active turn's assistant message has been finalized
-// (e.g. via item.completed/agent_message), so turn.completed doesn't double up.
-const codexAssistantFinalized = new Set<string>();
-const codexParseErrorCounts = new Map<string, number>();
 
 function normalizeMcpServerStatus(raw: unknown): McpServerStatus | null {
   if (!raw || typeof raw !== "object") return null;
@@ -141,30 +104,14 @@ function mergeMcpServerStatuses(current: McpServerStatus[], incoming: McpServerS
   return Array.from(merged.values());
 }
 
-function getCodexItemMap(sessionId: string): Map<string, CodexPendingItem> {
-  let map = codexPending.get(sessionId);
-  if (!map) {
-    map = new Map();
-    codexPending.set(sessionId, map);
-  }
-  return map;
-}
-
-function appendOrReplaceAccumulated(prev: string, next: string): string {
-  if (!next) return prev;
-  if (!prev) return next;
-  if (next.startsWith(prev)) return next;
-  return prev + next;
-}
-
-// RAF batching for streaming text — coalesces deltas into one store update per frame
+// RAF batching for streaming text — coalesces deltas into one store update per frame.
 const pendingText = new Map<string, string>();
 let rafId: number | null = null;
 
 function flushPendingText() {
   rafId = null;
   if (pendingText.size === 0) return;
-  const store = useClaudeStore.getState();
+  const store = useProviderSessionStore.getState();
   for (const [sid, text] of pendingText) {
     store.appendStreamingText(sid, text);
   }
@@ -177,920 +124,455 @@ function scheduleFlush() {
   }
 }
 
-// Tools hidden from the UI (handled internally by the wrapper)
+function flushBeforeFinalization() {
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+  flushPendingText();
+}
+
+// Tools hidden from the UI (handled internally by the wrapper).
 const HIDDEN_TOOLS = new Set([
   "EnterPlanMode", "ExitPlanMode",
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
 ]);
 
-// Default context window — the CLI's `result` event provides the real value
-// via modelUsage.contextWindow, but for 1M variants the CLI sometimes still
-// reports 200k which makes the percentage overshoot (e.g. 200% at 40% real
-// usage). Detect the `[1m]` suffix the CLI appends to extended-context model
-// IDs and return 1M so the ratio is correct regardless of what the CLI says.
-/** Sum all input token fields to get total context usage for a turn */
-function totalInputTokens(usage: ClaudeUsage | undefined): number {
-  if (!usage) return 0;
-  return (usage.input_tokens || 0)
-    + (usage.cache_creation_input_tokens || 0)
-    + (usage.cache_read_input_tokens || 0);
+interface ProviderQuestion {
+  question?: string;
+  text?: string;
+  description?: string;
+  header?: string;
+  options?: (string | { label?: string; description?: string })[];
+  multiSelect?: boolean;
 }
 
-// Per-session pending content blocks — tracks tool calls from content_block_start
-// events so we can finalize even if the synthetic "assistant" event never arrives.
-interface PendingBlock {
-  id: string;
-  type: string;
-  name?: string;
-  inputJson: string; // accumulate input_json_delta chunks
-  parentToolUseId?: string;
-}
-const pendingBlocks = new Map<string, PendingBlock[]>();
-// Track whether the assistant event already finalized for this turn
-const assistantFinalized = new Set<string>();
-
-async function runAutoCompact(session_id: string) {
-  const store = useClaudeStore.getState();
-  const session = store.sessions[session_id];
+async function runAutoCompact(sessionId: string) {
+  const store = useProviderSessionStore.getState();
+  const session = store.sessions[sessionId];
   if (!session || session.isStreaming) return;
 
   const providerState = resolveSessionProviderState(session);
   if (!providerSupports(providerState.provider, "compact")) return;
 
   const manifest = getProviderManifest(providerState.provider);
+  const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
   const prompt = "/compact";
-  store.addUserMessage(session_id, prompt);
-  store.setStreaming(session_id, true);
+  store.addUserMessage(sessionId, prompt);
+  store.setStreaming(sessionId, true);
 
   try {
     const result = await runProviderTurn({
       provider: providerState.provider,
-      sessionId: session_id,
+      sessionId,
       cwd: session.cwd || ".",
       prompt,
       started: session.hasBeenStarted,
-      threadId: providerState.openai?.codexThreadId ?? null,
+      threadId: openAiMetadata?.codexThreadId ?? null,
       selectedModel: providerState.selectedModel ?? manifest.defaultModel,
       selectedEffort: providerState.selectedEffort ?? manifest.defaultEffort,
-      selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? manifest.defaultPermission,
+      selectedCodexPermission: openAiMetadata?.selectedCodexPermission ?? manifest.defaultPermission,
       permissionMode: "auto",
       skipOpenwolf: session.skipOpenwolf,
       seedTranscript: providerState.seedTranscript,
       resumeAtUuid: session.resumeAtUuid ?? null,
       forkParentSessionId: session.forkParentSessionId ?? null,
     });
-    if (result.clearSeedTranscript) store.clearSeedTranscript(session_id);
-    if (result.clearResumeAtUuid) store.setResumeAtUuid(session_id, null);
-    if (result.clearForkParentSessionId) store.setForkParentSessionId(session_id, null);
+    if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
+    if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
+    if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
   } catch (err) {
-    const latestStore = useClaudeStore.getState();
-    latestStore.setError(session_id, `Auto-compact failed: ${err}`);
-    latestStore.setAutoCompactStatus(session_id, "idle");
-    latestStore.setStreaming(session_id, false);
+    const latestStore = useProviderSessionStore.getState();
+    latestStore.setError(sessionId, `Auto-compact failed: ${err}`);
+    latestStore.setAutoCompactStatus(sessionId, "idle");
+    latestStore.setStreaming(sessionId, false);
   }
 }
 
-function processContentArray(
-  session_id: string,
-  content: ClaudeContentBlock[],
-  store: ReturnType<typeof useClaudeStore.getState>,
-): boolean {
-  let text = "";
-  const toolCalls: ToolCall[] = [];
+function toolQuestions(input: ProviderToolInput): ProviderQuestion[] {
+  const rawInput: unknown = input;
+  if (Array.isArray(rawInput)) return rawInput as ProviderQuestion[];
+  if (input.question || input.options) return [input as ProviderQuestion];
+  const vals = Object.values(input);
+  const arr = vals.find((v) => Array.isArray(v));
+  if (arr) return arr as ProviderQuestion[];
+  return [{ question: (input.description as string) || (input.text as string) || "The assistant has a question", options: [] }];
+}
 
-  for (const block of content) {
-    if (block.type === "text") {
-      text += block.text;
-    } else if (block.type === "tool_use") {
-      const toolCall = claudeBlockToProviderToolCall(block, block.parentToolUseId);
-      if (!toolCall) continue;
-      const name = toolCall.name;
-      const blockId = toolCall.id;
-      const input = toolCall.input;
-      const toolMap = getSessionMap(sessionToolMaps, session_id);
-      toolMap.set(blockId, name);
-      evictIfNeeded(toolMap);
+function applyToolCallSideEffects(
+  sessionId: string,
+  provider: ProviderId,
+  toolCall: ProviderToolCall,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+): ToolCall | null {
+  const name = toolCall.name;
+  const toolId = toolCall.id;
+  const input = toolCall.input;
+  const toolMap = getSessionMap(sessionToolMaps, sessionId);
+  toolMap.set(toolId, name);
+  evictIfNeeded(toolMap);
 
-      if ((name === "Write" || name === "Edit" || name === "MultiEdit") && input.file_path) {
-        const fileMap = getSessionMap(sessionFilePathMaps, session_id);
-        fileMap.set(blockId, String(input.file_path));
-        evictIfNeeded(fileMap);
-      }
+  if ((name === "Write" || name === "Edit" || name === "MultiEdit") && input.file_path) {
+    const fileMap = getSessionMap(sessionFilePathMaps, sessionId);
+    fileMap.set(toolId, String(input.file_path));
+    evictIfNeeded(fileMap);
+  }
 
-      if (name === "EnterPlanMode") {
-        store.setPlanMode(session_id, true);
-      } else if (name === "ExitPlanMode") {
-        store.setPlanMode(session_id, false);
-      } else if (name === "AskUserQuestion") {
-        let questions: ClaudeQuestion[] = [];
-        if (Array.isArray(input)) {
-          questions = input as ClaudeQuestion[];
-        } else if (input.question || input.options) {
-          questions = [input as ClaudeQuestion];
-        } else {
-          const vals = Object.values(input);
-          const arr = vals.find((v) => Array.isArray(v));
-          if (arr) questions = arr as ClaudeQuestion[];
-          else questions = [{ question: (input.description as string) || (input.text as string) || "Claude has a question", options: [] }];
-        }
+  if (name === "EnterPlanMode") {
+    store.setPlanMode(sessionId, true);
+  } else if (name === "ExitPlanMode") {
+    store.setPlanMode(sessionId, false);
+  } else if (name === "AskUserQuestion") {
+    const items: PendingQuestionItem[] = toolQuestions(input).map((q) => ({
+      question: q.question || q.text || q.description || "Question",
+      ...(q.header !== undefined ? { header: q.header } : {}),
+      options: (q.options || []).map((o) =>
+        typeof o === "string"
+          ? { label: o }
+          : {
+              label: o.label || String(o),
+              ...(o.description !== undefined ? { description: o.description } : {}),
+            }
+      ),
+      multiSelect: q.multiSelect || false,
+    }));
 
-        const items: PendingQuestionItem[] = questions.map((q) => ({
-          question: q.question || q.text || q.description || "Question",
-          ...(q.header !== undefined && { header: q.header }),
-          options: (q.options || []).map((o) =>
-            typeof o === "string"
-              ? { label: o }
-              : {
-                  label: o.label || String(o),
-                  ...(o.description !== undefined && { description: o.description }),
-                }
-          ),
-          multiSelect: q.multiSelect || false,
-        }));
+    if (items.length > 0) {
+      store.setPendingQuestions(sessionId, {
+        toolUseId: toolId,
+        items,
+        currentIndex: 0,
+        answers: [],
+      });
+      cancelProviderSession(sessionId, provider).catch(() => {});
+      store.setStreaming(sessionId, false);
+    }
+  } else if (name === "TaskCreate") {
+    const task: ProviderTask = {
+      id: toolId,
+      subject: String(input.subject || input.title || "Task"),
+      status: "pending",
+      ...(input.description ? { description: String(input.description) } : {}),
+    };
+    store.addTask(sessionId, task);
+  } else if (name === "TaskUpdate") {
+    if (input.taskId) {
+      store.updateTask(sessionId, String(input.taskId), {
+        ...(input.status ? { status: String(input.status) as ProviderTask["status"] } : {}),
+        ...(input.subject ? { subject: String(input.subject) } : {}),
+      });
+    }
+  }
 
-        if (items.length > 0) {
-          store.setPendingQuestions(session_id, {
-            toolUseId: blockId,
-            items,
-            currentIndex: 0,
-            answers: [],
-          });
-          cancelClaude(session_id).catch(() => {});
-          store.setStreaming(session_id, false);
-        }
-      } else if (name === "TaskCreate") {
-        const task: ClaudeTask = {
-          id: blockId,
-          subject: String(input.subject || input.title || "Task"),
-          status: "pending",
-          ...(input.description ? { description: String(input.description) } : {}),
-        };
-        store.addTask(session_id, task);
-      } else if (name === "TaskUpdate") {
-        if (input.taskId) {
-          store.updateTask(session_id, String(input.taskId), {
-            ...(input.status ? { status: String(input.status) as ClaudeTask["status"] } : {}),
-            ...(input.subject ? { subject: String(input.subject) } : {}),
-          });
-        }
-      }
+  return HIDDEN_TOOLS.has(name) ? null : toolCall;
+}
 
-      if (!HIDDEN_TOOLS.has(name)) {
-        toolCalls.push(toolCall);
+function applyAssistantMessage(
+  sessionId: string,
+  provider: ProviderId,
+  event: Extract<NormalizedProviderEvent, { kind: "assistant_message" }>,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+) {
+  const session = store.sessions[sessionId];
+  const text = event.useBufferedText && !event.text
+    ? session?.streamingText || ""
+    : event.text;
+  const visibleToolCalls: ToolCall[] = [];
+  for (const toolCall of event.toolCalls || []) {
+    const visible = applyToolCallSideEffects(sessionId, provider, toolCall, store);
+    if (visible) visibleToolCalls.push(visible);
+  }
+
+  const trimmedText = text.trim();
+  if (trimmedText || visibleToolCalls.length > 0) {
+    store.finalizeAssistantMessage(
+      sessionId,
+      trimmedText,
+      visibleToolCalls.length > 0 ? visibleToolCalls : undefined,
+    );
+  } else {
+    store.clearStreamingText(sessionId);
+  }
+}
+
+function applyToolResult(
+  sessionId: string,
+  toolResult: ProviderToolResult,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+  options?: { trackModifiedFiles?: boolean },
+) {
+  const toolName = getSessionMap(sessionToolMaps, sessionId).get(toolResult.id);
+
+  if (toolName === "TaskCreate" && toolResult.result) {
+    const match = toolResult.result.match(/#(\d+)/);
+    const newId = match?.[1];
+    if (newId) {
+      const s = useProviderSessionStore.getState();
+      const session = s.sessions[sessionId];
+      if (session) {
+        const newTasks = session.tasks.map((t) =>
+          t.id === toolResult.id ? { ...t, id: newId } : t
+        );
+        useProviderSessionStore.setState({
+          sessions: { ...s.sessions, [sessionId]: { ...session, tasks: newTasks } },
+        });
       }
     }
   }
 
-  const trimmedText = text.trim();
-  if (trimmedText || toolCalls.length > 0) {
-    store.finalizeAssistantMessage(session_id, trimmedText, toolCalls.length > 0 ? toolCalls : undefined);
-    return true;
-  } else {
-    store.clearStreamingText(session_id);
-    return false;
+  if (!toolResult.isError && options?.trackModifiedFiles !== false) {
+    const changedPaths = new Set<string>();
+    const filePath = getSessionMap(sessionFilePathMaps, sessionId).get(toolResult.id);
+    if (filePath) changedPaths.add(filePath);
+    for (const path of providerToolChangedPaths(toolResult.patch?.input ?? {})) {
+      changedPaths.add(path);
+    }
+    if (changedPaths.size > 0) {
+      store.addModifiedFiles(sessionId, [...changedPaths]);
+    }
+  }
+
+  if (toolName && HIDDEN_TOOLS.has(toolName)) return;
+  store.updateToolResult(sessionId, toolResult.id, toolResult.result, toolResult.isError, toolResult.patch);
+}
+
+function markProviderEventLive(
+  sessionId: string,
+  event: NormalizedProviderEvent,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+) {
+  if (event.kind === "turn_completed" || event.kind === "error") return;
+  const sess = store.sessions[sessionId];
+  if (sess && !sess.isStreaming) {
+    store.setStreaming(sessionId, true);
+  }
+  store.touchLastEvent(sessionId);
+}
+
+function handleSessionStarted(
+  sessionId: string,
+  provider: ProviderId,
+  event: Extract<NormalizedProviderEvent, { kind: "session_started" }>,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+) {
+  if (event.threadId) store.setCodexThreadId(sessionId, event.threadId);
+  if (event.model) store.setModel(sessionId, event.model);
+  store.setStreaming(sessionId, true);
+  const session = store.sessions[sessionId];
+  const prevUsed = session?.contextUsed || 0;
+  const model = event.model || (session ? resolveSessionProviderState(session).selectedModel : null) || session?.model || null;
+  const contextMax = event.contextMax ?? (event.model ? getProviderEventContextWindow(provider, model) : 0);
+  if (contextMax > 0) {
+    store.setContextUsage(sessionId, prevUsed, contextMax);
   }
 }
 
-export function useClaudeEvents() {
+function handleMcpStatus(
+  sessionId: string,
+  event: Extract<NormalizedProviderEvent, { kind: "mcp_status" }>,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+) {
+  const incoming = event.servers
+    .map((server) => normalizeMcpServerStatus(server))
+    .filter((server): server is McpServerStatus => server != null);
+  if (incoming.length === 0) return;
+  const current = store.sessions[sessionId]?.mcpServers ?? [];
+  store.setMcpServers(sessionId, mergeMcpServerStatuses(current, incoming));
+}
+
+function handleUsage(
+  sessionId: string,
+  provider: ProviderId,
+  event: Extract<NormalizedProviderEvent, { kind: "usage" }>,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+) {
+  if (event.inputTokens <= 0) return;
+  const session = store.sessions[sessionId];
+  const providerState = session ? resolveSessionProviderState(session) : null;
+  const model = providerState?.selectedModel ?? session?.model ?? null;
+  const contextMax = event.contextMax
+    ?? session?.contextMax
+    ?? getProviderEventContextWindow(provider, model);
+  store.setContextUsage(sessionId, Math.min(event.inputTokens, contextMax), contextMax);
+}
+
+function handleTurnCompleted(
+  sessionId: string,
+  provider: ProviderId,
+  event: Extract<NormalizedProviderEvent, { kind: "turn_completed" }>,
+  store: ReturnType<typeof useProviderSessionStore.getState>,
+) {
+  flushBeforeFinalization();
+  const session = store.sessions[sessionId];
+  if (session?.streamingText?.trim()) {
+    store.finalizeAssistantMessage(sessionId, session.streamingText.trim());
+  }
+
+  store.setStreaming(sessionId, false);
+  store.clearStreamingText(sessionId);
+
+  if (event.costUsd) store.addCost(sessionId, event.costUsd);
+  const totalTokens = event.totalTokens
+    ?? ((event.inputTokens ?? event.usage?.input_tokens ?? 0) + (event.outputTokens ?? event.usage?.output_tokens ?? 0));
+  if (totalTokens > 0) store.addTokens(sessionId, totalTokens);
+
+  const latestSession = useProviderSessionStore.getState().sessions[sessionId];
+  if (latestSession) {
+    const providerState = resolveSessionProviderState(latestSession);
+    const model = providerState.selectedModel ?? latestSession.model ?? null;
+    const modelContextMax = getProviderEventContextWindow(provider, model);
+    let contextMax = event.contextMax ?? latestSession.contextMax ?? modelContextMax;
+    if (modelContextMax > contextMax) contextMax = modelContextMax;
+    if (contextMax !== (latestSession.contextMax || 0)) {
+      store.setContextUsage(sessionId, latestSession.contextUsed || 0, contextMax);
+    }
+  }
+
+  const freshSess = useProviderSessionStore.getState().sessions[sessionId];
+  const settings = useSettingsStore.getState();
+  const freshProvider = freshSess ? resolveSessionProviderState(freshSess).provider : provider;
+  if (
+    settings.autoCompactEnabled &&
+    freshSess &&
+    providerSupports(freshProvider, "compact") &&
+    freshSess.autoCompactStatus === "idle" &&
+    freshSess.contextMax > 0 &&
+    freshSess.contextUsed > 0 &&
+    !event.isError
+  ) {
+    const pct = (freshSess.contextUsed / freshSess.contextMax) * 100;
+    if (pct >= settings.autoCompactThreshold) {
+      useProviderSessionStore.getState().setAutoCompactStatus(sessionId, "compacting");
+      setTimeout(() => {
+        runAutoCompact(sessionId);
+      }, 500);
+    }
+  } else if (freshSess?.autoCompactStatus === "compacting") {
+    useProviderSessionStore.getState().setAutoCompactStatus(sessionId, "done");
+  }
+
+  if (event.error) store.setError(sessionId, event.error);
+}
+
+function cleanupSessionTracking(sessionId: string) {
+  sessionToolMaps.delete(sessionId);
+  sessionFilePathMaps.delete(sessionId);
+  pendingText.delete(sessionId);
+}
+
+function handleProviderEvent(message: ProviderIngestionMessage) {
+  const store = useProviderSessionStore.getState();
+  const { sessionId, provider } = message;
+
+  if (message.type === "done") {
+    flushBeforeFinalization();
+    const session = store.sessions[sessionId];
+    if (session?.streamingText?.trim()) {
+      store.finalizeAssistantMessage(sessionId, session.streamingText.trim());
+    }
+    const current = useProviderSessionStore.getState().sessions[sessionId];
+    if (current && !current.isStreaming) {
+      store.setStreaming(sessionId, true);
+    }
+    store.setStreaming(sessionId, false);
+    store.clearStreamingText(sessionId);
+    cleanupSessionTracking(sessionId);
+    return;
+  }
+
+  const event = message.event;
+  const wasStreaming = !!store.sessions[sessionId]?.isStreaming;
+  markProviderEventLive(sessionId, event, store);
+
+  if (event.kind === "assistant_message" || event.kind === "turn_completed") {
+    flushBeforeFinalization();
+  }
+
+  switch (event.kind) {
+    case "session_started":
+      handleSessionStarted(sessionId, provider, event, store);
+      break;
+    case "mcp_status":
+      handleMcpStatus(sessionId, event, store);
+      break;
+    case "turn_started":
+      store.setStreaming(sessionId, true);
+      if (event.resetStreamingText) store.clearStreamingText(sessionId);
+      break;
+    case "assistant_delta": {
+      const existing = pendingText.get(sessionId) || "";
+      pendingText.set(sessionId, existing + event.text);
+      scheduleFlush();
+      break;
+    }
+    case "assistant_message":
+      applyAssistantMessage(sessionId, provider, event, store);
+      break;
+    case "tool_call":
+      applyAssistantMessage(sessionId, provider, { kind: "assistant_message", text: "", toolCalls: [event.toolCall] }, store);
+      break;
+    case "tool_update":
+      store.updateToolCall(sessionId, event.id, event.patch);
+      if (event.result) applyToolResult(sessionId, event.result, store, { trackModifiedFiles: false });
+      break;
+    case "tool_result":
+      applyToolResult(sessionId, event.toolResult, store);
+      break;
+    case "usage":
+      handleUsage(sessionId, provider, event, store);
+      break;
+    case "turn_completed":
+      handleTurnCompleted(sessionId, provider, event, store);
+      break;
+    case "error":
+      store.setError(sessionId, event.message);
+      if (event.terminal !== false) {
+        store.setStreaming(sessionId, false);
+        store.clearStreamingText(sessionId);
+        cleanupSessionTracking(sessionId);
+      }
+      break;
+  }
+
+  const lifecycleNeedsDirectPublish =
+    (event.kind === "turn_started" && wasStreaming) ||
+    (event.kind === "turn_completed" && !wasStreaming);
+  if (lifecycleNeedsDirectPublish) {
+    publishProviderLifecycleFromProviderEvent({
+      sessionId,
+      provider,
+      event,
+    });
+  }
+}
+
+export function useProviderEvents() {
   useEffect(() => {
-    let unlistenEvent: (() => void) | null = null;
-    let unlistenDone: (() => void) | null = null;
-    let unlistenCodexEvent: (() => void) | null = null;
-    let unlistenCodexDone: (() => void) | null = null;
+    let unlistenProvider: (() => void) | null = null;
     let unlistenPerm: (() => void) | null = null;
     const unlistenHooks: (() => void)[] = [];
     let cancelled = false;
 
     // Fallback flush: RAF stops firing when the window is backgrounded,
-    // so use a setInterval to ensure pending text is still delivered
+    // so use a setInterval to ensure pending text is still delivered.
     const fallbackFlush = setInterval(() => {
       if (pendingText.size > 0) flushPendingText();
     }, 250);
 
     (async () => {
-      const fn1 = await onClaudeEvent((payload) => {
-        if (cancelled) return;
-        const { session_id, data } = payload;
-        const store = useClaudeStore.getState();
-
-        let parsed: ClaudeStreamEvent;
-        try {
-          parsed = JSON.parse(data) as ClaudeStreamEvent;
-        } catch (err) {
-          console.warn("[claude] Failed to parse event:", data.slice(0, 200), err);
-          store.setError(session_id, `Failed to parse Claude response — the session may need to be restarted.`);
-          return;
-        }
-
-        // Unwrap stream_event envelope — Claude CLI wraps raw streaming API
-        // events (content_block_start, content_block_delta, etc.) inside a
-        // { type: "stream_event", event: {...}, parent_tool_use_id?: "..." }
-        // wrapper. Extract the inner event so existing handlers process it.
-        let streamParentToolUseId: string | undefined;
-        if (parsed.type === "stream_event" && parsed.event) {
-          streamParentToolUseId = parsed.parent_tool_use_id;
-          parsed = parsed.event;
-        }
-
-        const type: string = parsed.type;
-
-        // Safety net: if we receive events while isStreaming is false, the process is
-        // clearly still running — re-enable streaming. This catches stale claude-done
-        // race conditions and any other desync between backend process state and frontend.
-        if (type !== "result" && type !== "ping") {
-          const sess = store.sessions[session_id];
-          if (sess && !sess.isStreaming) {
-            store.setStreaming(session_id, true);
-          }
-          // Touch last-event timestamp so the stuck-streaming timeout measures
-          // inactivity instead of total duration
-          store.touchLastEvent(session_id);
-        }
-
-        if (type === "system" && parsed.subtype === "init") {
-          const model = String(parsed.model || "");
-          store.setModel(session_id, model);
-          store.setStreaming(session_id, true);
-          // Only update contextMax — preserve existing contextUsed so the
-          // topbar badge doesn't vanish between turns.
-          const prevUsed = store.sessions[session_id]?.contextUsed || 0;
-          store.setContextUsage(session_id, prevUsed, getClaudeContextWindowForModel(model));
-          if (Array.isArray(parsed.mcp_servers)) {
-            const servers = parsed.mcp_servers
-              .map((s) => normalizeMcpServerStatus(s))
-              .filter((s): s is McpServerStatus => s != null);
-            store.setMcpServers(session_id, mergeMcpServerStatuses([], servers));
-          }
-          return;
-        }
-
-        // Top-level error from the CLI (API rate limit, overloaded, auth failure, etc.)
-        // Without this handler the spinner never stops — the "safety net" above would
-        // keep re-enabling streaming on every subsequent event.
-        if (type === "error") {
-          const errMsg =
-            typeof parsed.error === "string"
-              ? parsed.error
-              : parsed.error?.message || parsed.result || parsed.message_text || "Claude reported an error.";
-          store.setError(session_id, errMsg);
-          store.setStreaming(session_id, false);
-          store.clearStreamingText(session_id);
-          pendingBlocks.delete(session_id);
-          assistantFinalized.delete(session_id);
-          return;
-        }
-
-        // Claude CLI emits stream_request_start at the beginning of each underlying
-        // API call in a multi-turn session. Treat it like message_start so stale
-        // pending blocks from a prior turn don't leak into the new one.
-        if (type === "stream_request_start") {
-          store.setStreaming(session_id, true);
-          pendingBlocks.delete(session_id);
-          assistantFinalized.delete(session_id);
-          return;
-        }
-
-        // ---- Streaming content block events ----
-
-        if (type === "content_block_start") {
-          const cb = parsed.content_block;
-          if (cb?.type === "tool_use" && cb.id && cb.name) {
-            const blocks = pendingBlocks.get(session_id) || [];
-            blocks.push({
-              id: cb.id,
-              type: "tool_use",
-              name: cb.name,
-              inputJson: "",
-              ...(streamParentToolUseId !== undefined && { parentToolUseId: streamParentToolUseId }),
-            });
-            pendingBlocks.set(session_id, blocks);
-          }
-          // Other block types (text, thinking) don't need tracking here — text deltas
-          // go to pendingText directly, thinking deltas are discarded until we wire up
-          // a thinking-block UI. Explicitly ignoring thinking prevents its input_json_delta
-          // from ever being misattributed to a tool_use block.
-          return;
-        }
-
-        if (type === "content_block_delta") {
-          const d = parsed.delta;
-          if (d?.type === "text_delta" && d.text) {
-            const existing = pendingText.get(session_id) || "";
-            pendingText.set(session_id, existing + d.text);
-            scheduleFlush();
-          } else if (d?.type === "input_json_delta" && d.partial_json) {
-            const blocks = pendingBlocks.get(session_id);
-            // Only accumulate onto a tool_use block. If the most recent content block
-            // was thinking/text (not tracked here), this delta is unrelated to any
-            // pending tool_use and must be ignored.
-            const last = blocks && blocks.length > 0 ? blocks[blocks.length - 1] : undefined;
-            if (last && last.type === "tool_use") {
-              last.inputJson += d.partial_json;
-            }
-          }
-          // thinking_delta / signature_delta are intentionally dropped — no UI yet
-          return;
-        }
-
-        if (type === "content_block_stop") {
-          // Nothing to do — block is complete, will be finalized on assistant or message_stop
-          return;
-        }
-
-        if (type === "message_start") {
-          store.setStreaming(session_id, true);
-          store.clearStreamingText(session_id);
-          pendingBlocks.delete(session_id);
-          assistantFinalized.delete(session_id);
-          return;
-        }
-
-        // Flush any buffered streaming text before finalization events
-        if (type === "assistant" || type === "result" || type === "message_stop") {
-          if (rafId !== null) {
-            cancelAnimationFrame(rafId);
-            rafId = null;
-          }
-          flushPendingText();
-        }
-
-        if (type === "assistant") {
-          const msgUsage = parsed.message?.usage || parsed.usage;
-          const totalIn = totalInputTokens(msgUsage);
-          if (totalIn > 0) {
-            const sess = store.sessions[session_id];
-            const ctxMax = sess?.contextMax || getClaudeContextWindowForModel(sess?.model || "");
-            store.setContextUsage(session_id, totalIn, ctxMax);
-          }
-
-          const content = parsed.message?.content || parsed.content;
-          if (Array.isArray(content)) {
-            processContentArray(session_id, content, store);
-            assistantFinalized.add(session_id);
-            pendingBlocks.delete(session_id);
-          }
-          return;
-        }
-
-        // message_stop: end of an assistant turn in the raw streaming protocol.
-        // If the synthetic "assistant" event didn't fire (newer CLI versions),
-        // finalize from the content blocks we tracked ourselves.
-        if (type === "message_stop") {
-          if (!assistantFinalized.has(session_id)) {
-            const blocks = pendingBlocks.get(session_id);
-            const sess = store.sessions[session_id];
-            const streamText = sess?.streamingText || "";
-
-            if ((blocks && blocks.length > 0) || streamText.trim()) {
-              const content: ClaudeContentBlock[] = [];
-              if (streamText.trim()) {
-                content.push({ type: "text", text: streamText });
-              }
-              if (blocks) {
-                for (const b of blocks) {
-                  if (b.type === "tool_use") {
-                    let input = {};
-                    try { input = JSON.parse(b.inputJson || "{}"); } catch { /* partial JSON */ }
-                    content.push({
-                      type: "tool_use",
-                      id: b.id,
-                      input,
-                      ...(b.name !== undefined && { name: b.name }),
-                      ...(b.parentToolUseId !== undefined && { parentToolUseId: b.parentToolUseId }),
-                    });
-                  }
-                }
-              }
-              processContentArray(session_id, content, store);
-            }
-          }
-          pendingBlocks.delete(session_id);
-          assistantFinalized.delete(session_id);
-          return;
-        }
-
-        // message_delta: may contain usage info and stop_reason at end of turn
-        if (type === "message_delta") {
-          const totalIn = totalInputTokens(parsed.usage);
-          if (totalIn > 0) {
-            const sess = store.sessions[session_id];
-            const ctxMax = sess?.contextMax || getClaudeContextWindowForModel(sess?.model || "");
-            store.setContextUsage(session_id, totalIn, ctxMax);
-          }
-          // Surface non-normal stop reasons (refusal, pause_turn, max_tokens) — these
-          // currently vanish silently and leave the user wondering why the turn ended.
-          const sr = parsed.delta?.stop_reason;
-          if (sr === "refusal") {
-            store.setError(session_id, "Claude declined to continue (policy refusal).");
-          } else if (sr === "max_tokens") {
-            store.setError(session_id, "Response cut off — hit max_tokens. Ask Claude to continue.");
-          }
-          // pause_turn / tool_use / end_turn are normal flow — no surface needed
-          return;
-        }
-
-        if (type === "user") {
-          const content = parsed.message?.content || parsed.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === "tool_result") {
-                const toolResult = claudeBlockToProviderToolResult(block);
-                if (!toolResult) continue;
-                const toolId = toolResult.id;
-                const toolName = getSessionMap(sessionToolMaps, session_id).get(toolId);
-
-                if (toolName === "TaskCreate" && block.content) {
-                  const resultStr = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
-                  const match = resultStr.match(/#(\d+)/);
-                  const newId = match?.[1];
-                  if (newId) {
-                    const s = useClaudeStore.getState();
-                    const session = s.sessions[session_id];
-                    if (session) {
-                      const newTasks = session.tasks.map((t) =>
-                        t.id === toolId ? { ...t, id: newId } : t
-                      );
-                      useClaudeStore.setState({
-                        sessions: { ...s.sessions, [session_id]: { ...session, tasks: newTasks } },
-                      });
-                    }
-                  }
-                }
-
-                const filePath = getSessionMap(sessionFilePathMaps, session_id).get(toolId);
-                if (filePath && !toolResult.isError) {
-                  store.addModifiedFiles(session_id, [filePath]);
-                }
-
-                if (toolName && HIDDEN_TOOLS.has(toolName)) continue;
-
-                store.updateToolResult(session_id, toolId, toolResult.result, toolResult.isError);
-              }
-            }
-          }
-          // Clear per-turn tracking so stale blocks don't leak into the next assistant turn
-          pendingBlocks.delete(session_id);
-          assistantFinalized.delete(session_id);
-          return;
-        }
-
-        if (type === "result") {
-          store.setStreaming(session_id, false);
-          if (parsed.total_cost_usd) store.addCost(session_id, parsed.total_cost_usd);
-          const resultUsage = parsed.usage || {};
-          const totalIn = totalInputTokens(resultUsage);
-          const output_tokens = resultUsage.output_tokens || parsed.output_tokens || 0;
-          if (totalIn || output_tokens) store.addTokens(session_id, totalIn + output_tokens);
-
-          const sess = store.sessions[session_id];
-          const modelCtx = getClaudeContextWindowForModel(sess?.model || "");
-          let ctxMax = sess?.contextMax || modelCtx;
-          if (parsed.modelUsage) {
-            for (const modelData of Object.values(parsed.modelUsage)) {
-              if (modelData?.contextWindow && modelData.contextWindow > 0) {
-                ctxMax = modelData.contextWindow;
-                break;
-              }
-            }
-          }
-          // Guard against the CLI reporting 200k for 1M variants — trust the
-          // name-derived size when it's larger so the percentage stays sane.
-          if (modelCtx > ctxMax) ctxMax = modelCtx;
-          // Only update ctxMax here — the `assistant` event already set the
-          // correct per-turn contextUsed.  The `result` event's usage is
-          // cumulative across the session which would overcount.
-          if (ctxMax !== (sess?.contextMax || 0)) {
-            store.setContextUsage(session_id, sess?.contextUsed || 0, ctxMax);
-          }
-          // Auto-compact check (fresh read — prior set() calls have settled)
-          const freshSess = useClaudeStore.getState().sessions[session_id];
-          const settings = useSettingsStore.getState();
-          const freshProvider = resolveSessionProviderState(freshSess).provider;
-          if (
-            settings.autoCompactEnabled &&
-            freshSess &&
-            providerSupports(freshProvider, "compact") &&
-            freshSess.autoCompactStatus === "idle" &&
-            freshSess.contextMax > 0 &&
-            freshSess.contextUsed > 0 &&
-            !parsed.is_error
-          ) {
-            const pct = (freshSess.contextUsed / freshSess.contextMax) * 100;
-            if (pct >= settings.autoCompactThreshold) {
-              useClaudeStore.getState().setAutoCompactStatus(session_id, "compacting");
-              setTimeout(() => {
-                runAutoCompact(session_id);
-              }, 500);
-            }
-          } else if (freshSess?.autoCompactStatus === "compacting") {
-            useClaudeStore.getState().setAutoCompactStatus(session_id, "done");
-          }
-
-          if (parsed.is_error && parsed.result) store.setError(session_id, parsed.result);
-          pendingBlocks.delete(session_id);
-          assistantFinalized.delete(session_id);
-          return;
-        }
-
-        // Unknown event type — ignore silently (content_block_stop, etc.)
+      const providerUnlisten = await subscribeProviderEventIngestion((message) => {
+        if (!cancelled) handleProviderEvent(message);
       });
+      if (cancelled) { providerUnlisten(); return; }
+      unlistenProvider = providerUnlisten;
 
-      if (cancelled) { fn1(); return; }
-      unlistenEvent = fn1;
-
-      const fn2 = await onClaudeDone((payload) => {
-        if (cancelled) return;
-        if (rafId !== null) {
-          cancelAnimationFrame(rafId);
-          rafId = null;
-        }
-        flushPendingText();
-
-        const store = useClaudeStore.getState();
-        // If streaming text exists but was never finalized by a result/assistant event
-        // (e.g. process died mid-stream), preserve it as a message instead of losing it
-        const session = store.sessions[payload.session_id];
-        if (session?.streamingText?.trim()) {
-          store.finalizeAssistantMessage(payload.session_id, session.streamingText.trim());
-        }
-        // Guarantee a true→false streaming transition so store subscribers
-        // (e.g. delegation orchestrator) detect process exit even when
-        // isStreaming was already false from an earlier result event.
-        const current = useClaudeStore.getState().sessions[payload.session_id];
-        if (current && !current.isStreaming) {
-          store.setStreaming(payload.session_id, true);
-        }
-        store.setStreaming(payload.session_id, false);
-        store.clearStreamingText(payload.session_id);
-        sessionToolMaps.delete(payload.session_id);
-        sessionFilePathMaps.delete(payload.session_id);
-        pendingBlocks.delete(payload.session_id);
-        assistantFinalized.delete(payload.session_id);
-      });
-      if (cancelled) { fn2(); return; }
-      unlistenDone = fn2;
-
-      // ── Codex (OpenAI Codex CLI) event stream ───────────────
-      // Translates each NDJSON line into the same store actions the Claude
-      // listener uses, so ChatMessage rendering is provider-agnostic.
-      const fnCodex = await onCodexEvent((payload) => {
-        if (cancelled) return;
-        const { session_id, data } = payload;
-        const store = useClaudeStore.getState();
-
-        let parsed: CodexNdjsonEvent;
-        try {
-          parsed = JSON.parse(data) as CodexNdjsonEvent;
-        } catch (err) {
-          const count = (codexParseErrorCounts.get(session_id) || 0) + 1;
-          codexParseErrorCounts.set(session_id, count);
-          console.warn("[codex] Dropped malformed stream event:", data.slice(0, 200), err);
-          return;
-        }
-        codexParseErrorCounts.delete(session_id);
-
-        const type = parsed.type || "";
-        if (!type) return;
-
-        // Mark streaming live + touch last-event whenever non-terminal events
-        // flow in, mirroring the Claude path.
-        if (type !== "turn.completed" && type !== "task_complete" && type !== "error") {
-          const sess = store.sessions[session_id];
-          if (sess && !sess.isStreaming) store.setStreaming(session_id, true);
-          store.touchLastEvent(session_id);
-        }
-
-        // 1) Capture Codex's CLI-assigned thread id for resume(). Both the
-        //    new (`thread.started`) and older (`session_configured`) shapes
-        //    are accepted. Field name varies too — accept both.
-        if (type === "thread.started" || type === "session_configured") {
-          const tid = parsed.thread_id || parsed.threadId;
-          if (tid) store.setCodexThreadId(session_id, tid);
-          store.setStreaming(session_id, true);
-          codexAssistantFinalized.delete(session_id);
-          codexPending.delete(session_id);
-          return;
-        }
-
-        if (type === "mcp.status.updated") {
-          const mcpEvent = parsed as CodexNdjsonEvent & Record<string, unknown>;
-          const rawServers: unknown[] = Array.isArray(mcpEvent.mcp_servers)
-            ? mcpEvent.mcp_servers
-            : Array.isArray(mcpEvent.servers)
-              ? mcpEvent.servers
-              : mcpEvent.server
-                ? [mcpEvent.server]
-                : [mcpEvent];
-          const incoming = rawServers
-            .map((server) => normalizeMcpServerStatus(server))
-            .filter((server): server is McpServerStatus => server != null);
-          if (incoming.length > 0) {
-            const current = store.sessions[session_id]?.mcpServers ?? [];
-            store.setMcpServers(session_id, mergeMcpServerStatuses(current, incoming));
-          }
-          return;
-        }
-
-        if (type === "turn.started") {
-          codexAssistantFinalized.delete(session_id);
-          return;
-        }
-
-        if (type === "token_usage.updated") {
-          const sess = store.sessions[session_id];
-          const usage = parsed.usage ?? parsed.payload?.usage;
-          const inputUsed = usage?.input_tokens;
-          if (typeof inputUsed === "number") {
-            const reportedWindow = typeof parsed.context_window === "number" && parsed.context_window > 0
-              ? parsed.context_window
-              : null;
-            const ctxMax = reportedWindow ?? getCodexContextWindow(resolveSessionProviderState(sess).selectedModel ?? sess?.model ?? null);
-            store.setContextUsage(session_id, Math.min(inputUsed, ctxMax), ctxMax);
-          }
-          return;
-        }
-
-        // 2) item.started — note the in-flight item. Tool items get pushed
-        //    onto a fresh assistant message immediately so the UI can render
-        //    "running" status.
-        if (type === "item.started") {
-          const item = parsed.item;
-          if (!item || !item.id) return;
-          const kind = classifyCodexItem(item.item_type ?? item.type);
-          const itemMap = getCodexItemMap(session_id);
-          itemMap.set(item.id, {
-            itemId: item.id,
-            kind,
-            toolName: codexItemDisplayName(item),
-            text: typeof item.text === "string" ? item.text : "",
-            outputText: "",
-            inputArgs: codexItemInput(item),
-          });
-
-          if (kind === "tool") {
-            const toolCall = codexItemToProviderToolCall(item);
-            if (!toolCall) return;
-            store.finalizeAssistantMessage(session_id, "", [toolCall]);
-            codexAssistantFinalized.add(session_id);
-          }
-          return;
-        }
-
-        // 3) item.updated / content.delta / agent_message — incremental text
-        //    on whatever item is currently in flight. Codex's deltas may
-        //    arrive on `delta`, `text`, or inside `item.text`.
-        if (type === "item.updated" || type === "content.delta") {
-          const item = parsed.item;
-          if (item?.id) {
-            const itemMap = getCodexItemMap(session_id);
-            const tracked = itemMap.get(item.id);
-            if (tracked && tracked.kind === "agent_message") {
-              const candidateText =
-                (typeof parsed.delta === "string" ? parsed.delta : "") ||
-                (typeof parsed.text === "string" ? parsed.text : "") ||
-                (typeof item.text === "string" ? item.text : "");
-              const deltaText =
-                typeof parsed.delta === "string" || typeof parsed.text === "string"
-                  ? candidateText
-                  : candidateText.startsWith(tracked.text)
-                    ? candidateText.slice(tracked.text.length)
-                    : candidateText;
-              if (!deltaText) return;
-              const next = appendOrReplaceAccumulated(tracked.text, candidateText || deltaText);
-              tracked.text = next;
-              // Stream into the same buffer Claude uses; flushPendingText
-              // merges these into the session-level streamingText.
-              const existing = pendingText.get(session_id) || "";
-              pendingText.set(session_id, existing + deltaText);
-              scheduleFlush();
-            } else if (tracked && tracked.kind === "tool") {
-              const patch = codexItemToProviderToolPatch(item);
-              const input = patch.input ?? {};
-              tracked.inputArgs = { ...tracked.inputArgs, ...input };
-              store.updateToolCall(session_id, item.id, patch);
-              const resultDelta = codexItemResultText(item);
-              const hasResultDelta = resultDelta.length > 0 || codexItemIsError(item);
-              if (hasResultDelta) {
-                tracked.outputText =
-                  typeof parsed.delta === "string"
-                    ? tracked.outputText + resultDelta
-                    : appendOrReplaceAccumulated(tracked.outputText, resultDelta);
-                store.updateToolResult(session_id, item.id, tracked.outputText, codexItemIsError(item), {
-                  ...(patch.name !== undefined ? { name: patch.name } : {}),
-                  input,
-                });
-              }
-            }
-          }
-          return;
-        }
-
-        // 4a) LEGACY: top-level agent_message (older Codex CLI builds —
-        //     0.121.0+ emits item.* exclusively). Kept defensively for one
-        //     more cycle; remove once confirmed dead in production.
-        if (type === "agent_message") {
-          const text = parsed.text || parsed.message || "";
-          if (text) {
-            store.finalizeAssistantMessage(session_id, text);
-            codexAssistantFinalized.add(session_id);
-          }
-          return;
-        }
-
-        // 4b) LEGACY: top-level agent_reasoning (older shape) — drop into
-        //     log only. No reasoning UI yet, but we don't want it to leak.
-        if (type === "agent_reasoning") {
-          return;
-        }
-
-        // 5) item.completed — finalize whatever the item represents.
-        if (type === "item.completed") {
-          const item = parsed.item;
-          if (!item || !item.id) return;
-          const itemMap = getCodexItemMap(session_id);
-          const tracked = itemMap.get(item.id);
-          const kind = tracked?.kind ?? classifyCodexItem(item.item_type ?? item.type);
-
-          if (kind === "agent_message") {
-            // Flush any buffered streaming deltas before finalizing.
-            if (rafId !== null) {
-              cancelAnimationFrame(rafId);
-              rafId = null;
-            }
-            flushPendingText();
-            const finalText =
-              (typeof item.text === "string" && item.text) ||
-              tracked?.text ||
-              "";
-            if (finalText.trim()) {
-              store.finalizeAssistantMessage(session_id, finalText.trim());
-              codexAssistantFinalized.add(session_id);
-            } else {
-              store.clearStreamingText(session_id);
-            }
-          } else if (kind === "tool") {
-            const completedResult = codexItemResultText(item);
-            const isError = codexItemIsError(item);
-            const completedPatch = codexItemToProviderToolPatch(item);
-            const completedInput = completedPatch.input ?? {};
-            const patchedInput = tracked
-              ? { ...tracked.inputArgs, ...completedInput }
-              : completedInput;
-            const completedName = completedPatch.name ?? "";
-            const completedInputIsEmpty = Object.keys(completedInput).length === 0;
-            const patchedName = tracked?.toolName && (completedInputIsEmpty || completedName === "dynamic_tool_call")
-              ? tracked.toolName
-              : completedName || tracked?.toolName || "tool";
-            if (!tracked) {
-              const toolCall = codexItemToProviderToolCall(item);
-              if (toolCall) {
-                store.finalizeAssistantMessage(session_id, "", [{ ...toolCall, name: patchedName, input: patchedInput }]);
-              }
-              codexAssistantFinalized.add(session_id);
-            }
-            const result = completedResult || tracked?.outputText || "";
-            const toolResult = codexItemToProviderToolResult(item, {
-              result,
-              input: patchedInput,
-              name: patchedName,
-            });
-            if (toolResult) {
-              store.updateToolResult(session_id, toolResult.id, toolResult.result, isError, toolResult.patch);
-            }
-            const changedPaths = !isError ? codexInputChangedPaths(patchedInput) : [];
-            if (changedPaths.length > 0) {
-              store.addModifiedFiles(session_id, changedPaths);
-            }
-          }
-          // reasoning + other item kinds are silent for now.
-          itemMap.delete(item.id);
-          return;
-        }
-
-        // 6) LEGACY: top-level tool_use / tool_result aliases (older shape).
-        //    Current `codex exec --json` 0.121.0 routes everything through
-        //    item.started/item.completed; revisit deletion next cycle.
-        if (type === "tool_use" || type === "tool_call_begin") {
-          const item = parsed.item || {};
-          const id = item.id || parsed.thread_id || `${type}-${Date.now()}`;
-          const toolCall = codexItemToProviderToolCall(item, id);
-          if (!toolCall) return;
-          store.finalizeAssistantMessage(session_id, "", [toolCall]);
-          codexAssistantFinalized.add(session_id);
-          return;
-        }
-        if (type === "tool_result" || type === "tool_call_end") {
-          const item = parsed.item || {};
-          const id = item.id || "";
-          if (!id) return;
-          const result =
-            (typeof parsed.output === "string" ? parsed.output : "") ||
-            codexItemResultText(item);
-          const toolResult = codexItemToProviderToolResult(item, { id, result });
-          if (!toolResult) return;
-          store.updateToolResult(session_id, toolResult.id, toolResult.result, toolResult.isError, toolResult.patch);
-          return;
-        }
-
-        // 7) Turn / task termination.
-        if (
-          type === "turn.completed" ||
-          type === "task_complete" ||
-          type === "task.completed"
-        ) {
-          if (rafId !== null) {
-            cancelAnimationFrame(rafId);
-            rafId = null;
-          }
-          flushPendingText();
-          // If we never saw an explicit agent_message item but accumulated
-          // streamingText, salvage it as a final assistant message.
-          const sess = store.sessions[session_id];
-          if (
-            !codexAssistantFinalized.has(session_id) &&
-            sess?.streamingText?.trim()
-          ) {
-            store.finalizeAssistantMessage(session_id, sess.streamingText.trim());
-          }
-          // Codex emits token totals in the `usage` field of turn.completed.
-          // Treat (input_tokens) as live context occupancy and back it with
-          // the model's nominal window so the chat input renders a context %
-          // the same way Anthropic sessions do.
-          const usage = (parsed.usage ?? parsed.payload?.usage) as
-            | { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number }
-            | undefined;
-          if (usage && typeof usage.input_tokens === "number") {
-            const inputUsed = usage.input_tokens || 0;
-            const ctxMax =
-              getCodexContextWindow(resolveSessionProviderState(sess).selectedModel ?? sess?.model ?? null);
-            store.setContextUsage(session_id, Math.min(inputUsed, ctxMax), ctxMax);
-          }
-          const completionError =
-            (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
-            parsed.message ||
-            "";
-          if (completionError) {
-            store.setError(session_id, completionError);
-          }
-          store.setStreaming(session_id, false);
-          store.clearStreamingText(session_id);
-          codexAssistantFinalized.delete(session_id);
-          codexPending.delete(session_id);
-          return;
-        }
-
-        if (type === "turn.failed" || type === "turn.aborted" || type === "error") {
-          const errMsg =
-            (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
-            parsed.message ||
-            "Codex reported an error.";
-          store.setError(session_id, errMsg);
-          store.setStreaming(session_id, false);
-          store.clearStreamingText(session_id);
-          codexAssistantFinalized.delete(session_id);
-          codexPending.delete(session_id);
-          return;
-        }
-
-        // Unknown event types are ignored silently.
-      });
-      if (cancelled) { fnCodex(); return; }
-      unlistenCodexEvent = fnCodex;
-
-      const fnCodexDone = await onCodexDone((payload) => {
-        if (cancelled) return;
-        if (rafId !== null) {
-          cancelAnimationFrame(rafId);
-          rafId = null;
-        }
-        flushPendingText();
-        const store = useClaudeStore.getState();
-        const session = store.sessions[payload.session_id];
-        if (session?.streamingText?.trim()) {
-          store.finalizeAssistantMessage(payload.session_id, session.streamingText.trim());
-        }
-        // Force a transition so subscribers see the change even if isStreaming
-        // was already false from an earlier turn.completed event.
-        const current = useClaudeStore.getState().sessions[payload.session_id];
-        if (current && !current.isStreaming) {
-          store.setStreaming(payload.session_id, true);
-        }
-        store.setStreaming(payload.session_id, false);
-        store.clearStreamingText(payload.session_id);
-        codexPending.delete(payload.session_id);
-        codexAssistantFinalized.delete(payload.session_id);
-        codexParseErrorCounts.delete(payload.session_id);
-      });
-      if (cancelled) { fnCodexDone(); return; }
-      unlistenCodexDone = fnCodexDone;
-
-      // Listen for permission requests from the hook server
+      // Listen for permission requests from the hook server.
       const fn4 = await listen<PermissionRequestPayload>(
         "permission-request",
         (event) => {
           if (cancelled) return;
           const { request_id, session_id, tool_name, tool_input } = event.payload;
-          useClaudeStore.getState().setPendingPermission(session_id, {
+          useProviderSessionStore.getState().setPendingPermission(session_id, {
             requestId: request_id,
             toolName: tool_name,
             toolInput: tool_input || {},
@@ -1100,7 +582,8 @@ export function useClaudeEvents() {
       if (cancelled) { fn4(); return; }
       unlistenPerm = fn4;
 
-      // Listen for Claude hook lifecycle events
+      // Listen for Anthropic/Claude hook lifecycle events while that provider
+      // is the only one emitting hook-server telemetry.
       const HOOK_EVENTS: HookEventType[] = [
         "PreToolUse", "PostToolUse", "Stop",
         "SubagentStart", "SubagentStop", "Notification",
@@ -1112,7 +595,7 @@ export function useClaudeEvents() {
           (event) => {
             if (cancelled) return;
             const p = event.payload;
-            const store = useClaudeStore.getState();
+            const store = useProviderSessionStore.getState();
             const hookEvent: HookEvent = {
               type: hookType,
               sessionId: p.session_id,
@@ -1143,17 +626,11 @@ export function useClaudeEvents() {
     })();
 
     // Clean up module-scoped maps when sessions are removed from the store
-    // (handles cases where claude-done never fires, e.g. user closes panel)
-    const unsubStore = useClaudeStore.subscribe((state, prev) => {
+    // (handles cases where provider-done never fires, e.g. user closes panel).
+    const unsubStore = useProviderSessionStore.subscribe((state, prev) => {
       for (const id of Object.keys(prev.sessions)) {
         if (!state.sessions[id]) {
-          sessionToolMaps.delete(id);
-          sessionFilePathMaps.delete(id);
-          pendingText.delete(id);
-          pendingBlocks.delete(id);
-          assistantFinalized.delete(id);
-          codexPending.delete(id);
-          codexAssistantFinalized.delete(id);
+          cleanupSessionTracking(id);
         }
       }
     });
@@ -1164,14 +641,13 @@ export function useClaudeEvents() {
       if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
       flushPendingText();
       unsubStore();
-      unlistenEvent?.(); unlistenDone?.(); unlistenPerm?.();
-      unlistenCodexEvent?.(); unlistenCodexDone?.();
+      unlistenProvider?.();
+      unlistenPerm?.();
       for (const u of unlistenHooks) u();
       pendingText.clear();
-      pendingBlocks.clear();
-      assistantFinalized.clear();
-      codexPending.clear();
-      codexAssistantFinalized.clear();
     };
   }, []);
 }
+
+/** @deprecated Use useProviderEvents. */
+export const useClaudeEvents = useProviderEvents;

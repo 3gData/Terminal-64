@@ -35,6 +35,13 @@ export interface PermissionOption {
   inputLabel?: string;
 }
 
+export type ProviderPermissionPersistence = "settings" | "provider-metadata";
+
+export interface ProviderPermissionControlPolicy {
+  persistence: ProviderPermissionPersistence;
+  skipPermissionId?: PermissionMode;
+}
+
 export interface ProviderCapabilities {
   mcp: boolean;
   plan: boolean;
@@ -44,6 +51,20 @@ export interface ProviderCapabilities {
   hookLog: boolean;
   nativeSlashCommands: boolean;
   compact: boolean;
+}
+
+export type DelegationMcpTransport = "temp-config" | "env";
+export type DelegationOpenwolfPolicy = "inherit" | "always";
+export type DelegationPermissionPresetPolicy = "selected" | "bypass_all";
+
+export interface ProviderDelegationPolicy {
+  mcpTransport: DelegationMcpTransport;
+  skipOpenwolf: DelegationOpenwolfPolicy;
+  noSessionPersistence: boolean;
+  skipGitRepoCheck: boolean;
+  childRuntime: {
+    permissionPreset: DelegationPermissionPresetPolicy;
+  };
 }
 
 export interface ProviderUiMetadata {
@@ -61,6 +82,8 @@ export interface ProviderManifest {
   id: ProviderId;
   ui: ProviderUiMetadata;
   capabilities: ProviderCapabilities;
+  delegation: ProviderDelegationPolicy;
+  permissionControl: ProviderPermissionControlPolicy;
   models: ModelOption[];
   efforts: EffortOption[];
   permissions: PermissionOption[];
@@ -162,6 +185,19 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       nativeSlashCommands: true,
       compact: true,
     },
+    delegation: {
+      mcpTransport: "temp-config",
+      skipOpenwolf: "inherit",
+      noSessionPersistence: true,
+      skipGitRepoCheck: false,
+      childRuntime: {
+        permissionPreset: "bypass_all",
+      },
+    },
+    permissionControl: {
+      persistence: "settings",
+      skipPermissionId: "bypass_all",
+    },
     models: ANTHROPIC_MODELS,
     efforts: ANTHROPIC_EFFORTS,
     permissions: ANTHROPIC_PERMISSIONS,
@@ -191,6 +227,18 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       nativeSlashCommands: false,
       compact: false,
     },
+    delegation: {
+      mcpTransport: "env",
+      skipOpenwolf: "always",
+      noSessionPersistence: false,
+      skipGitRepoCheck: true,
+      childRuntime: {
+        permissionPreset: "selected",
+      },
+    },
+    permissionControl: {
+      persistence: "provider-metadata",
+    },
     models: OPENAI_MODELS,
     efforts: OPENAI_EFFORTS,
     permissions: OPENAI_PERMISSIONS,
@@ -206,6 +254,14 @@ export const PROVIDER_IDS = Object.keys(PROVIDER_REGISTRY) as ProviderId[];
 
 export function getProviderManifest(provider: ProviderId): ProviderManifest {
   return PROVIDER_REGISTRY[provider];
+}
+
+export function getProviderDelegationPolicy(provider: ProviderId): ProviderDelegationPolicy {
+  return PROVIDER_REGISTRY[provider].delegation;
+}
+
+export function getProviderPermissionControlPolicy(provider: ProviderId): ProviderPermissionControlPolicy {
+  return PROVIDER_REGISTRY[provider].permissionControl;
 }
 
 export function listProviderManifests(): ProviderManifest[] {

@@ -20,6 +20,7 @@
 //! provider-scoped and will move to a dedicated `openwolf.rs` later.
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
@@ -27,13 +28,15 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
+use crate::providers::emit_provider_event;
 use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
     ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
-    ProviderKind, ProviderSendPromptRequest, ProviderSendTurnInput, ProviderSession,
-    ProviderSessionModelSwitchMode, ProviderSessionStartInput, ProviderThreadSnapshot,
-    ProviderTurnStartResult, ProviderUserInputAnswers,
+    ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
+    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
+    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
+    ProviderUserInputAnswers,
 };
 use crate::providers::util::{
     cap_event_size, expanded_tool_path, find_existing_claude_session_jsonl,
@@ -376,6 +379,7 @@ fn spawn_and_stream(
                 Ok(line) => {
                     had_output = true;
                     let data = cap_event_size(line);
+                    emit_provider_event(&handle, "anthropic", &sid, &data);
                     if let Err(e) = handle.emit(
                         "claude-event",
                         ClaudeEvent {
@@ -411,17 +415,19 @@ fn spawn_and_stream(
                 sid,
                 &error_msg[..error_msg.len().min(200)]
             );
+            let data = serde_json::json!({
+                "type": "result",
+                "subtype": "error",
+                "is_error": true,
+                "result": error_msg
+            })
+            .to_string();
+            emit_provider_event(&handle, "anthropic", &sid, &data);
             if let Err(e) = handle.emit(
                 "claude-event",
                 ClaudeEvent {
                     session_id: sid.clone(),
-                    data: serde_json::json!({
-                        "type": "result",
-                        "subtype": "error",
-                        "is_error": true,
-                        "result": error_msg
-                    })
-                    .to_string(),
+                    data,
                 },
             ) {
                 safe_eprintln!("[claude] Failed to emit error event for {}: {}", sid, e);
@@ -479,6 +485,34 @@ pub struct ClaudeAdapter {
     // trait signature even though no caller dispatches through it yet.
     #[allow(dead_code)]
     capabilities: ProviderAdapterCapabilities,
+}
+
+#[derive(Deserialize)]
+struct ClaudeHistoryTruncateRequest {
+    session_id: String,
+    cwd: String,
+    keep_messages: usize,
+}
+
+#[derive(Deserialize)]
+struct ClaudeHistoryForkRequest {
+    parent_session_id: String,
+    new_session_id: String,
+    cwd: String,
+    keep_messages: usize,
+}
+
+#[derive(Deserialize)]
+struct ClaudeHistoryHydrateRequest {
+    session_id: String,
+    cwd: String,
+    resume_at_uuid: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeHistoryDeleteRequest {
+    session_id: String,
+    cwd: String,
 }
 
 impl ClaudeAdapter {
@@ -708,6 +742,90 @@ impl ProviderAdapter for ClaudeAdapter {
 
     fn capabilities(&self) -> &ProviderAdapterCapabilities {
         &self.capabilities
+    }
+
+    fn history_truncate(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: ClaudeHistoryTruncateRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid Anthropic history truncate request: {}", e))?;
+        if req.keep_messages == 0 {
+            let details = crate::truncate_session_jsonl_by_messages_impl(
+                req.session_id,
+                req.cwd,
+                req.keep_messages,
+            )?;
+            return Ok(serde_json::json!({
+                "status": details
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("applied"),
+                "method": "jsonl",
+                "resume_at_uuid": null,
+                "details": details,
+            }));
+        }
+
+        let resume_at_uuid =
+            crate::find_rewind_uuid_impl(req.session_id, req.cwd, req.keep_messages)?;
+        Ok(serde_json::json!({
+            "status": "applied",
+            "method": "resume_session_at",
+            "resume_at_uuid": resume_at_uuid,
+        }))
+    }
+
+    fn history_fork(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: ClaudeHistoryForkRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid Anthropic history fork request: {}", e))?;
+        let resume_at_uuid = crate::fork_session_jsonl_impl(
+            req.parent_session_id,
+            req.new_session_id,
+            req.cwd,
+            req.keep_messages,
+        )?;
+        Ok(serde_json::json!({
+            "status": "applied",
+            "resume_at_uuid": resume_at_uuid,
+        }))
+    }
+
+    fn history_hydrate(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: ClaudeHistoryHydrateRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid Anthropic history hydrate request: {}", e))?;
+        let stat = crate::stat_session_jsonl_impl(req.session_id.clone(), req.cwd.clone())?;
+        let messages =
+            crate::load_session_history_at_impl(req.session_id, req.cwd, req.resume_at_uuid)?;
+        let status = if messages.is_empty() {
+            "empty"
+        } else {
+            "messages"
+        };
+        Ok(serde_json::json!({
+            "status": status,
+            "messages": messages,
+            "stat": stat,
+        }))
+    }
+
+    fn history_delete(
+        &self,
+        req: ProviderHistoryRequest,
+    ) -> Result<ProviderHistoryResponse, ProviderAdapterError> {
+        let req: ClaudeHistoryDeleteRequest = serde_json::from_value(req)
+            .map_err(|e| format!("Invalid Anthropic history delete request: {}", e))?;
+        crate::delete_session_jsonl_impl(req.session_id, req.cwd)?;
+        Ok(serde_json::json!({
+            "status": "applied",
+            "method": "deleted",
+        }))
     }
 
     async fn start_session(

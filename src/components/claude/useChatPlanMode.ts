@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useClaudeStore } from "../../stores/claudeStore";
 import type { ProviderId } from "../../lib/providers";
-import type { ChatMessage, ToolCall } from "../../lib/types";
+import type { ChatMessage, PermissionMode, ToolCall } from "../../lib/types";
 
 export interface CodexPlanCommand {
   prompt: string;
@@ -12,7 +12,7 @@ interface UseChatPlanModeArgs {
   sessionId: string;
   session: ChatPlanSession | undefined;
   provider: ProviderId;
-  setPermModeIdx: Dispatch<SetStateAction<number>>;
+  onPermissionModeChange: (permissionId: PermissionMode) => void;
 }
 
 interface ChatPlanSession {
@@ -85,7 +85,7 @@ export function useChatPlanMode({
   sessionId,
   session,
   provider,
-  setPermModeIdx,
+  onPermissionModeChange,
 }: UseChatPlanModeArgs) {
   const [planContent, setPlanContent] = useState<string | null>(null);
   const [planFinished, setPlanFinished] = useState(false);
@@ -127,13 +127,13 @@ export function useChatPlanMode({
     if (!session) return;
     if (session.planModeActive) {
       wasPlanMode.current = true;
-      setPermModeIdx(1);
+      onPermissionModeChange("plan");
     } else if (wasPlanMode.current) {
       wasPlanMode.current = false;
       setPlanFinished(true);
-      setPermModeIdx(0);
+      onPermissionModeChange("default");
     }
-  }, [session?.planModeActive, setPermModeIdx, session]);
+  }, [session?.planModeActive, onPermissionModeChange, session]);
 
   // If streaming ends while plan mode is still active, Claude did not call
   // ExitPlanMode. Treat the turn as plan completion so the action bar appears.

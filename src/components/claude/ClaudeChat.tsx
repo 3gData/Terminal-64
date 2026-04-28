@@ -4,10 +4,11 @@ import { emit, listen } from "@tauri-apps/api/event";
 import {
   queuedPromptDisplayText,
   queuedPromptProviderPrompt,
+  getOpenAiProviderSessionMetadata,
   resolveSessionProviderState,
   selectSessionProvider,
-  useClaudeStore,
-  type ClaudeSession,
+  useProviderSessionStore,
+  type ProviderSession,
   type QueuedPromptCommandMetadata,
   type QueuedPromptInput,
 } from "../../stores/claudeStore";
@@ -36,6 +37,7 @@ import { useChatFork } from "../../hooks/useChatFork";
 import { useChatRewind } from "../../hooks/useChatRewind";
 import { useDelegationSpawn } from "../../hooks/useDelegationSpawn";
 import { useChatAttachments } from "../../hooks/useChatAttachments";
+import { useProviderPermissionControls } from "../../hooks/useProviderPermissionControls";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { v4 as uuidv4 } from "uuid";
 import { baseName, dirName } from "../../lib/platform";
@@ -44,7 +46,7 @@ import "../ui/DropdownMenu.css";
 import { cancelProviderSession, closeProviderSession, providerHistorySupports, runProviderTurn } from "../../lib/providerRuntime";
 import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 
-// Provider lookup. `provider` is non-optional on ClaudeSession but the
+// Provider lookup. `provider` is non-optional on ProviderSession but the
 // fallback covers the brief window between mount and createSession.
 function sessionProviderFor(sessionId: string): ProviderId {
   return selectSessionProvider(sessionId);
@@ -78,7 +80,7 @@ function queuedCommandMetadataForText(
 
 function replayQueuedCommandMetadata(sessionId: string, item: { command?: QueuedPromptCommandMetadata | undefined }) {
   if (item.command?.kind === "compact") {
-    useClaudeStore.getState().setAutoCompactStatus(sessionId, "compacting");
+    useProviderSessionStore.getState().setAutoCompactStatus(sessionId, "compacting");
   }
 }
 
@@ -94,30 +96,30 @@ function providerTurnForSession({
   permissionMode,
   selectedModel,
   selectedEffort,
-  defaultCodexPermission = "workspace",
   disallowedTools,
 }: {
   sessionId: string;
-  session: ClaudeSession;
+  session: ProviderSession;
   cwd: string;
   prompt: string;
   permissionMode: PermissionMode;
   selectedModel?: string | null;
   selectedEffort?: string | null;
-  defaultCodexPermission?: string;
   disallowedTools?: string;
 }): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
+  const manifest = getProviderManifest(providerState.provider);
+  const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
   const input: ProviderTurnInput = {
     provider: providerState.provider,
     sessionId,
     cwd,
     prompt,
     started: session.hasBeenStarted,
-    threadId: providerState.openai?.codexThreadId ?? null,
+    threadId: openAiMetadata?.codexThreadId ?? null,
     selectedModel: selectedModel ?? providerState.selectedModel,
     selectedEffort: selectedEffort ?? providerState.selectedEffort,
-    selectedCodexPermission: providerState.openai?.selectedCodexPermission ?? defaultCodexPermission,
+    selectedCodexPermission: openAiMetadata?.selectedCodexPermission ?? manifest.defaultPermission,
     permissionMode,
     skipOpenwolf: session.skipOpenwolf,
     seedTranscript: providerState.seedTranscript,
@@ -131,7 +133,7 @@ function providerTurnForSession({
 }
 
 function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
-  const store = useClaudeStore.getState();
+  const store = useProviderSessionStore.getState();
   if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
   if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
   if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
@@ -266,7 +268,7 @@ function RewindPromptDialog({ affectedFiles, toolSummary, onConfirm, onCancel }:
 
 /** Chat body footer. Lives below the last virtualized item and renders the
  *  streaming bubble + pending-question prompt + error bar + bottom spacer.
- *  Extracted from ClaudeChat's render so its identity is stable across
+ *  Extracted from ProviderChat's render so its identity is stable across
  *  parent re-renders (the list otherwise re-measures its footer on every
  *  keystroke, which is the main source of scroll jitter during streaming).
  *  Subscribes only to the fine-grained store slices it actually needs. */
@@ -283,8 +285,8 @@ function ChatFooter({
   model: string;
   effort: string;
 }) {
-  const pendingQuestions = useClaudeStore((s) => s.sessions[sessionId]?.pendingQuestions ?? null);
-  const error = useClaudeStore((s) => s.sessions[sessionId]?.error ?? null);
+  const pendingQuestions = useProviderSessionStore((s) => s.sessions[sessionId]?.pendingQuestions ?? null);
+  const error = useProviderSessionStore((s) => s.sessions[sessionId]?.error ?? null);
   const current = pendingQuestions?.items[pendingQuestions.currentIndex];
   const progress =
     pendingQuestions && pendingQuestions.items.length > 1
@@ -293,9 +295,9 @@ function ChatFooter({
 
   const submitAnswer = (answer: string) => {
     if (!pendingQuestions) return;
-    const store = useClaudeStore.getState();
+    const store = useProviderSessionStore.getState();
     store.answerQuestion(sessionId, answer);
-    const updated = useClaudeStore.getState().sessions[sessionId];
+    const updated = useProviderSessionStore.getState().sessions[sessionId];
     if (!updated?.pendingQuestions) {
       const allAnswers = [...pendingQuestions.answers, answer];
       const formatted = pendingQuestions.items
@@ -304,7 +306,7 @@ function ChatFooter({
       store.updateToolResult(sessionId, pendingQuestions.toolUseId, formatted, false);
       store.addUserMessage(sessionId, `Answered questions:\n${formatted}`);
       const followupPrompt = `Here are my answers to your questions:\n${formatted}\n\nProceed based on these choices. Do not ask the same questions again.`;
-      const currentSession = useClaudeStore.getState().sessions[sessionId];
+      const currentSession = useProviderSessionStore.getState().sessions[sessionId];
       if (!currentSession) return;
       runProviderTurn(providerTurnForSession({
         sessionId,
@@ -314,7 +316,6 @@ function ChatFooter({
         permissionMode,
         selectedModel: model || null,
         selectedEffort: effort || null,
-        defaultCodexPermission: "workspace",
         disallowedTools: "AskUserQuestion",
       }))
         .then((result) => {
@@ -378,36 +379,26 @@ function ChatFooter({
   );
 }
 
-// MODELS / EFFORTS / PERMISSION_MODES are the Anthropic-provider defaults.
-// When the user picks another provider, the topbar/input controls read that
-// provider's manifest at render time.
 import { pushToast } from "../../lib/notifications";
 
-const MODELS = getProviderManifest("anthropic").models;
-const EFFORTS = getProviderManifest("anthropic").efforts;
-const PERMISSION_MODES: { id: PermissionMode; label: string; color: string; desc: string }[] =
-  getProviderManifest("anthropic").permissions.map((p) => ({
-    id: p.id as PermissionMode,
-    label: p.label,
-    color: p.color,
-    desc: p.desc,
-  }));
-
-interface ClaudeChatProps {
+export interface ProviderChatProps {
   sessionId: string;
   cwd: string;
   skipPermissions: boolean;
   isActive: boolean;
 }
 
-export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }: ClaudeChatProps) {
+/** @deprecated Use ProviderChatProps. */
+export type ClaudeChatProps = ProviderChatProps;
+
+export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: ProviderChatProps) {
   // Shallow-compare selector that EXCLUDES streamingText — the streaming
   // bubble has its own fine-grained subscription, so we don't need to
-  // re-render the whole ClaudeChat tree (ChatInput, toolbar, Virtuoso props)
-  // on every streamed token. With streamingText excluded, ClaudeChat only
+  // re-render the whole ProviderChat tree (ChatInput, toolbar, Virtuoso props)
+  // on every streamed token. With streamingText excluded, ProviderChat only
   // re-renders when the session gets a *new* message, changes status,
   // pending-questions, error, draftPrompt, etc — not on per-token ticks.
-  const session = useClaudeStore(
+  const session = useProviderSessionStore(
     useShallow((s) => {
       const sess = s.sessions[sessionId];
       if (!sess) return undefined;
@@ -418,11 +409,11 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // Boolean-only streaming flag: flips once at start and once at end of a
   // stream, not per token. Used by visualRows to decide whether to append
   // a streaming row without re-building on every character.
-  const hasStreamingText = useClaudeStore((s) => Boolean(s.sessions[sessionId]?.streamingText));
-  const createSession = useClaudeStore((s) => s.createSession);
-  const addUserMessage = useClaudeStore((s) => s.addUserMessage);
-  const incrementPromptCount = useClaudeStore((s) => s.incrementPromptCount);
-  const setDraftPrompt = useClaudeStore((s) => s.setDraftPrompt);
+  const hasStreamingText = useProviderSessionStore((s) => Boolean(s.sessions[sessionId]?.streamingText));
+  const createSession = useProviderSessionStore((s) => s.createSession);
+  const addUserMessage = useProviderSessionStore((s) => s.addUserMessage);
+  const incrementPromptCount = useProviderSessionStore((s) => s.incrementPromptCount);
+  const setDraftPrompt = useProviderSessionStore((s) => s.setDraftPrompt);
   // Kept around for jumpToPrompt's data-msg-id flash + edit-overlay's
   // scroll-restore. LegendList no longer feeds us a separate scroller
   // ref (the old `scrollerRef` callback was specific to Virtuoso);
@@ -450,21 +441,21 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [configMcpServers, setConfigMcpServers] = useState<McpServer[]>([]);
   // Provider dropdown — mirrors the session's persisted provider. Mid-session
-  // switching is blocked with a toast; the choice is made up-front via
-  // ClaudeDialog and locked for the lifetime of the session.
-  const selectedProvider = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).provider);
+  // switching is blocked with a toast; the choice is made up front via
+  // ProviderSessionDialog and locked for the lifetime of the session.
+  const selectedProvider = useProviderSessionStore((s) => resolveSessionProviderState(s.sessions[sessionId]).provider);
   const supportsCompact = providerSupports(selectedProvider, "compact");
   const supportsHistoryFork = providerHistorySupports(selectedProvider, "fork");
   const supportsHistoryRewind = providerHistorySupports(selectedProvider, "rewind");
-  const liveMcp = useClaudeStore((s) => s.sessions[sessionId]?.mcpServers);
+  const liveMcp = useProviderSessionStore((s) => s.sessions[sessionId]?.mcpServers);
   const [showFileTree, setShowFileTree] = useState(false);
   // Per-session model + effort persisted via the store. Falls back to the
   // settings-store global default when the session has nothing pinned yet
   // (typically a brand-new session pre-first-render). Writes go to BOTH the
   // session record (so the choice survives reloads + isolates per-chat) and
   // the global default (so the next new session inherits the user's habit).
-  const persistedSelectedModel = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).selectedModel);
-  const persistedSelectedEffort = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).selectedEffort);
+  const persistedSelectedModel = useProviderSessionStore((s) => resolveSessionProviderState(s.sessions[sessionId]).selectedModel);
+  const persistedSelectedEffort = useProviderSessionStore((s) => resolveSessionProviderState(s.sessions[sessionId]).selectedEffort);
   const providerDefaults = getProviderManifest(selectedProvider);
   const globalModel = useSettingsStore.getState().claudeModel;
   const globalEffort = useSettingsStore.getState().claudeEffort;
@@ -473,10 +464,10 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const selectedEffort = persistedSelectedEffort
     ?? (providerDefaults.efforts.some((e) => e.id === globalEffort) ? globalEffort : providerDefaults.defaultEffort);
   const setSelectedModel = useCallback((id: string) => {
-    useClaudeStore.getState().setSelectedModel(sessionId, id);
+    useProviderSessionStore.getState().setSelectedModel(sessionId, id);
   }, [sessionId]);
   const setSelectedEffort = useCallback((id: string) => {
-    useClaudeStore.getState().setSelectedEffort(sessionId, id);
+    useProviderSessionStore.getState().setSelectedEffort(sessionId, id);
   }, [sessionId]);
   const handleSelectModel = useCallback((id: string) => {
     setSelectedModel(id);
@@ -486,38 +477,16 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     setSelectedEffort(id);
     useSettingsStore.getState().set({ claudeEffort: id });
   }, [setSelectedEffort]);
-  const [permModeIdx, setPermModeIdx] = useState(() => {
-    if (skipPermissions) return 4; // YOLO when skipPermissions is set
-    const s = useSettingsStore.getState();
-    const fixedDefault = s.claudeDefaultPermMode;
-    if (fixedDefault) {
-      const idx = PERMISSION_MODES.findIndex((m) => m.id === fixedDefault);
-      if (idx >= 0) return idx;
-    }
-    const stored = s.claudePermMode;
-    if (stored) {
-      const idx = PERMISSION_MODES.findIndex((m) => m.id === stored);
-      if (idx >= 0) return idx;
-    }
-    return 0; // default: Default (ask for everything)
+  const {
+    permissionId: selectedProviderPermissionId,
+    permissionMode,
+    cyclePermission,
+    selectPermissionId,
+  } = useProviderPermissionControls({
+    sessionId,
+    provider: selectedProvider,
+    skipPermissions,
   });
-  // Codex's permission surface is a separate enum than Anthropic's. Persisted
-  // per-session via the store so the chosen sandbox preset (read-only /
-  // workspace / full-auto / yolo) survives reloads. Cycled via the same
-  // bottom-of-input "permLabel" affordance Anthropic uses.
-  const persistedCodexPermission = useClaudeStore(
-    (s) => resolveSessionProviderState(s.sessions[sessionId]).openai?.selectedCodexPermission ?? null,
-  );
-  const selectedCodexPermission = persistedCodexPermission ?? getProviderManifest("openai").defaultPermission;
-  const setSelectedCodexPermission = useCallback((id: string) => {
-    useClaudeStore.getState().setSelectedCodexPermission(sessionId, id);
-  }, [sessionId]);
-  const cycleCodexPermission = useCallback(() => {
-    const list = getProviderManifest("openai").permissions;
-    const idx = list.findIndex((p) => p.id === selectedCodexPermission);
-    const next = list[(idx + 1) % list.length]!;
-    setSelectedCodexPermission(next.id);
-  }, [selectedCodexPermission, setSelectedCodexPermission]);
   // Resolve CWD: use prop, fall back to stored session CWD
   const effectiveCwd = (cwd && cwd !== ".") ? cwd : (session?.cwd || ".");
   const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
@@ -543,7 +512,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     sessionId,
     session,
     provider: selectedProvider,
-    setPermModeIdx,
+    onPermissionModeChange: selectPermissionId,
   });
   const [sidePanelOpen, setSidePanelOpen] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
@@ -563,20 +532,10 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   });
   const [showHookLog, setShowHookLog] = useState(false);
   const panelColor = useCanvasStore((s) => s.terminals.find((t) => t.terminalId === sessionId)?.borderColor);
-  const hookEventLog = useClaudeStore((s) => s.sessions[sessionId]?.hookEventLog ?? []);
-  const toolUsageStats = useClaudeStore((s) => s.sessions[sessionId]?.toolUsageStats ?? {});
-  const compactionCount = useClaudeStore((s) => s.sessions[sessionId]?.compactionCount ?? 0);
+  const hookEventLog = useProviderSessionStore((s) => s.sessions[sessionId]?.hookEventLog ?? []);
+  const toolUsageStats = useProviderSessionStore((s) => s.sessions[sessionId]?.toolUsageStats ?? {});
+  const compactionCount = useProviderSessionStore((s) => s.sessions[sessionId]?.compactionCount ?? 0);
   const totalToolCalls = useMemo(() => Object.values(toolUsageStats).reduce((a, b) => a + b, 0), [toolUsageStats]);
-
-  const permMode = PERMISSION_MODES[permModeIdx] ?? PERMISSION_MODES[0]!;
-  const cycleAnthropicPermission = useCallback(() => {
-    setPermModeIdx((i) => {
-      const next = (i + 1) % PERMISSION_MODES.length;
-      const s = useSettingsStore.getState();
-      if (!s.claudeDefaultPermMode) s.set({ claudePermMode: PERMISSION_MODES[next]!.id });
-      return next;
-    });
-  }, []);
 
   useEffect(() => {
     // Passing cwd to createSession lets the store kick off JSONL hydration
@@ -584,7 +543,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     const effectiveInitCwd = cwd && cwd !== "." ? cwd : undefined;
     createSession(sessionId, undefined, false, undefined, effectiveInitCwd);
     if (effectiveInitCwd) {
-      useClaudeStore.getState().setCwd(sessionId, effectiveInitCwd);
+      useProviderSessionStore.getState().setCwd(sessionId, effectiveInitCwd);
     }
   }, [sessionId, createSession, cwd]);
 
@@ -737,24 +696,18 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     if (editOverlay || showPlanViewer) setIslandOpen(false);
   }, [editOverlay, showPlanViewer]);
 
-  // Shift+Tab cycles the active permission preset. Anthropic cycles its own
-  // 5-mode list; Codex cycles its 4-preset sandbox list (read-only / workspace
-  // / full-auto / yolo). Both are persisted per-session via the store.
+  // Shift+Tab cycles the active provider's manifest-owned permission preset.
   useEffect(() => {
     if (!isActive) return;
-    const cyclePermissionByProvider: Record<ProviderId, () => void> = {
-      anthropic: cycleAnthropicPermission,
-      openai: cycleCodexPermission,
-    };
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Tab" && e.shiftKey) {
         e.preventDefault();
-        cyclePermissionByProvider[selectedProvider]();
+        cyclePermission();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [isActive, selectedProvider, cycleAnthropicPermission, cycleCodexPermission]);
+  }, [cyclePermission, isActive]);
 
   // Auto-drain queue: when streaming stops, send next queued prompt
   const prevStreaming = useRef(false);
@@ -764,7 +717,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
     prevStreaming.current = nowStreaming;
     if (wasStreaming && !nowStreaming) {
       // Streaming just ended — check queue first
-      const next = useClaudeStore.getState().dequeuePrompt(sessionId);
+      const next = useProviderSessionStore.getState().dequeuePrompt(sessionId);
       if (next) {
         const displayText = queuedPromptDisplayText(next);
         const providerPrompt = queuedPromptProviderPrompt(next);
@@ -775,7 +728,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
           delegateRequested.current = true;
         }
         if (next.command?.kind === "loop") {
-          useClaudeStore.getState().tickLoop(sessionId);
+          useProviderSessionStore.getState().tickLoop(sessionId);
         }
         setTimeout(() => {
           const opts = next.codexCollaborationMode !== undefined
@@ -787,23 +740,23 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
                 setTimeout(reloadCommands, 3000);
               }
             })
-            .catch((err) => useClaudeStore.getState().setError(sessionId, String(err)));
+            .catch((err) => useProviderSessionStore.getState().setError(sessionId, String(err)));
         }, 500);
         return;
       }
       // No queue — check loop timer
-      const s = useClaudeStore.getState().sessions[sessionId];
+      const s = useProviderSessionStore.getState().sessions[sessionId];
       if (s?.activeLoop) {
         const { prompt: loopPrompt, intervalMs, lastFiredAt } = s.activeLoop;
         const elapsed = lastFiredAt ? Date.now() - lastFiredAt : Infinity;
         const delay = Math.max(0, intervalMs - elapsed);
         loopTimerRef.current = window.setTimeout(() => {
-          const curr = useClaudeStore.getState().sessions[sessionId];
+          const curr = useProviderSessionStore.getState().sessions[sessionId];
           if (!curr?.activeLoop || curr.isStreaming) return; // loop cancelled or session busy
           addUserMessage(sessionId, loopPrompt);
           emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
-          useClaudeStore.getState().tickLoop(sessionId);
-          actualSend(loopPrompt).catch((err) => useClaudeStore.getState().setError(sessionId, String(err)));
+          useProviderSessionStore.getState().tickLoop(sessionId);
+          actualSend(loopPrompt).catch((err) => useProviderSessionStore.getState().setError(sessionId, String(err)));
         }, delay);
       }
     }
@@ -831,7 +784,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         const displayText = `[${username}]: ${prompt}`;
         if (handleSendRef.current) {
           handleSendRef.current(displayText, undefined, true).catch((err) =>
-            useClaudeStore.getState().setError(sessionId, String(err))
+            useProviderSessionStore.getState().setError(sessionId, String(err))
           );
         }
       }
@@ -842,10 +795,10 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   const actualSend = useChatSend({
     sessionId,
     effectiveCwd,
-    permissionMode: permMode.id,
+    permissionMode,
     selectedModel,
     selectedEffort,
-    selectedCodexPermission,
+    selectedProviderPermissionId,
     incrementPromptCount,
   });
   const rewindHistory = useChatRewind();
@@ -861,7 +814,7 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
       if (loopMatch) {
         const args = loopMatch[1]!.trim();
         if (!args || args === "stop" || args === "cancel" || args === "off") {
-          useClaudeStore.getState().setLoop(sessionId, null);
+          useProviderSessionStore.getState().setLoop(sessionId, null);
           return;
         }
         // Parse: [interval] <prompt>
@@ -878,14 +831,14 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
           else if (unit === "d") intervalMs = num * 24 * 60 * 60 * 1000;
           loopPrompt = parts[2]!;
         }
-        useClaudeStore.getState().setLoop(sessionId, {
+        useProviderSessionStore.getState().setLoop(sessionId, {
           prompt: loopPrompt,
           intervalMs,
           lastFiredAt: null,
           iteration: 0,
         });
-        if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
-          useClaudeStore.getState().enqueuePrompt(sessionId, {
+        if (useProviderSessionStore.getState().sessions[sessionId]?.isStreaming) {
+          useProviderSessionStore.getState().enqueuePrompt(sessionId, {
             displayText: loopPrompt,
             providerPrompt: loopPrompt,
             ...(permissionOverride !== undefined ? { permissionOverride } : {}),
@@ -897,14 +850,14 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
         // Fire the first iteration immediately
         addUserMessage(sessionId, loopPrompt);
         if (!fromDiscord) emit("gui-message", { session_id: sessionId, content: loopPrompt }).catch(() => {});
-        useClaudeStore.getState().tickLoop(sessionId);
+        useProviderSessionStore.getState().tickLoop(sessionId);
         await actualSend(loopPrompt, permissionOverride);
         return;
       }
 
       if (/^\/reload-plugins\b/i.test(text)) {
-        if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
-          useClaudeStore.getState().enqueuePrompt(sessionId, {
+        if (useProviderSessionStore.getState().sessions[sessionId]?.isStreaming) {
+          useProviderSessionStore.getState().enqueuePrompt(sessionId, {
             displayText: text,
             providerPrompt: text,
             ...(permissionOverride !== undefined ? { permissionOverride } : {}),
@@ -948,8 +901,8 @@ Rules:
 - Fewer focused agents > many tiny agents. If two things are tightly coupled, keep them in one task
 - Output the delegation block IMMEDIATELY, nothing else`;
 
-        if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
-          useClaudeStore.getState().enqueuePrompt(sessionId, {
+        if (useProviderSessionStore.getState().sessions[sessionId]?.isStreaming) {
+          useProviderSessionStore.getState().enqueuePrompt(sessionId, {
             displayText: `/delegate ${userGoal}`,
             providerPrompt: skillPrompt,
             ...(permissionOverride !== undefined ? { permissionOverride } : {}),
@@ -989,8 +942,8 @@ Rules:
               "",
               resolved.body,
             ].filter((l) => l !== null).join("\n");
-            if (useClaudeStore.getState().sessions[sessionId]?.isStreaming) {
-              useClaudeStore.getState().enqueuePrompt(sessionId, {
+            if (useProviderSessionStore.getState().sessions[sessionId]?.isStreaming) {
+              useProviderSessionStore.getState().enqueuePrompt(sessionId, {
                 displayText: text,
                 providerPrompt: injectedPrompt,
                 ...(permissionOverride !== undefined ? { permissionOverride } : {}),
@@ -1027,7 +980,7 @@ Rules:
       prompt = consumed.prompt;
       displayPrompt = consumed.displayPrompt;
 
-      const isCurrentlyStreaming = useClaudeStore.getState().sessions[sessionId]?.isStreaming;
+      const isCurrentlyStreaming = useProviderSessionStore.getState().sessions[sessionId]?.isStreaming;
       if (isCurrentlyStreaming) {
         // Queue the prompt instead of sending mid-thinking
         const queuedPrompt: QueuedPromptInput = {
@@ -1038,13 +991,13 @@ Rules:
           ...(codexCollaborationMode !== undefined ? { codexCollaborationMode } : {}),
           ...(consumed.attachmentState !== undefined ? { attachmentState: consumed.attachmentState } : {}),
         };
-        useClaudeStore.getState().enqueuePrompt(sessionId, queuedPrompt);
+        useProviderSessionStore.getState().enqueuePrompt(sessionId, queuedPrompt);
         setQueueExpanded(true);
         return;
       }
 
       if (supportsCompact && /^\/compact\b/i.test(prompt)) {
-        useClaudeStore.getState().setAutoCompactStatus(sessionId, "compacting");
+        useProviderSessionStore.getState().setAutoCompactStatus(sessionId, "compacting");
       }
 
       addUserMessage(sessionId, displayPrompt);
@@ -1070,7 +1023,7 @@ Rules:
         setText(rewritten);
       }, { isVoice: opts?.isVoice ?? false });
     } catch (err) {
-      useClaudeStore.getState().setError(sessionId, `Rewrite failed: ${err}`);
+      useProviderSessionStore.getState().setError(sessionId, `Rewrite failed: ${err}`);
     } finally {
       setIsRewriting(false);
     }
@@ -1093,7 +1046,7 @@ Rules:
     if (isActive) useVoiceStore.getState().setActiveSessionId(sessionId);
   }, [isActive, sessionId]);
   const extractAffectedFiles = useCallback((messageId: string): AffectedFile[] => {
-    const sess = useClaudeStore.getState().sessions[sessionId];
+    const sess = useProviderSessionStore.getState().sessions[sessionId];
     if (!sess) return [];
     const msgs = sess.messages;
     const idx = msgs.findIndex((m) => m.id === messageId);
@@ -1139,7 +1092,7 @@ Rules:
   }, [sessionId]);
 
   const buildToolSummary = useCallback((messageId: string): string => {
-    const sess = useClaudeStore.getState().sessions[sessionId];
+    const sess = useProviderSessionStore.getState().sessions[sessionId];
     if (!sess) return "";
     const msgs = sess.messages;
     const idx = msgs.findIndex((m) => m.id === messageId);
@@ -1171,13 +1124,13 @@ Rules:
   const handleRewind = useCallback(async (messageId: string, content: string, revertCode = true) => {
     console.log("[rewind] === REWIND START ===", { sessionId, messageId, content: content.slice(0, 80), revertCode });
 
-    const preStore = useClaudeStore.getState();
+    const preStore = useProviderSessionStore.getState();
     const preSess = preStore.sessions[sessionId];
     const preMsgs = preSess?.messages ?? [];
 
-    // Detect "undo send" — rewinding to the last message which is a user message
-    // with no assistant response after it. Claude never modified files, so skip all
-    // file operations and just remove the message + prefill input.
+    // Detect "undo send": rewinding to the last user message with no assistant
+    // response after it. The provider never modified files, so skip file
+    // operations and just remove the message + prefill input.
     const targetIdx = preMsgs.findIndex((m) => m.id === messageId);
     const targetMsg = targetIdx >= 0 ? preMsgs[targetIdx] : null;
     const isUndoSend = targetMsg?.role === "user" && targetIdx === preMsgs.length - 1;
@@ -1191,7 +1144,7 @@ Rules:
       const rewindProvider = sessionProviderFor(sessionId);
       try { await cancelByProvider(sessionId, rewindProvider); } catch {}
       try { await closeByProvider(sessionId, rewindProvider); } catch {}
-      const store = useClaudeStore.getState();
+      const store = useProviderSessionStore.getState();
       store.setStreaming(sessionId, false);
       store.setError(sessionId, null);
       store.clearStreamingText(sessionId);
@@ -1209,12 +1162,12 @@ Rules:
         });
       } catch (err) {
         console.error("[rewind] Undo-send truncation failed:", err);
-        useClaudeStore.getState().setError(sessionId, `Rewind failed: ${err}`);
+        useProviderSessionStore.getState().setError(sessionId, `Rewind failed: ${err}`);
         return;
       }
       // Mutate the store immediately so the UI reflects the undo-send after
       // the on-disk JSONL has been truncated.
-      useClaudeStore.getState().truncateFromMessage(sessionId, messageId);
+      useProviderSessionStore.getState().truncateFromMessage(sessionId, messageId);
       setRewindText(targetMsg!.content);
       console.log("[rewind] === UNDO-SEND COMPLETE ===", { prefill: targetMsg!.content.slice(0, 80) });
       return;
@@ -1237,7 +1190,7 @@ Rules:
       console.log("[rewind] close error (expected):", e);
     }
 
-    const store = useClaudeStore.getState();
+    const store = useProviderSessionStore.getState();
     store.setStreaming(sessionId, false);
     store.setError(sessionId, null);
     store.clearStreamingText(sessionId);
@@ -1275,7 +1228,7 @@ Rules:
         });
       } catch (err) {
         console.error("[rewind] truncation failed:", err);
-        useClaudeStore.getState().setError(sessionId, `Rewind failed: ${err}`);
+        useProviderSessionStore.getState().setError(sessionId, `Rewind failed: ${err}`);
         return;
       }
 
@@ -1290,8 +1243,8 @@ Rules:
 
       // The JSONL has already been physically truncated, so the next send uses
       // normal session resume. Passing --resume-session-at here is fragile after
-      // rewriting the file because Claude's internal index can reject the kept
-      // UUID even though the truncated history reloads correctly.
+      // rewriting the file because the provider's internal index can reject the
+      // kept UUID even though the truncated history reloads correctly.
       // Force-cancel any active delegation group AND collect modifiedFiles from
       // ALL groups ever spawned by this parent — parentToGroup only tracks the
       // most recent group, so previous completed delegations' child files would
@@ -1302,11 +1255,11 @@ Rules:
         (g) => g.parentSessionId === sessionId,
       );
       if (parentGroups.length > 0) {
-        const claudeState = useClaudeStore.getState();
+        const providerSessionState = useProviderSessionStore.getState();
         for (const group of parentGroups) {
           for (const task of group.tasks) {
             if (task.sessionId) {
-              const childSess = claudeState.sessions[task.sessionId];
+              const childSess = providerSessionState.sessions[task.sessionId];
               if (childSess?.modifiedFiles?.length) {
                 childModifiedFiles.push(...childSess.modifiedFiles);
               }
@@ -1329,7 +1282,8 @@ Rules:
           console.warn("[rewind] No checkpoint to restore:", err);
         }
 
-        // Delete files that were CREATED by Claude (not in git) and weren't restored from checkpoint
+        // Delete files that were created by the provider (not in git) and
+        // weren't restored from checkpoint.
         const allModified = sess.modifiedFiles || [];
         if (allModified.length > 0) {
           try {
@@ -1380,7 +1334,7 @@ Rules:
       setRewindText(rewindContent);
       console.log("[rewind] === REWIND COMPLETE ===", {
         sessionId,
-        finalMessageCount: useClaudeStore.getState().sessions[sessionId]?.messages.length,
+        finalMessageCount: useProviderSessionStore.getState().sessions[sessionId]?.messages.length,
         rewindContent: rewindContent?.slice(0, 80),
       });
     }
@@ -1397,10 +1351,10 @@ Rules:
     sessionId,
     effectiveCwd,
     selectedProvider,
-    permissionMode: permMode.id,
+    permissionMode,
     selectedModel,
     selectedEffort,
-    selectedCodexPermission,
+    selectedCodexPermission: selectedProviderPermissionId,
     addUserMessage,
   });
 
@@ -1501,7 +1455,7 @@ Rules:
         <ChatFooter
           sessionId={sessionId}
           effectiveCwd={effectiveCwd}
-          permissionMode={permMode.id}
+          permissionMode={permissionMode}
           model={selectedModel}
           effort={selectedEffort}
         />
@@ -1511,7 +1465,7 @@ Rules:
         <div style={{ height: 50 }} aria-hidden="true" />
       </>
     ),
-    [sessionId, effectiveCwd, permMode.id, selectedModel, selectedEffort],
+    [sessionId, effectiveCwd, permissionMode, selectedModel, selectedEffort],
   );
 
   const jumpToPrompt = useCallback(
@@ -1551,10 +1505,8 @@ Rules:
   const hasMessages = session.messages.length > 0 || hasStreamingText;
   const providerPermissionInputProps = buildProviderPermissionInputProps({
     provider: selectedProvider,
-    anthropicPermission: permMode,
-    codexPermissionId: selectedCodexPermission,
-    onCycleAnthropicPermission: cycleAnthropicPermission,
-    onCycleCodexPermission: cycleCodexPermission,
+    permissionId: selectedProviderPermissionId,
+    onCyclePermission: cyclePermission,
   });
 
   return (
@@ -1626,7 +1578,7 @@ Rules:
                 cancelByProvider(sessionId, rp).catch(() => {});
                 closeByProvider(sessionId, rp).catch(() => {});
               }
-              const store = useClaudeStore.getState();
+              const store = useProviderSessionStore.getState();
               store.setStreaming(sessionId, false);
               store.setError(sessionId, null);
               store.clearStreamingText(sessionId);
@@ -1722,14 +1674,14 @@ Rules:
                 <button className="cc-queue-header" onClick={() => setQueueExpanded((v) => !v)}>
                   <span className="cc-queue-chevron">{queueExpanded ? "▾" : "▸"}</span>
                   <span className="cc-queue-title">{session.promptQueue.length} queued prompt{session.promptQueue.length > 1 ? "s" : ""}</span>
-                  <button className="cc-queue-clear" onClick={(e) => { e.stopPropagation(); useClaudeStore.getState().clearQueue(sessionId); }}>Clear</button>
+                  <button className="cc-queue-clear" onClick={(e) => { e.stopPropagation(); useProviderSessionStore.getState().clearQueue(sessionId); }}>Clear</button>
                 </button>
                 {queueExpanded && (
                   <div className="cc-queue-list">
                     {session.promptQueue.map((qp) => (
                       <div key={qp.id} className="cc-queue-item">
                         <span className="cc-queue-text">{queuedPromptDisplayText(qp)}</span>
-                        <button className="cc-queue-remove" onClick={() => useClaudeStore.getState().removeQueuedPrompt(sessionId, qp.id)}>×</button>
+                        <button className="cc-queue-remove" onClick={() => useProviderSessionStore.getState().removeQueuedPrompt(sessionId, qp.id)}>×</button>
                       </div>
                     ))}
                   </div>
@@ -1746,10 +1698,10 @@ Rules:
                   {...(supportsCompact ? {
                     onCompactBuild: () => {
                       resetPlan();
-                      setPermModeIdx(4); // YOLO
+                      selectPermissionId("bypass_all");
                       // Queue the build prompt so it fires automatically after /compact finishes
                       const buildPrompt = "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.";
-                      useClaudeStore.getState().enqueuePrompt(sessionId, {
+                      useProviderSessionStore.getState().enqueuePrompt(sessionId, {
                         displayText: buildPrompt,
                         providerPrompt: buildPrompt,
                         permissionOverride: "bypass_all",
@@ -1760,7 +1712,7 @@ Rules:
                   } : {})}
                   onBuildNow={() => {
                     resetPlan();
-                    setPermModeIdx(4); // YOLO
+                    selectPermissionId("bypass_all");
                     handleSend(
                       "Build the plan now. Execute every step. Do not skip anything. Do not re-read files you already know about.",
                       "bypass_all"
@@ -1794,11 +1746,11 @@ Rules:
                   <div className="cc-permission-actions">
                     <button className="cc-permission-allow" onClick={() => {
                       resolvePermission(perm.requestId, true).catch(() => {});
-                      useClaudeStore.getState().setPendingPermission(sessionId, null);
+                      useProviderSessionStore.getState().setPendingPermission(sessionId, null);
                     }}>Allow</button>
                     <button className="cc-permission-deny" onClick={() => {
                       resolvePermission(perm.requestId, false).catch(() => {});
-                      useClaudeStore.getState().setPendingPermission(sessionId, null);
+                      useProviderSessionStore.getState().setPendingPermission(sessionId, null);
                     }}>Deny</button>
                   </div>
                 </div>
@@ -1843,7 +1795,7 @@ Rules:
                     <span className="cc-loop-prompt" title={session.activeLoop.prompt}>
                       {session.activeLoop.prompt.length > 40 ? session.activeLoop.prompt.slice(0, 40) + "…" : session.activeLoop.prompt}
                     </span>
-                    <button className="cc-loop-stop" onClick={() => useClaudeStore.getState().setLoop(sessionId, null)}>Stop</button>
+                    <button className="cc-loop-stop" onClick={() => useProviderSessionStore.getState().setLoop(sessionId, null)}>Stop</button>
                   </div>
                 )}
                 <ChatInput
@@ -1910,7 +1862,7 @@ Rules:
                 variant="side"
                 isStreaming={session.isStreaming}
                 onBuild={() => {
-                  setPermModeIdx(3);
+                  selectPermissionId("accept_edits");
                   handleSend(
                     "Plan mode is over. You have full permissions now. Build the plan — execute every step described in the plan file. Do not skip anything.",
                     "bypass_all"
@@ -1939,3 +1891,7 @@ Rules:
     </div>
   );
 }
+
+export default ProviderChat;
+/** @deprecated Use ProviderChat. */
+export { ProviderChat as ClaudeChat };

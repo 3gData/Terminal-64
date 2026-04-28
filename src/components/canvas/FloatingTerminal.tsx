@@ -2,7 +2,7 @@ import { memo, useCallback, useRef, useState, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";
-import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useProviderSessionStore } from "../../stores/claudeStore";
 import { closeTerminal, writeTerminal, closeProviderSession, renameDiscordSession, closeBrowser, createWidgetFolder } from "../../lib/tauriApi";
 import { getProviderManifest, type ProviderId } from "../../lib/providers";
 import { ProviderLogo } from "../ui/BrandLogos";
@@ -10,7 +10,7 @@ import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
 import { computeDragSnap, computeResizeSnap } from "../../lib/snapUtils";
 import { useSettingsStore } from "../../stores/settingsStore";
 import XTerminal from "../terminal/XTerminal";
-import ClaudeChat from "../claude/ClaudeChat";
+import { ProviderChat } from "../claude/ClaudeChat";
 import SharedChat from "../claude/SharedChat";
 import WidgetPanel from "../widget/WidgetPanel";
 import BrowserPanel from "../widget/BrowserPanel";
@@ -203,7 +203,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
 
   const handleClose = useCallback(() => {
     if (term.panelType === "claude") {
-      const sess = useClaudeStore.getState().sessions[term.terminalId];
+      const sess = useProviderSessionStore.getState().sessions[term.terminalId];
       closeProviderSession(term.terminalId, resolveSessionProviderState(sess).provider).catch(() => {});
     } else if (term.panelType === "browser") {
       closeBrowser(term.terminalId).catch(() => {});
@@ -258,7 +258,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
   const isSharedChat = term.panelType === "shared-chat";
   const isWidget = term.panelType === "widget";
   const isBrowser = term.panelType === "browser";
-  const { providerSessionName, providerCwd, providerId } = useClaudeStore(useShallow((s) => {
+  const { providerSessionName, providerCwd, providerId } = useProviderSessionStore(useShallow((s) => {
     if (!isClaude) return { providerSessionName: undefined, providerCwd: undefined, providerId: undefined };
     const sess = s.sessions[term.terminalId];
     return {
@@ -321,9 +321,9 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     const name = nameDraft.trim();
-                    useClaudeStore.getState().setName(term.terminalId, name);
+                    useProviderSessionStore.getState().setName(term.terminalId, name);
                     setEditingName(false);
-                    const cwd = useClaudeStore.getState().sessions[term.terminalId]?.cwd || "";
+                    const cwd = useProviderSessionStore.getState().sessions[term.terminalId]?.cwd || "";
                     renameDiscordSession(term.terminalId, name, cwd).catch(() => {});
                   } else if (e.key === "Escape") {
                     setEditingName(false);
@@ -336,9 +336,9 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
               <button className="ft-btn ft-btn--accept" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => {
                 e.stopPropagation();
                 const name = nameDraft.trim();
-                useClaudeStore.getState().setName(term.terminalId, name);
+                useProviderSessionStore.getState().setName(term.terminalId, name);
                 setEditingName(false);
-                const cwd = useClaudeStore.getState().sessions[term.terminalId]?.cwd || "";
+                const cwd = useProviderSessionStore.getState().sessions[term.terminalId]?.cwd || "";
                 renameDiscordSession(term.terminalId, name, cwd).catch(() => {});
               }} title="Save">
                 <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
@@ -390,7 +390,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
               e.stopPropagation();
               const wid = term.widgetId!;
               const widgetPath = `/.terminal64/widgets/${wid}`;
-              const sessions = useClaudeStore.getState().sessions;
+              const sessions = useProviderSessionStore.getState().sessions;
               const all = useCanvasStore.getState().terminals;
               const chat = all.find((t) =>
                 t.panelType === "claude" && !t.poppedOut &&
@@ -416,7 +416,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
                     const panels = useCanvasStore.getState().terminals;
                     const newChat = panels[panels.length - 1];
                     if (newChat?.panelType === "claude") {
-                      useClaudeStore.getState().createSession(newChat.terminalId, `Widget: ${term.title}`);
+                      useProviderSessionStore.getState().createSession(newChat.terminalId, `Widget: ${term.title}`);
                     }
                   }).catch(() => {});
                 }
@@ -494,7 +494,7 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
         </div>
       ) : isClaude ? (
         <div className="ft-body ft-body--claude">
-          <ClaudeChat
+          <ProviderChat
             key={term.terminalId}
             sessionId={term.terminalId}
             cwd={term.cwd}

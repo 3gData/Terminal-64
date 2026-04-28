@@ -50,6 +50,7 @@ declare module "../../contracts/providerIpc" {
     anthropic: {
       session_id: string;
       cwd: string;
+      resume_at_uuid?: string | null;
     };
   }
 
@@ -78,6 +79,7 @@ function buildClaudeSendRequest(input: ProviderTurnInput): SendClaudePromptReque
   return {
     ...buildClaudeRequest(input),
     ...(input.disallowedTools ? { disallowed_tools: input.disallowedTools } : {}),
+    ...(input.resumeAtUuid ? { resume_session_at: input.resumeAtUuid } : {}),
   };
 }
 
@@ -186,7 +188,11 @@ export const anthropicRuntime: ProviderRuntime = {
     async hydrate(input): Promise<ProviderHydrateResult> {
       const result = await providerHistoryHydrate({
         provider: "anthropic",
-        req: { session_id: input.sessionId, cwd: input.cwd },
+        req: {
+          session_id: input.sessionId,
+          cwd: input.cwd,
+          ...(input.resumeAtUuid ? { resume_at_uuid: input.resumeAtUuid } : {}),
+        },
       });
       if (result.status === "skipped" || result.status === "unsupported") {
         return {
@@ -200,7 +206,7 @@ export const anthropicRuntime: ProviderRuntime = {
         return { status: "empty", clearCache: true };
       }
 
-      const cached = input.cacheEntry;
+      const cached = input.resumeAtUuid ? null : input.cacheEntry;
       if (cached && cached.mtimeMs === stat.mtime_ms && cached.size === stat.size) {
         return { status: "messages", messages: cached.messages };
       }
@@ -211,6 +217,9 @@ export const anthropicRuntime: ProviderRuntime = {
       }
 
       const messages = mapHistoryMessages(history);
+      if (input.resumeAtUuid) {
+        return { status: "messages", messages, clearCache: true };
+      }
       return {
         status: "messages",
         messages,

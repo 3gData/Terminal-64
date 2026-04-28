@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useCanvasStore } from "../stores/canvasStore";
-import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
+import { getOpenAiProviderSessionMetadata, resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import { prepareProviderFork, providerHistorySupports } from "../lib/providerRuntime";
 import type { ProviderForkInput, ProviderForkResult } from "../contracts/providerRuntime";
 
@@ -15,8 +15,9 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     const sess = store.sessions[sessionId];
     if (!sess) return;
     const providerState = resolveSessionProviderState(sess);
+    const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
     const provider = providerState.provider;
-    const codexThreadId = providerState.openai?.codexThreadId ?? null;
+    const codexThreadId = openaiMetadata?.codexThreadId ?? null;
 
     if (!providerHistorySupports(provider, "fork")) {
       console.warn("[fork] provider does not support history fork:", provider);
@@ -44,7 +45,7 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     store.createSession(newPanel.terminalId, undefined, false, undefined, effectiveCwd, provider);
     store.setSelectedModel(newPanel.terminalId, providerState.selectedModel);
     store.setSelectedEffort(newPanel.terminalId, providerState.selectedEffort);
-    store.setSelectedCodexPermission(newPanel.terminalId, providerState.openai?.selectedCodexPermission ?? null);
+    store.setSelectedCodexPermission(newPanel.terminalId, openaiMetadata?.selectedCodexPermission ?? null);
 
     let forkResult: ProviderForkResult = {};
     if (forkedMessages.length > 0) {

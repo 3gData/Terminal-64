@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { providerHistorySupports, truncateProviderHistory } from "../lib/providerRuntime";
-import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
+import { getOpenAiProviderSessionMetadata, resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import type { ProviderId } from "../lib/providers";
 import type { ProviderHistoryTruncateInput } from "../contracts/providerRuntime";
 
@@ -22,7 +22,8 @@ export function useChatRewind() {
       throw new Error(`Provider ${provider} does not support history rewind`);
     }
     const session = useClaudeStore.getState().sessions[sessionId];
-    const codexThreadId = resolveSessionProviderState(session).openai?.codexThreadId ?? null;
+    const providerState = resolveSessionProviderState(session);
+    const codexThreadId = getOpenAiProviderSessionMetadata(providerState)?.codexThreadId ?? null;
     const input: ProviderHistoryTruncateInput = {
       provider,
       sessionId,

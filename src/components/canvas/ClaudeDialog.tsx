@@ -1,7 +1,11 @@
 import { useState, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { resolveSessionProviderState, useClaudeStore, STORAGE_KEY } from "../../stores/claudeStore";
+import {
+  PROVIDER_SESSIONS_STORAGE_KEY,
+  resolveSessionProviderState,
+  useProviderSessionStore,
+} from "../../stores/claudeStore";
 import { listDiskSessions, listCodexDiskSessions } from "../../lib/tauriApi";
 import type { DiskSession } from "../../lib/types";
 import { listProviderManifests, type ProviderId } from "../../lib/providers";
@@ -9,12 +13,15 @@ import { ProviderLogo } from "../ui/BrandLogos";
 import { formatRelativeTime } from "../../lib/constants";
 import "./ClaudeDialog.css";
 
-interface ClaudeDialogProps {
+export interface ProviderSessionDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirm: (cwd: string, skipPermissions: boolean, sessionName: string | undefined, provider: ProviderId) => void;
   onReopen: (sessionId: string, cwd: string, provider: ProviderId) => void;
 }
+
+/** @deprecated Use ProviderSessionDialogProps. */
+export type ClaudeDialogProps = ProviderSessionDialogProps;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
@@ -27,7 +34,7 @@ const diskSessionFetchers: Partial<Record<ProviderId, (cwd: string) => Promise<D
   openai: listCodexDiskSessions,
 };
 
-export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: ClaudeDialogProps) {
+export function ProviderSessionDialog({ isOpen, onClose, onConfirm, onReopen }: ProviderSessionDialogProps) {
   const [dir, setDir] = useState("");
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<ProviderId>("anthropic");
@@ -35,7 +42,7 @@ export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: C
   const [loading, setLoading] = useState(false);
   const recentDirs = useSettingsStore((s) => s.recentDirs);
   const addRecentDir = useSettingsStore((s) => s.addRecentDir);
-  const sessions = useClaudeStore((s) => s.sessions);
+  const sessions = useProviderSessionStore((s) => s.sessions);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const namedSessions = getNamedSessions(sessions, dir, provider);
@@ -171,7 +178,7 @@ export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: C
                       </button>
                       <button
                         className="claude-dialog-session-delete"
-                        onClick={() => useClaudeStore.getState().deleteSession(s.id)}
+                        onClick={() => useProviderSessionStore.getState().deleteSession(s.id)}
                         title="Delete session"
                       >
                         <svg width="10" height="10" viewBox="0 0 10 10">
@@ -264,7 +271,7 @@ function getNamedSessions(
 
   // Persisted sessions
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(PROVIDER_SESSIONS_STORAGE_KEY);
     if (raw) {
       const data = JSON.parse(raw);
       for (const [id, session] of Object.entries(data as Record<string, any>)) {
@@ -279,8 +286,12 @@ function getNamedSessions(
       }
     }
   } catch (e) {
-    console.warn("[claude-dialog] Failed to load persisted sessions:", e);
+    console.warn("[provider-session-dialog] Failed to load persisted sessions:", e);
   }
 
   return results;
 }
+
+export default ProviderSessionDialog;
+/** @deprecated Use ProviderSessionDialog. */
+export { ProviderSessionDialog as ClaudeDialog };

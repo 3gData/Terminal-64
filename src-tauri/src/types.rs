@@ -67,6 +67,14 @@ pub struct ClaudeDone {
     pub session_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEventEnvelope {
+    pub provider: String,
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub data: String,
+}
+
 // Codex session types
 //
 // `sandbox_mode` is the OpenAI Codex CLI's `-s/--sandbox` enum:

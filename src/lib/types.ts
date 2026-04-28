@@ -136,6 +136,12 @@ export interface ClaudeDone {
   session_id: string;
 }
 
+export interface ProviderEventEnvelope {
+  provider: string;
+  sessionId: string;
+  data: string;
+}
+
 // ── Codex (OpenAI Codex CLI) ──────────────────────────────
 
 export type {

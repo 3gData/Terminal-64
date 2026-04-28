@@ -19,6 +19,7 @@ import type {
   ProviderHistoryTruncateIpcResult,
   ProviderHistoryTruncateRequest,
   ProviderSendRequest,
+  ProviderEventEnvelope,
   CodexEvent,
   CodexDone,
   SlashCommand,
@@ -36,9 +37,11 @@ import type {
   SpectrumData,
   ChatMessage,
   ToolCall,
+  PermissionMode,
 } from "./types";
 import { joinPath } from "./platform";
-import { decodeCodexPermission, PROVIDER_CONFIG, type ProviderId } from "./providers";
+import { getProviderManifest, type ProviderId } from "./providers";
+import type { ProviderTurnInput } from "../contracts/providerRuntime";
 
 // PTY terminal commands
 
@@ -246,6 +249,10 @@ export async function sendProviderPrompt<TProvider extends ProviderId>(
 
 export const providerCreate = createProviderSession;
 export const providerSend = sendProviderPrompt;
+
+export function onProviderEvent(callback: (payload: ProviderEventEnvelope) => void): Promise<UnlistenFn> {
+  return listen<ProviderEventEnvelope>("provider-event", (event) => callback(event.payload));
+}
 
 export async function providerCancel(provider: ProviderId, sessionId: string): Promise<void> {
   return invoke("provider_cancel", { provider, sessionId });
@@ -1030,34 +1037,30 @@ export function spawnProviderSessionWithPrompt(
   claudeStore.getState().addUserMessage(sid, prompt);
   // Small delay so the chat panel mounts and event listeners are ready.
   setTimeout(() => {
-    if (provider === "openai") {
-      const codexPerm = decodeCodexPermission(PROVIDER_CONFIG.openai.defaultPermission);
-      Promise.allSettled([ensureCodexMcp(cwd), ensureCodexSkills()])
-        .then(() => createCodexSession({
-          session_id: sid,
-          cwd,
-          prompt,
-          ...codexPerm,
-        }, options?.skipOpenwolf))
-        .then(() => {
-          claudeStore.getState().incrementPromptCount(sid);
-        })
-        .catch((err: unknown) => {
-          claudeStore.getState().setError(sid, String(err));
-        });
-    } else {
-      const permMode = settingsStore.getState().claudePermMode || "default";
-      createClaudeSession({
-        session_id: sid,
-        cwd,
-        prompt,
-        permission_mode: permMode,
-      }, options?.skipOpenwolf).then(() => {
+    const manifest = getProviderManifest(provider);
+    const permissionMode = (settingsStore.getState().claudePermMode || manifest.defaultPermission) as PermissionMode;
+    const turnInput: ProviderTurnInput = {
+      provider,
+      sessionId: sid,
+      cwd,
+      prompt,
+      started: false,
+      permissionMode,
+      selectedCodexPermission: manifest.defaultPermission,
+      skipOpenwolf: skip,
+    };
+
+    import("./providerRuntime").then(({ runProviderTurn }) => runProviderTurn(turnInput))
+      .then((result) => {
+        const store = claudeStore.getState();
+        if (result.clearSeedTranscript) store.clearSeedTranscript(sid);
+        if (result.clearResumeAtUuid) store.setResumeAtUuid(sid, null);
+        if (result.clearForkParentSessionId) store.setForkParentSessionId(sid, null);
         claudeStore.getState().incrementPromptCount(sid);
-      }).catch((err: unknown) => {
+      })
+      .catch((err: unknown) => {
         claudeStore.getState().setError(sid, String(err));
       });
-    }
   }, 300);
 }
 
