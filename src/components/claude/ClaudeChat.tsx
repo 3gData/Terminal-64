@@ -41,7 +41,7 @@ import { v4 as uuidv4 } from "uuid";
 import { baseName, dirName } from "../../lib/platform";
 import "./ClaudeChat.css";
 import "../ui/DropdownMenu.css";
-import { cancelProviderSession, closeProviderSession, runProviderTurn } from "../../lib/providerRuntime";
+import { cancelProviderSession, closeProviderSession, providerHistorySupports, runProviderTurn } from "../../lib/providerRuntime";
 import type { ProviderTurnInput, ProviderTurnResult } from "../../contracts/providerRuntime";
 
 // Provider lookup. `provider` is non-optional on ClaudeSession but the
@@ -454,6 +454,8 @@ export default function ClaudeChat({ sessionId, cwd, skipPermissions, isActive }
   // ClaudeDialog and locked for the lifetime of the session.
   const selectedProvider = useClaudeStore((s) => resolveSessionProviderState(s.sessions[sessionId]).provider);
   const supportsCompact = providerSupports(selectedProvider, "compact");
+  const supportsHistoryFork = providerHistorySupports(selectedProvider, "fork");
+  const supportsHistoryRewind = providerHistorySupports(selectedProvider, "rewind");
   const liveMcp = useClaudeStore((s) => s.sessions[sessionId]?.mcpServers);
   const [showFileTree, setShowFileTree] = useState(false);
   // Per-session model + effort persisted via the store. Falls back to the
@@ -1707,8 +1709,8 @@ Rules:
               onKeyDown={handleListKeyDown}
               onPointerDown={handleListPointerDown}
               onStreamUpdate={followStreamingToBottom}
-              onRewind={onRewindClick}
-              onFork={handleFork}
+              {...(supportsHistoryRewind ? { onRewind: onRewindClick } : {})}
+              {...(supportsHistoryFork ? { onFork: handleFork } : {})}
               onEditClick={handleEditClick}
             />
           )}

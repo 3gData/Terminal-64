@@ -4,7 +4,7 @@ import {
   getProviderToolFilePath,
   getProviderToolPaths,
 } from "../contracts/providerEvents";
-import type { ProviderTurnInput } from "../contracts/providerRuntime";
+import type { ProviderRuntime, ProviderTurnInput } from "../contracts/providerRuntime";
 import {
   claudeBlockToProviderToolCall,
   claudeBlockToProviderToolResult,
@@ -31,9 +31,20 @@ import {
   codexItemToProviderToolCall,
   codexItemToProviderToolResult,
 } from "./codexEventDecoder";
-import { decodeCodexPermission, getProviderManifest, providerSupports } from "./providers";
-import { providerTurnOperation } from "./providerRuntime";
-import { resolveSessionProviderState, STORAGE_KEY, useClaudeStore } from "../stores/claudeStore";
+import {
+  decodeCodexPermission,
+  getProviderManifest,
+  providerSupports,
+  type ProviderId,
+  type ProviderManifest,
+} from "./providers";
+import { getProviderRuntime, providerTurnOperation } from "./providerRuntime";
+import {
+  resolveSessionProviderState,
+  STORAGE_KEY,
+  useClaudeStore,
+  type ProviderSessionState,
+} from "../stores/claudeStore";
 import type { CreateCodexRequest, ProviderCreateRequest, ProviderSendRequest } from "../contracts/providerIpc";
 import type { ChatMessage } from "./types";
 
@@ -41,6 +52,28 @@ type VerificationResult = {
   name: string;
   ok: true;
 };
+
+type FutureProviderId = ProviderId | "opencode";
+type FutureProviderManifest = Omit<ProviderManifest, "id"> & { id: FutureProviderId };
+type FutureProviderRuntime = Omit<ProviderRuntime, "provider"> & { provider: FutureProviderId };
+type FutureProviderSessionState = Omit<ProviderSessionState, "provider"> & {
+  provider: FutureProviderId;
+  opencode?: {
+    threadId: string | null;
+    permissionProfile: string | null;
+  };
+};
+type FutureProviderCreateRequest =
+  | ProviderCreateRequest
+  | {
+    provider: "opencode";
+    req: {
+      session_id: string;
+      cwd: string;
+      prompt: string;
+      client_profile: "stub";
+    };
+  };
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -70,6 +103,66 @@ const transcriptFixture: ChatMessage[] = [
   { id: "u2", role: "user", content: "now edit it", timestamp: 3 },
   { id: "a2", role: "assistant", content: "Edited.", timestamp: 4 },
 ];
+
+const futureProviderStubManifest = {
+  id: "opencode",
+  ui: {
+    label: "OpenCode",
+    shortLabel: "OpenCode",
+    brandTitle: "OpenCode",
+    emptyStateLabel: "OpenCode",
+    defaultSessionName: "OpenCode",
+    modelMenuLabel: "Model",
+    effortMenuLabel: "Effort",
+    inputPermissionSuffix: "profile",
+  },
+  capabilities: {
+    mcp: false,
+    plan: false,
+    fork: false,
+    rewind: false,
+    images: false,
+    hookLog: false,
+    nativeSlashCommands: false,
+    compact: false,
+  },
+  models: [{ id: "stub-model", label: "Stub Model" }],
+  efforts: [{ id: "stub-effort", label: "Stub Effort" }],
+  permissions: [{ id: "stub", label: "Stub", color: "#89b4fa", desc: "Not implemented" }],
+  defaultModel: "stub-model",
+  defaultEffort: "stub-effort",
+  defaultPermission: "stub",
+} satisfies FutureProviderManifest;
+
+function unsupportedFutureProvider(provider: FutureProviderId, operation: string): Error {
+  return new Error(`Provider ${provider} has no ${operation} runtime binding`);
+}
+
+function createUnsupportedFutureRuntime(provider: FutureProviderId): FutureProviderRuntime {
+  return {
+    provider,
+    create: async () => {
+      throw unsupportedFutureProvider(provider, "create");
+    },
+    send: async () => {
+      throw unsupportedFutureProvider(provider, "send");
+    },
+    cancel: async () => {
+      throw unsupportedFutureProvider(provider, "cancel");
+    },
+    close: async () => {
+      throw unsupportedFutureProvider(provider, "close");
+    },
+    history: {
+      capabilities: {
+        hydrate: false,
+        fork: false,
+        rewind: false,
+        delete: false,
+      },
+    },
+  };
+}
 
 function providerInput(overrides: Partial<ProviderTurnInput> = {}): ProviderTurnInput {
   return {
@@ -363,11 +456,11 @@ export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
   const openaiCreate = {
     provider: "openai",
     req: buildCodexCreateRequest(providerInput()),
-  } satisfies ProviderCreateRequest;
+  } satisfies ProviderCreateRequest<"openai">;
   const openaiSend = {
     provider: "openai",
     req: buildCodexSendRequest(providerInput({ threadId: "thread-1" }), openaiCreate.req),
-  } satisfies ProviderSendRequest;
+  } satisfies ProviderSendRequest<"openai">;
   const anthropicCreate = {
     provider: "anthropic",
     req: {
@@ -376,12 +469,12 @@ export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
       prompt: "hello",
       permission_mode: "default",
     },
-  } satisfies ProviderCreateRequest;
+  } satisfies ProviderCreateRequest<"anthropic">;
 
   // @ts-expect-error provider ids are intentionally closed until a runtime is implemented.
   const unsupportedProvider = { provider: "opencode", req: openaiCreate.req } satisfies ProviderCreateRequest;
   // @ts-expect-error OpenAI create requests must include a prompt at the generic IPC boundary.
-  const missingPrompt = { provider: "openai", req: { session_id: "codex-1", cwd: "/repo" } } satisfies ProviderCreateRequest;
+  const missingPrompt = { provider: "openai", req: { session_id: "codex-1", cwd: "/repo" } } satisfies ProviderCreateRequest<"openai">;
   // @ts-expect-error exactOptionalPropertyTypes requires callers to omit optional values instead of passing undefined.
   const undefinedOptional = { session_id: "codex-1", cwd: "/repo", prompt: "hello", model: undefined } satisfies CreateCodexRequest;
   void unsupportedProvider;
@@ -393,6 +486,90 @@ export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
   assertEqual(anthropicCreate.req.permission_mode, "default", "generic provider_create carries Anthropic request shape");
 
   return { name: "generic provider IPC request typing fixtures", ok: true };
+}
+
+export function verifyFutureProviderStubFixtures(): VerificationResult {
+  const currentProviderRegistry = {
+    anthropic: getProviderManifest("anthropic"),
+    openai: getProviderManifest("openai"),
+  };
+  // @ts-expect-error adding a ProviderId must also add a manifest entry.
+  const missingFutureManifestRegistry: Record<FutureProviderId, FutureProviderManifest> = currentProviderRegistry;
+  void missingFutureManifestRegistry;
+
+  const futureProviderRegistry = {
+    ...currentProviderRegistry,
+    opencode: futureProviderStubManifest,
+  } satisfies Record<FutureProviderId, FutureProviderManifest>;
+
+  assertEqual(futureProviderRegistry.opencode.id, "opencode", "future stub manifest keeps provider id");
+  assert(
+    futureProviderRegistry.opencode.models.some((model) => model.id === futureProviderRegistry.opencode.defaultModel),
+    "future stub manifest default model is listed",
+  );
+  assert(
+    !futureProviderRegistry.opencode.capabilities.fork,
+    "future stub manifest starts with unsupported capabilities fail-closed",
+  );
+
+  const currentRuntimeRegistry = {
+    anthropic: getProviderRuntime("anthropic"),
+    openai: getProviderRuntime("openai"),
+  };
+  // @ts-expect-error adding a ProviderId must also add a runtime entry.
+  const missingFutureRuntimeRegistry: Record<FutureProviderId, FutureProviderRuntime> = currentRuntimeRegistry;
+  void missingFutureRuntimeRegistry;
+
+  const futureRuntimeRegistry = {
+    ...currentRuntimeRegistry,
+    opencode: createUnsupportedFutureRuntime("opencode"),
+  } satisfies Record<FutureProviderId, FutureProviderRuntime>;
+  assertEqual(futureRuntimeRegistry.opencode.provider, "opencode", "future stub runtime keeps provider id");
+  assert(
+    unsupportedFutureProvider("opencode", "create").message.includes("no create runtime binding"),
+    "future stub runtime fails closed before implementation",
+  );
+
+  const currentProviderStateCannotUseOpenCode = {
+    // @ts-expect-error current providerState is closed until the ProviderId and providerState shapes are extended.
+    provider: "opencode",
+    selectedModel: null,
+    selectedEffort: null,
+    seedTranscript: null,
+  } satisfies ProviderSessionState;
+  void currentProviderStateCannotUseOpenCode;
+
+  const futureProviderState = {
+    provider: "opencode",
+    selectedModel: "stub-model",
+    selectedEffort: "stub-effort",
+    seedTranscript: null,
+    opencode: {
+      threadId: null,
+      permissionProfile: "stub",
+    },
+  } satisfies FutureProviderSessionState;
+  assertEqual(futureProviderState.opencode.permissionProfile, "stub", "future providerState keeps provider-owned metadata");
+
+  const currentProviderCreateCannotUseOpenCode = {
+    // @ts-expect-error current generic IPC is closed until a provider-owned request binding is added.
+    provider: "opencode",
+    req: buildCodexCreateRequest(providerInput()),
+  } satisfies ProviderCreateRequest;
+  void currentProviderCreateCannotUseOpenCode;
+
+  const futureCreateRequest = {
+    provider: "opencode",
+    req: {
+      session_id: "opencode-1",
+      cwd: "/repo",
+      prompt: "hello",
+      client_profile: "stub",
+    },
+  } satisfies FutureProviderCreateRequest;
+  assertEqual(futureCreateRequest.req.client_profile, "stub", "future provider IPC keeps provider-owned request shape");
+
+  return { name: "future provider stub extension fixtures", ok: true };
 }
 
 export function verifyCodexPermissionFixtures(): VerificationResult {
@@ -477,6 +654,7 @@ export function runProviderModularityVerification(): VerificationResult[] {
     verifyProviderRuntimeFixtures(),
     verifyDelegationChildSpawnFixtures(),
     verifyProviderIpcRequestTypingFixtures(),
+    verifyFutureProviderStubFixtures(),
     verifyCodexPermissionFixtures(),
     verifyProviderEventNormalizationFixtures(),
     verifyProviderStateMigrationFixture(),

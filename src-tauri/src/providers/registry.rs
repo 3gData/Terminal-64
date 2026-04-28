@@ -16,8 +16,8 @@ use std::sync::Arc;
 use tauri::AppHandle;
 
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterError, ProviderCreateSessionRequest, ProviderKind,
-    ProviderSendPromptRequest,
+    ProviderAdapter, ProviderAdapterError, ProviderCreateSessionRequest,
+    ProviderHistoryCapabilities, ProviderKind, ProviderSendPromptRequest,
 };
 
 pub struct ProviderRegistry {
@@ -86,6 +86,12 @@ impl ProviderRegistry {
         session_id: &str,
     ) -> Result<(), ProviderAdapterError> {
         self.require(kind)?.close_session(session_id)
+    }
+
+    pub fn history_capabilities(&self, kind: ProviderKind) -> ProviderHistoryCapabilities {
+        self.get(kind)
+            .map(|adapter| adapter.capabilities().history)
+            .unwrap_or(ProviderHistoryCapabilities::NONE)
     }
 
     /// Typed accessor for the Claude adapter.

@@ -216,7 +216,10 @@ export async function sendCodexPrompt(req: SendCodexPromptRequest, skipOpenwolf?
   return sendProviderPrompt({ provider: "openai", req }, skipOpenwolf);
 }
 
-export async function createProviderSession(input: ProviderCreateRequest, skipOpenwolf?: boolean): Promise<string> {
+export async function createProviderSession<TProvider extends ProviderId>(
+  input: ProviderCreateRequest<TProvider>,
+  skipOpenwolf?: boolean,
+): Promise<string> {
   const ow = resolveOpenwolf(skipOpenwolf);
   return invoke<string>("provider_create", {
     provider: input.provider,
@@ -227,7 +230,10 @@ export async function createProviderSession(input: ProviderCreateRequest, skipOp
   });
 }
 
-export async function sendProviderPrompt(input: ProviderSendRequest, skipOpenwolf?: boolean): Promise<void> {
+export async function sendProviderPrompt<TProvider extends ProviderId>(
+  input: ProviderSendRequest<TProvider>,
+  skipOpenwolf?: boolean,
+): Promise<void> {
   const ow = resolveOpenwolf(skipOpenwolf);
   return invoke("provider_send", {
     provider: input.provider,
@@ -250,12 +256,14 @@ export async function providerClose(provider: ProviderId, sessionId: string): Pr
 }
 
 export interface ProviderHistoryHydrateIpcResponse {
+  status?: "messages" | "empty" | "skipped" | "unsupported";
+  reason?: string;
   messages: HistoryMessage[];
   stat?: SessionJsonlStat | null;
 }
 
-export async function providerHistoryTruncate(
-  input: ProviderHistoryTruncateRequest,
+export async function providerHistoryTruncate<TProvider extends ProviderId>(
+  input: ProviderHistoryTruncateRequest<TProvider>,
 ): Promise<ProviderHistoryTruncateIpcResult> {
   return invoke<ProviderHistoryTruncateIpcResult>("provider_history_truncate", {
     provider: input.provider,
@@ -263,8 +271,8 @@ export async function providerHistoryTruncate(
   });
 }
 
-export async function providerHistoryFork(
-  input: ProviderHistoryForkRequest,
+export async function providerHistoryFork<TProvider extends ProviderId>(
+  input: ProviderHistoryForkRequest<TProvider>,
 ): Promise<ProviderHistoryForkIpcResult> {
   return invoke<ProviderHistoryForkIpcResult>("provider_history_fork", {
     provider: input.provider,
@@ -272,8 +280,8 @@ export async function providerHistoryFork(
   });
 }
 
-export async function providerHistoryHydrate(
-  input: ProviderHistoryHydrateRequest,
+export async function providerHistoryHydrate<TProvider extends ProviderId>(
+  input: ProviderHistoryHydrateRequest<TProvider>,
 ): Promise<ProviderHistoryHydrateIpcResponse> {
   return invoke<ProviderHistoryHydrateIpcResponse>("provider_history_hydrate", {
     provider: input.provider,
@@ -281,8 +289,8 @@ export async function providerHistoryHydrate(
   });
 }
 
-export async function providerHistoryDelete(
-  input: ProviderHistoryDeleteRequest,
+export async function providerHistoryDelete<TProvider extends ProviderId>(
+  input: ProviderHistoryDeleteRequest<TProvider>,
 ): Promise<ProviderHistoryDeleteIpcResult> {
   return invoke<ProviderHistoryDeleteIpcResult>("provider_history_delete", {
     provider: input.provider,

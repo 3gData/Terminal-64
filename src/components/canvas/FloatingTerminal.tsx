@@ -4,8 +4,8 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCanvasStore, type CanvasTerminal } from "../../stores/canvasStore";
 import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
 import { closeTerminal, writeTerminal, closeProviderSession, renameDiscordSession, closeBrowser, createWidgetFolder } from "../../lib/tauriApi";
-import type { ProviderId } from "../../lib/providers";
-import { AnthropicLogo, OpenAILogo } from "../ui/BrandLogos";
+import { getProviderManifest, type ProviderId } from "../../lib/providers";
+import { ProviderLogo } from "../ui/BrandLogos";
 import { BORDER_COLORS, ACTIVITY_TIMEOUT_MS } from "../../lib/constants";
 import { computeDragSnap, computeResizeSnap } from "../../lib/snapUtils";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -352,9 +352,11 @@ export default memo(function FloatingTerminal({ term }: FloatingTerminalProps) {
             </>
           ) : (
             <>
-              <span className="ft-provider-badge" title={providerId === "openai" ? "OpenAI Codex" : "Anthropic Claude"}>
-                {providerId === "openai" ? <OpenAILogo size={11} /> : <AnthropicLogo size={11} />}
-              </span>
+              {providerId && (
+                <span className="ft-provider-badge" title={getProviderManifest(providerId).ui.brandTitle}>
+                  <ProviderLogo provider={providerId} size={11} />
+                </span>
+              )}
               <span className="ft-title">{sessionTitle}</span>
               <button className="ft-btn ft-btn--edit" onClick={(e) => {
                 e.stopPropagation();

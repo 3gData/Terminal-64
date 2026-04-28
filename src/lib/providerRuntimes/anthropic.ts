@@ -11,14 +11,55 @@ import {
   providerSend,
 } from "../tauriApi";
 import type {
-  ProviderHistoryTruncateResult,
   ProviderHistoryDeleteResult,
+  ProviderHistoryTruncateResult,
   ProviderHydrateResult,
   ProviderRuntime,
   ProviderTurnInput,
   ProviderTurnResult,
 } from "../../contracts/providerRuntime";
 import type { CreateClaudeRequest, SendClaudePromptRequest } from "../types";
+
+declare module "../../contracts/providerIpc" {
+  interface ProviderCreateRequestMap {
+    anthropic: CreateClaudeRequest;
+  }
+
+  interface ProviderSendRequestMap {
+    anthropic: SendClaudePromptRequest;
+  }
+
+  interface ProviderHistoryTruncateRequestMap {
+    anthropic: {
+      session_id: string;
+      cwd: string;
+      keep_messages: number;
+    };
+  }
+
+  interface ProviderHistoryForkRequestMap {
+    anthropic: {
+      parent_session_id: string;
+      new_session_id: string;
+      cwd: string;
+      keep_messages: number;
+    };
+  }
+
+  interface ProviderHistoryHydrateRequestMap {
+    anthropic: {
+      session_id: string;
+      cwd: string;
+    };
+  }
+
+  interface ProviderHistoryDeleteRequestMap {
+    anthropic: {
+      session_id: string;
+      cwd: string;
+    };
+  }
+}
 
 function buildClaudeRequest(input: ProviderTurnInput): CreateClaudeRequest {
   return {
@@ -80,6 +121,10 @@ async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
   return legacyResumeResult(input);
 }
 
+function operationStatus(status: "applied" | "skipped" | "unsupported" | undefined) {
+  return status ?? "applied";
+}
+
 export const anthropicRuntime: ProviderRuntime = {
   provider: "anthropic",
 
@@ -95,21 +140,36 @@ export const anthropicRuntime: ProviderRuntime = {
     return providerClose("anthropic", sessionId);
   },
 
-  async rewind(input): Promise<ProviderHistoryTruncateResult> {
-    const result = await providerHistoryTruncate({
-      provider: "anthropic",
-      req: {
-        session_id: input.sessionId,
-        cwd: input.cwd,
-        keep_messages: input.keepMessages,
-      },
-    });
-    return { resumeAtUuid: result.resume_at_uuid ?? null };
-  },
+  history: {
+    capabilities: {
+      hydrate: true,
+      fork: true,
+      rewind: true,
+      delete: true,
+    },
 
-  async fork(input) {
-    if (input.keepMessages > 0) {
-      await providerHistoryFork({
+    async rewind(input): Promise<ProviderHistoryTruncateResult> {
+      const result = await providerHistoryTruncate({
+        provider: "anthropic",
+        req: {
+          session_id: input.sessionId,
+          cwd: input.cwd,
+          keep_messages: input.keepMessages,
+        },
+      });
+      const output: ProviderHistoryTruncateResult = {
+        status: operationStatus(result.status),
+        resumeAtUuid: result.resume_at_uuid ?? null,
+      };
+      if (result.reason) output.reason = result.reason;
+      return output;
+    },
+
+    async fork(input) {
+      if (input.keepMessages <= 0) {
+        return { status: "skipped", reason: "no_messages_to_fork" };
+      }
+      const result = await providerHistoryFork({
         provider: "anthropic",
         req: {
           parent_session_id: input.parentSessionId,
@@ -118,50 +178,64 @@ export const anthropicRuntime: ProviderRuntime = {
           keep_messages: input.keepMessages,
         },
       });
-    }
-    return {};
-  },
+      const output = { status: operationStatus(result.status) };
+      if (result.reason) return { ...output, reason: result.reason };
+      return output;
+    },
 
-  async hydrate(input): Promise<ProviderHydrateResult> {
-    const result = await providerHistoryHydrate({
-      provider: "anthropic",
-      req: { session_id: input.sessionId, cwd: input.cwd },
-    });
-    const stat = result.stat;
-    if (!stat) {
-      return { status: "empty", clearCache: true };
-    }
+    async hydrate(input): Promise<ProviderHydrateResult> {
+      const result = await providerHistoryHydrate({
+        provider: "anthropic",
+        req: { session_id: input.sessionId, cwd: input.cwd },
+      });
+      if (result.status === "skipped" || result.status === "unsupported") {
+        return {
+          status: result.status,
+          ...(result.reason ? { reason: result.reason } : {}),
+          clearCache: true,
+        };
+      }
+      const stat = result.stat;
+      if (!stat) {
+        return { status: "empty", clearCache: true };
+      }
 
-    const cached = input.cacheEntry;
-    if (cached && cached.mtimeMs === stat.mtime_ms && cached.size === stat.size) {
-      return { status: "messages", messages: cached.messages };
-    }
+      const cached = input.cacheEntry;
+      if (cached && cached.mtimeMs === stat.mtime_ms && cached.size === stat.size) {
+        return { status: "messages", messages: cached.messages };
+      }
 
-    const history = result.messages;
-    if (history.length === 0) {
-      return { status: "empty" };
-    }
+      const history = result.messages;
+      if (history.length === 0) {
+        return { status: "empty" };
+      }
 
-    const messages = mapHistoryMessages(history);
-    return {
-      status: "messages",
-      messages,
-      cacheWrite: {
-        mtimeMs: stat.mtime_ms,
-        size: stat.size,
+      const messages = mapHistoryMessages(history);
+      return {
+        status: "messages",
         messages,
-      },
-    };
-  },
+        cacheWrite: {
+          mtimeMs: stat.mtime_ms,
+          size: stat.size,
+          messages,
+        },
+      };
+    },
 
-  async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
-    await providerHistoryDelete({
-      provider: "anthropic",
-      req: {
-        session_id: input.sessionId,
-        cwd: input.cwd,
-      },
-    });
-    return { method: "deleted" };
+    async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
+      const result = await providerHistoryDelete({
+        provider: "anthropic",
+        req: {
+          session_id: input.sessionId,
+          cwd: input.cwd,
+        },
+      });
+      const output: ProviderHistoryDeleteResult = {
+        status: operationStatus(result.status),
+        method: result.method,
+      };
+      if (result.reason) output.reason = result.reason;
+      return output;
+    },
   },
 };

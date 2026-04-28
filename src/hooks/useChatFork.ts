@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useCanvasStore } from "../stores/canvasStore";
 import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
-import { prepareProviderFork } from "../lib/providerRuntime";
+import { prepareProviderFork, providerHistorySupports } from "../lib/providerRuntime";
 import type { ProviderForkInput, ProviderForkResult } from "../contracts/providerRuntime";
 
 interface UseChatForkOptions {
@@ -17,6 +17,11 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     const providerState = resolveSessionProviderState(sess);
     const provider = providerState.provider;
     const codexThreadId = providerState.openai?.codexThreadId ?? null;
+
+    if (!providerHistorySupports(provider, "fork")) {
+      console.warn("[fork] provider does not support history fork:", provider);
+      return;
+    }
 
     const msgIdx = sess.messages.findIndex((m) => m.id === messageId);
     if (msgIdx < 0) return;
@@ -61,6 +66,10 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
         if (provider === "openai") {
           forkResult = { seedTranscript: true };
         }
+      }
+      if (forkResult.status === "unsupported") {
+        console.warn("[fork] provider history fork returned unsupported:", forkResult.reason ?? provider);
+        return;
       }
     }
 

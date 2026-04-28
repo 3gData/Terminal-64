@@ -31,6 +31,22 @@ export interface ProviderTurnResult {
   clearForkParentSessionId?: boolean;
 }
 
+export type ProviderHistoryCapability = "hydrate" | "fork" | "rewind" | "delete";
+
+export interface ProviderHistoryCapabilities {
+  hydrate: boolean;
+  fork: boolean;
+  rewind: boolean;
+  delete: boolean;
+}
+
+export type ProviderHistoryOperationStatus = "applied" | "skipped" | "unsupported";
+
+export interface ProviderHistoryOperationResult {
+  status?: ProviderHistoryOperationStatus;
+  reason?: string;
+}
+
 export interface ProviderHistoryTruncateInput {
   provider: ProviderId;
   sessionId: string;
@@ -40,7 +56,7 @@ export interface ProviderHistoryTruncateInput {
   codexThreadId?: string | null | undefined;
 }
 
-export interface ProviderHistoryTruncateResult {
+export interface ProviderHistoryTruncateResult extends ProviderHistoryOperationResult {
   resumeAtUuid?: string | null;
 }
 
@@ -54,7 +70,7 @@ export interface ProviderForkInput {
   codexThreadId?: string | null | undefined;
 }
 
-export interface ProviderForkResult {
+export interface ProviderForkResult extends ProviderHistoryOperationResult {
   codexThreadId?: string | null;
   seedTranscript?: boolean;
 }
@@ -80,8 +96,8 @@ export interface ProviderHistoryDeleteInput {
   codexThreadId?: string | null | undefined;
 }
 
-export interface ProviderHistoryDeleteResult {
-  method: "deleted" | "skipped";
+export interface ProviderHistoryDeleteResult extends ProviderHistoryOperationResult {
+  method: "deleted" | "skipped" | "unsupported";
   reason?: string;
 }
 
@@ -95,7 +111,20 @@ export type ProviderHydrateResult =
   | {
     status: "empty";
     clearCache?: boolean;
+  }
+  | {
+    status: "skipped" | "unsupported";
+    reason?: string;
+    clearCache?: boolean;
   };
+
+export interface ProviderHistoryRuntime {
+  capabilities: ProviderHistoryCapabilities;
+  rewind?: (input: ProviderHistoryTruncateInput) => Promise<ProviderHistoryTruncateResult>;
+  fork?: (input: ProviderForkInput) => Promise<ProviderForkResult>;
+  hydrate?: (input: ProviderHydrateInput) => Promise<ProviderHydrateResult>;
+  deleteHistory?: (input: ProviderHistoryDeleteInput) => Promise<ProviderHistoryDeleteResult>;
+}
 
 export interface ProviderRuntime {
   provider: ProviderId;
@@ -103,8 +132,5 @@ export interface ProviderRuntime {
   send: (input: ProviderTurnInput) => Promise<ProviderTurnResult>;
   cancel: (sessionId: string) => Promise<void>;
   close: (sessionId: string) => Promise<void>;
-  rewind: (input: ProviderHistoryTruncateInput) => Promise<ProviderHistoryTruncateResult>;
-  fork: (input: ProviderForkInput) => Promise<ProviderForkResult>;
-  hydrate: (input: ProviderHydrateInput) => Promise<ProviderHydrateResult>;
-  deleteHistory: (input: ProviderHistoryDeleteInput) => Promise<ProviderHistoryDeleteResult>;
+  history: ProviderHistoryRuntime;
 }

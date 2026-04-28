@@ -30,10 +30,10 @@ use tokio::sync::mpsc;
 use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderSendPromptRequest,
-    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
-    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
-    ProviderUserInputAnswers,
+    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
+    ProviderKind, ProviderSendPromptRequest, ProviderSendTurnInput, ProviderSession,
+    ProviderSessionModelSwitchMode, ProviderSessionStartInput, ProviderThreadSnapshot,
+    ProviderTurnStartResult, ProviderUserInputAnswers,
 };
 use crate::providers::util::{
     cap_event_size, expanded_tool_path, find_existing_claude_session_jsonl,
@@ -487,6 +487,7 @@ impl ClaudeAdapter {
             instances: Arc::new(Mutex::new(HashMap::new())),
             capabilities: ProviderAdapterCapabilities {
                 session_model_switch: ProviderSessionModelSwitchMode::InSession,
+                history: ProviderHistoryCapabilities::FULL,
             },
         }
     }
@@ -645,24 +646,17 @@ impl ProviderCommandAdapter for ClaudeAdapter {
         app_handle: &AppHandle,
         req: ProviderCreateSessionRequest,
     ) -> Result<String, ProviderAdapterError> {
-        match req {
-            ProviderCreateSessionRequest::Claude {
-                req,
-                settings_path,
-                approver_mcp_config,
-                channel_server,
-            } => ClaudeAdapter::create_session(
-                self,
-                app_handle,
-                req,
-                settings_path,
-                approver_mcp_config,
-                channel_server,
-            ),
-            ProviderCreateSessionRequest::Codex { .. } => {
-                Err("ClaudeAdapter received Codex create-session request".to_string())
-            }
-        }
+        let typed_req: CreateClaudeRequest = serde_json::from_value(req.payload)
+            .map_err(|e| format!("Invalid Anthropic create request: {}", e))?;
+        let channel_server = typed_req.channel_server.clone();
+        ClaudeAdapter::create_session(
+            self,
+            app_handle,
+            typed_req,
+            req.context.settings_path,
+            req.context.approver_mcp_config,
+            channel_server,
+        )
     }
 
     fn send_prompt(
@@ -670,24 +664,17 @@ impl ProviderCommandAdapter for ClaudeAdapter {
         app_handle: &AppHandle,
         req: ProviderSendPromptRequest,
     ) -> Result<(), ProviderAdapterError> {
-        match req {
-            ProviderSendPromptRequest::Claude {
-                req,
-                settings_path,
-                approver_mcp_config,
-                channel_server,
-            } => ClaudeAdapter::send_prompt(
-                self,
-                app_handle,
-                req,
-                settings_path,
-                approver_mcp_config,
-                channel_server,
-            ),
-            ProviderSendPromptRequest::Codex { .. } => {
-                Err("ClaudeAdapter received Codex send-prompt request".to_string())
-            }
-        }
+        let typed_req: SendClaudePromptRequest = serde_json::from_value(req.payload)
+            .map_err(|e| format!("Invalid Anthropic send request: {}", e))?;
+        let channel_server = typed_req.channel_server.clone();
+        ClaudeAdapter::send_prompt(
+            self,
+            app_handle,
+            typed_req,
+            req.context.settings_path,
+            req.context.approver_mcp_config,
+            channel_server,
+        )
     }
 
     fn cancel_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {

@@ -25,7 +25,7 @@ import {
 } from "../../lib/tauriApi";
 import { runProviderTurn } from "../../lib/providerRuntime";
 import { pushToast } from "../../lib/notifications";
-import { type ProviderId } from "../../lib/providers";
+import { isProviderId, type ProviderId } from "../../lib/providers";
 import { widgetBus } from "../../lib/widgetBus";
 import { invokePlugin, onPluginEvent, type PluginStreamHandle } from "../../lib/pluginApi";
 import { startVoice as startVoiceCapture, stopVoice as stopVoiceCapture, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
@@ -711,7 +711,7 @@ export function useWidgetBridgeHost({
 
       case "t64:create-session": {
         const { cwd: sessCwd, name: sessName, prompt: sessPrompt, id: csId, provider: rawProvider } = msg.payload || {};
-        const provider: ProviderId = rawProvider === "openai" ? "openai" : "anthropic";
+        const provider: ProviderId = isProviderId(rawProvider) ? rawProvider : "anthropic";
         const panel = useCanvasStore.getState().addClaudeTerminalAt(
           sessCwd || ".", false, sessName || "Widget Session"
         );

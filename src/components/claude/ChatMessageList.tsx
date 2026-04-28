@@ -12,7 +12,7 @@ import {
   type WheelEventHandler,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import type { ProviderId } from "../../lib/providers";
+import { getProviderManifest, type ProviderId } from "../../lib/providers";
 import { useClaudeStore } from "../../stores/claudeStore";
 import { formatDuration } from "../../lib/constants";
 import ChatMessage, { ToolGroupCard } from "./ChatMessage";
@@ -89,8 +89,8 @@ interface ChatMessageListProps {
   onKeyDown: KeyboardEventHandler;
   onPointerDown: PointerEventHandler;
   onStreamUpdate: () => void;
-  onRewind: (messageId: string, content: string) => void;
-  onFork: (messageId: string) => void;
+  onRewind?: (messageId: string, content: string) => void;
+  onFork?: (messageId: string) => void;
   onEditClick: (tcId: string, filePath: string, oldStr: string, newStr: string) => void;
 }
 
@@ -148,8 +148,8 @@ export default function ChatMessageList({
             <ChatMessage
               message={row.msg}
               provider={provider}
-              onRewind={onRewind}
-              onFork={onFork}
+              {...(onRewind ? { onRewind } : {})}
+              {...(onFork ? { onFork } : {})}
               onEditClick={onEditClick}
             />
           );
@@ -181,7 +181,7 @@ export default function ChatMessageList({
                 <path d="M5 24L13 8L21 18L27 10" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
             </div>
-            <span className="cc-empty-text">{provider === "openai" ? "Codex" : "Claude Code"}</span>
+            <span className="cc-empty-text">{getProviderManifest(provider).ui.emptyStateLabel}</span>
             <span className="cc-empty-sub">Send a message, type / for commands, or drop files</span>
           </div>
         </div>

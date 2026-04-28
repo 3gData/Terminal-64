@@ -23,6 +23,44 @@ import type {
 } from "../../contracts/providerRuntime";
 import { decodeCodexPermission } from "../providers";
 
+declare module "../../contracts/providerIpc" {
+  interface ProviderCreateRequestMap {
+    openai: CreateCodexRequest;
+  }
+
+  interface ProviderSendRequestMap {
+    openai: SendCodexPromptRequest;
+  }
+
+  interface ProviderHistoryTruncateRequestMap {
+    openai: {
+      thread_id: string;
+      cwd: string;
+      num_turns: number;
+    };
+  }
+
+  interface ProviderHistoryForkRequestMap {
+    openai: {
+      thread_id: string;
+      cwd: string;
+      drop_turns: number;
+    };
+  }
+
+  interface ProviderHistoryHydrateRequestMap {
+    openai: {
+      thread_id: string;
+    };
+  }
+
+  interface ProviderHistoryDeleteRequestMap {
+    openai: {
+      thread_id?: string | null;
+    };
+  }
+}
+
 export const CODEX_MAX_TURN_PROMPT_CHARS = 900_000;
 const CODEX_MIN_SEED_TRANSCRIPT_CHARS = 24_000;
 const CODEX_MAX_SEED_MESSAGE_CHARS = 24_000;
@@ -171,6 +209,10 @@ function seedResult(input: ProviderTurnInput): ProviderTurnResult {
   return { clearSeedTranscript: !!input.seedTranscript?.length };
 }
 
+function operationStatus(status: "applied" | "skipped" | "unsupported" | undefined) {
+  return status ?? "applied";
+}
+
 async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
   await ensureCodexRuntime(input);
   const createReq = buildCodexCreateRequest(input);
@@ -227,8 +269,21 @@ export const openaiRuntime: ProviderRuntime = {
     return providerClose("openai", sessionId);
   },
 
-  async rewind(input): Promise<ProviderHistoryTruncateResult> {
-    if (input.codexThreadId) {
+  history: {
+    capabilities: {
+      hydrate: true,
+      fork: true,
+      rewind: true,
+      delete: true,
+    },
+
+    async rewind(input): Promise<ProviderHistoryTruncateResult> {
+      if (!input.codexThreadId) {
+        return {
+          status: "unsupported",
+          reason: "codex_thread_id_missing",
+        };
+      }
       const dropTurns = codexDropTurnsForKeepMessages(input.preMessages, input.keepMessages);
       const result = await providerHistoryTruncate({
         provider: "openai",
@@ -241,56 +296,89 @@ export const openaiRuntime: ProviderRuntime = {
       if (result.method === "rollout" && result.rollback_error) {
         console.warn("[providerRuntime] Codex app-server rollback failed, fell back to rollout truncation:", result.rollback_error);
       }
-    }
-    return {};
-  },
-
-  async fork(input) {
-    if (input.keepMessages <= 0) return {};
-    if (!input.codexThreadId) return { seedTranscript: true };
-
-    const dropTurns = codexDropTurnsForKeepMessages(input.preMessages, input.keepMessages);
-    try {
-      const result = await providerHistoryFork({
-        provider: "openai",
-        req: {
-          thread_id: input.codexThreadId,
-          cwd: input.cwd,
-          drop_turns: dropTurns,
-        },
-      });
-      if (!result.codex_thread_id) {
-        throw new Error("OpenAI history fork did not return a thread id");
-      }
-      return {
-        codexThreadId: result.codex_thread_id,
+      const output: ProviderHistoryTruncateResult = {
+        status: operationStatus(result.status),
       };
-    } catch (err) {
-      console.warn("[fork] Codex app-server fork failed; falling back to seeded transcript:", err);
-      return { seedTranscript: true };
-    }
-  },
+      if (result.reason) output.reason = result.reason;
+      return output;
+    },
 
-  async hydrate(input): Promise<ProviderHydrateResult> {
-    if (!input.codexThreadId) {
-      return { status: "empty" };
-    }
-    const result = await providerHistoryHydrate({
-      provider: "openai",
-      req: { thread_id: input.codexThreadId },
-    });
-    const history = result.messages;
-    if (history.length === 0) {
-      return { status: "empty" };
-    }
-    return { status: "messages", messages: mapHistoryMessages(history) };
-  },
+    async fork(input) {
+      if (input.keepMessages <= 0) {
+        return { status: "skipped", reason: "no_messages_to_fork" };
+      }
+      if (!input.codexThreadId) {
+        return {
+          status: "skipped",
+          reason: "codex_thread_id_missing",
+          seedTranscript: true,
+        };
+      }
 
-  async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
-    const result = await providerHistoryDelete({
-      provider: "openai",
-      req: input.codexThreadId ? { thread_id: input.codexThreadId } : {},
-    });
-    return result;
+      const dropTurns = codexDropTurnsForKeepMessages(input.preMessages, input.keepMessages);
+      try {
+        const result = await providerHistoryFork({
+          provider: "openai",
+          req: {
+            thread_id: input.codexThreadId,
+            cwd: input.cwd,
+            drop_turns: dropTurns,
+          },
+        });
+        if (result.status === "unsupported") {
+          return {
+            status: "unsupported",
+            ...(result.reason ? { reason: result.reason } : {}),
+          };
+        }
+        if (!result.codex_thread_id) {
+          throw new Error("OpenAI history fork did not return a thread id");
+        }
+        return {
+          status: operationStatus(result.status),
+          codexThreadId: result.codex_thread_id,
+        };
+      } catch (err) {
+        console.warn("[fork] Codex app-server fork failed; falling back to seeded transcript:", err);
+        return {
+          status: "skipped",
+          reason: "codex_native_fork_failed",
+          seedTranscript: true,
+        };
+      }
+    },
+
+    async hydrate(input): Promise<ProviderHydrateResult> {
+      if (!input.codexThreadId) {
+        return { status: "skipped", reason: "codex_thread_id_missing" };
+      }
+      const result = await providerHistoryHydrate({
+        provider: "openai",
+        req: { thread_id: input.codexThreadId },
+      });
+      if (result.status === "skipped" || result.status === "unsupported") {
+        return {
+          status: result.status,
+          ...(result.reason ? { reason: result.reason } : {}),
+        };
+      }
+      const history = result.messages;
+      if (history.length === 0) {
+        return { status: "empty" };
+      }
+      return { status: "messages", messages: mapHistoryMessages(history) };
+    },
+
+    async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
+      const result = await providerHistoryDelete({
+        provider: "openai",
+        req: input.codexThreadId ? { thread_id: input.codexThreadId } : {},
+      });
+      return {
+        status: operationStatus(result.status),
+        method: result.method,
+        ...(result.reason ? { reason: result.reason } : {}),
+      };
+    },
   },
 };

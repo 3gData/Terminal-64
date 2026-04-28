@@ -6,6 +6,7 @@ import {
   promptWithCodexSeed,
 } from "./providerRuntimes/openai";
 import type {
+  ProviderHistoryCapability,
   ProviderForkInput,
   ProviderForkResult,
   ProviderHistoryDeleteInput,
@@ -50,22 +51,64 @@ export function closeProviderSession(sessionId: string, provider: ProviderId): P
   return getProviderRuntime(provider).close(sessionId);
 }
 
+function unsupportedHistoryReason(provider: ProviderId, capability: ProviderHistoryCapability): string {
+  return `${provider} does not support history ${capability}`;
+}
+
+export function providerHistorySupports(provider: ProviderId, capability: ProviderHistoryCapability): boolean {
+  return getProviderRuntime(provider).history.capabilities[capability];
+}
+
 export function truncateProviderHistory(
   input: ProviderHistoryTruncateInput,
 ): Promise<ProviderHistoryTruncateResult> {
-  return getProviderRuntime(input.provider).rewind(input);
+  const runtime = getProviderRuntime(input.provider);
+  const rewind = runtime.history.rewind;
+  if (!runtime.history.capabilities.rewind || !rewind) {
+    return Promise.resolve({
+      status: "unsupported",
+      reason: unsupportedHistoryReason(input.provider, "rewind"),
+    });
+  }
+  return rewind(input);
 }
 
 export function prepareProviderFork(input: ProviderForkInput): Promise<ProviderForkResult> {
-  return getProviderRuntime(input.provider).fork(input);
+  const runtime = getProviderRuntime(input.provider);
+  const fork = runtime.history.fork;
+  if (!runtime.history.capabilities.fork || !fork) {
+    return Promise.resolve({
+      status: "unsupported",
+      reason: unsupportedHistoryReason(input.provider, "fork"),
+    });
+  }
+  return fork(input);
 }
 
 export function hydrateProviderHistory(input: ProviderHydrateInput): Promise<ProviderHydrateResult> {
-  return getProviderRuntime(input.provider).hydrate(input);
+  const runtime = getProviderRuntime(input.provider);
+  const hydrate = runtime.history.hydrate;
+  if (!runtime.history.capabilities.hydrate || !hydrate) {
+    return Promise.resolve({
+      status: "unsupported",
+      reason: unsupportedHistoryReason(input.provider, "hydrate"),
+      clearCache: true,
+    });
+  }
+  return hydrate(input);
 }
 
 export function deleteProviderHistory(
   input: ProviderHistoryDeleteInput,
 ): Promise<ProviderHistoryDeleteResult> {
-  return getProviderRuntime(input.provider).deleteHistory(input);
+  const runtime = getProviderRuntime(input.provider);
+  const deleteHistory = runtime.history.deleteHistory;
+  if (!runtime.history.capabilities.delete || !deleteHistory) {
+    return Promise.resolve({
+      status: "unsupported",
+      method: "unsupported",
+      reason: unsupportedHistoryReason(input.provider, "delete"),
+    });
+  }
+  return deleteHistory(input);
 }

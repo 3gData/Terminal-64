@@ -49,6 +49,8 @@ export interface ProviderCapabilities {
 export interface ProviderUiMetadata {
   label: string;
   shortLabel: string;
+  brandTitle: string;
+  emptyStateLabel: string;
   defaultSessionName: string;
   modelMenuLabel: string;
   effortMenuLabel: string;
@@ -143,6 +145,8 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
     ui: {
       label: "Anthropic",
       shortLabel: "Claude",
+      brandTitle: "Anthropic Claude",
+      emptyStateLabel: "Claude Code",
       defaultSessionName: "Claude",
       modelMenuLabel: "Model",
       effortMenuLabel: "Effort",
@@ -170,6 +174,8 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
     ui: {
       label: "OpenAI",
       shortLabel: "Codex",
+      brandTitle: "OpenAI Codex",
+      emptyStateLabel: "Codex",
       defaultSessionName: "Codex",
       modelMenuLabel: "Model",
       effortMenuLabel: "Effort",
@@ -196,8 +202,18 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
 
 export const PROVIDER_CONFIG = PROVIDER_REGISTRY;
 
+export const PROVIDER_IDS = Object.keys(PROVIDER_REGISTRY) as ProviderId[];
+
 export function getProviderManifest(provider: ProviderId): ProviderManifest {
   return PROVIDER_REGISTRY[provider];
+}
+
+export function listProviderManifests(): ProviderManifest[] {
+  return PROVIDER_IDS.map((provider) => PROVIDER_REGISTRY[provider]);
+}
+
+export function isProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_REGISTRY, value);
 }
 
 export function providerSupports(provider: ProviderId, feature: ProviderFeature): boolean {

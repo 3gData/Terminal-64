@@ -9,7 +9,8 @@ import {
   evaluateDelegationCompletion,
   startProviderLifecycleCompletionSource,
 } from "../lib/delegationCompletion";
-import type { ProviderId } from "../lib/providers";
+import { isProviderId, type ProviderId } from "../lib/providers";
+import { getDelegationMcpTransport } from "../lib/delegationChildRuntime";
 import type { PermissionMode } from "../lib/types";
 import type { ProviderTurnInput, ProviderTurnResult } from "../contracts/providerRuntime";
 
@@ -39,8 +40,11 @@ function closeSharedChatPanel(groupId: string) {
 }
 
 function providerIdFromRuntimeMetadata(providerId: string | undefined): ProviderId | null {
-  if (providerId === "anthropic" || providerId === "openai") return providerId;
-  return null;
+  return isProviderId(providerId) ? providerId : null;
+}
+
+function shouldClearDelegationEnv(provider: ProviderId): boolean {
+  return getDelegationMcpTransport(provider) === "temp-config";
 }
 
 function providerTurnForSession({
@@ -340,7 +344,9 @@ export async function performMerge(groupId: string) {
     delStore.setGroupStatus(groupId, "merged");
     closeSharedChatPanel(groupId);
     cleanupDelegationGroup(groupId).catch(() => {});
-    if (resolveSessionProviderState(parentSession).provider !== "openai" && parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
+    if (parentSession?.cwd && shouldClearDelegationEnv(resolveSessionProviderState(parentSession).provider)) {
+      clearT64DelegationEnv(parentSession.cwd);
+    }
     purgeDelegationChildren(groupId);
   }
 }
@@ -371,7 +377,9 @@ export function endDelegation(groupId: string, forceCancel = false) {
     closeSharedChatPanel(groupId);
     cleanupDelegationGroup(groupId).catch(() => {});
     const parentSession = useClaudeStore.getState().sessions[group.parentSessionId];
-    if (resolveSessionProviderState(parentSession).provider !== "openai" && parentSession?.cwd) clearT64DelegationEnv(parentSession.cwd);
+    if (parentSession?.cwd && shouldClearDelegationEnv(resolveSessionProviderState(parentSession).provider)) {
+      clearT64DelegationEnv(parentSession.cwd);
+    }
     purgeDelegationChildren(groupId);
   }
 }

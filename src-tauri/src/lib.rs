@@ -99,8 +99,8 @@ use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
 use providers::{
-    ClaudeAdapter, CodexAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderRegistry,
-    ProviderSendPromptRequest,
+    ClaudeAdapter, CodexAdapter, ProviderCommandContext, ProviderCommandRequest,
+    ProviderHistoryCapabilities, ProviderKind, ProviderRegistry,
 };
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
@@ -363,6 +363,83 @@ fn provider_kind_from_frontend_id(provider: &str) -> Result<ProviderKind, String
     }
 }
 
+fn provider_payload_string_field<'a>(
+    payload: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a str> {
+    payload.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn provider_payload_cwd(payload: &serde_json::Value) -> Option<&str> {
+    provider_payload_string_field(payload, "cwd").filter(|cwd| !cwd.trim().is_empty())
+}
+
+fn write_provider_payload_string_field(
+    payload: &mut serde_json::Value,
+    field: &str,
+    value: String,
+) -> Result<(), String> {
+    let Some(object) = payload.as_object_mut() else {
+        return Err("provider request payload must be a JSON object".to_string());
+    };
+    object.insert(field.to_string(), serde_json::Value::String(value));
+    Ok(())
+}
+
+fn prepare_provider_command_context(
+    state: &AppState,
+    kind: ProviderKind,
+    payload: &mut serde_json::Value,
+    generate_empty_session_id: bool,
+    command_label: &str,
+) -> Result<(ProviderCommandContext, Option<String>), String> {
+    if kind != ProviderKind::ClaudeAgent {
+        return Ok((ProviderCommandContext::default(), None));
+    }
+
+    let mut session_id = provider_payload_string_field(payload, "session_id")
+        .ok_or_else(|| {
+            format!(
+                "Invalid Anthropic {} request: missing required field 'session_id'",
+                command_label
+            )
+        })?
+        .to_string();
+
+    if generate_empty_session_id && session_id.trim().is_empty() {
+        session_id = uuid::Uuid::new_v4().to_string();
+        write_provider_payload_string_field(payload, "session_id", session_id.clone())?;
+    }
+
+    let permission_mode =
+        provider_payload_string_field(payload, "permission_mode").ok_or_else(|| {
+            format!(
+                "Invalid Anthropic {} request: missing required field 'permission_mode'",
+                command_label
+            )
+        })?;
+    let cli_mode = cli_permission_mode(permission_mode);
+    let registration = state
+        .permission_server
+        .register_session(&session_id, cli_mode)
+        .ok();
+    let settings_path = registration
+        .as_ref()
+        .map(|(_, s, _)| s.to_string_lossy().to_string());
+    let approver_path = registration
+        .as_ref()
+        .map(|(_, _, m)| m.to_string_lossy().to_string());
+    let cleanup_token = registration.map(|(token, _, _)| token);
+
+    Ok((
+        ProviderCommandContext {
+            settings_path,
+            approver_mcp_config: approver_path,
+        },
+        cleanup_token,
+    ))
+}
+
 #[derive(serde::Deserialize)]
 struct ClaudeHistoryTruncateRequest {
     session_id: String,
@@ -414,6 +491,23 @@ struct CodexHistoryDeleteRequest {
     thread_id: Option<String>,
 }
 
+fn provider_history_unsupported(kind: ProviderKind, operation: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "unsupported",
+        "method": "unsupported",
+        "messages": [],
+        "stat": null,
+        "reason": format!("Provider {:?} does not support history {}", kind, operation),
+    })
+}
+
+fn provider_history_capabilities(
+    state: &AppState,
+    kind: ProviderKind,
+) -> ProviderHistoryCapabilities {
+    state.providers.history_capabilities(kind)
+}
+
 fn provider_create_impl(
     state: &AppState,
     app_handle: &tauri::AppHandle,
@@ -423,73 +517,38 @@ fn provider_create_impl(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<String, String> {
-    match provider_kind_from_frontend_id(provider)? {
-        ProviderKind::ClaudeAgent => {
-            let mut req: CreateClaudeRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid Anthropic create request: {}", e))?;
-            if req.session_id.trim().is_empty() {
-                req.session_id = uuid::Uuid::new_v4().to_string();
-            }
-            let cli_mode = cli_permission_mode(&req.permission_mode);
-            let registration = state
-                .permission_server
-                .register_session(&req.session_id, cli_mode)
-                .ok();
-            let settings_path = registration
-                .as_ref()
-                .map(|(_, s, _)| s.to_string_lossy().to_string());
-            let approver_path = registration
-                .as_ref()
-                .map(|(_, _, m)| m.to_string_lossy().to_string());
-            maybe_apply_openwolf(
-                &settings_path,
-                &req.cwd,
-                openwolf_enabled.unwrap_or(false),
-                openwolf_auto_init.unwrap_or(true),
-                openwolf_design_qc.unwrap_or(false),
-            );
-            let channel = req.channel_server.clone();
-            // Returns the resolved session UUID so the frontend can adopt the
-            // backend-generated id (when it sent an empty one) without waiting
-            // for the first `system/init` stream event.
-            let result = state.providers.create_session(
-                ProviderKind::ClaudeAgent,
-                app_handle,
-                ProviderCreateSessionRequest::Claude {
-                    req,
-                    settings_path,
-                    approver_mcp_config: approver_path,
-                    channel_server: channel,
-                },
-            );
-            if result.is_err() {
-                if let Some((token, _, _)) = &registration {
-                    state.permission_server.unregister_session(token);
-                }
-            }
-            result
-        }
-        ProviderKind::Codex => {
-            let req: CreateCodexRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid OpenAI create request: {}", e))?;
-            maybe_apply_openwolf(
-                &None,
-                &req.cwd,
-                openwolf_enabled.unwrap_or(false),
-                openwolf_auto_init.unwrap_or(true),
-                openwolf_design_qc.unwrap_or(false),
-            );
-            state.providers.create_session(
-                ProviderKind::Codex,
-                app_handle,
-                ProviderCreateSessionRequest::Codex { req },
-            )
-        }
-        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
-            "Provider {:?} is known but does not have a create IPC binding yet",
-            provider_kind_from_frontend_id(provider)?
-        )),
+    let kind = provider_kind_from_frontend_id(provider)?;
+    if state.providers.get(kind).is_none() {
+        return state.providers.create_session(
+            kind,
+            app_handle,
+            ProviderCommandRequest::new(req, ProviderCommandContext::default()),
+        );
     }
+
+    let mut payload = req;
+    let (context, cleanup_token) =
+        prepare_provider_command_context(state, kind, &mut payload, true, "create")?;
+    if let Some(cwd) = provider_payload_cwd(&payload) {
+        maybe_apply_openwolf(
+            &context.settings_path,
+            cwd,
+            openwolf_enabled.unwrap_or(false),
+            openwolf_auto_init.unwrap_or(true),
+            openwolf_design_qc.unwrap_or(false),
+        );
+    }
+    let result = state.providers.create_session(
+        kind,
+        app_handle,
+        ProviderCommandRequest::new(payload, context),
+    );
+    if result.is_err() {
+        if let Some(token) = cleanup_token {
+            state.permission_server.unregister_session(&token);
+        }
+    }
+    result
 }
 
 fn provider_send_impl(
@@ -501,67 +560,38 @@ fn provider_send_impl(
     openwolf_auto_init: Option<bool>,
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
-    match provider_kind_from_frontend_id(provider)? {
-        ProviderKind::ClaudeAgent => {
-            let req: SendClaudePromptRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid Anthropic send request: {}", e))?;
-            let cli_mode = cli_permission_mode(&req.permission_mode);
-            let registration = state
-                .permission_server
-                .register_session(&req.session_id, cli_mode)
-                .ok();
-            let settings_path = registration
-                .as_ref()
-                .map(|(_, s, _)| s.to_string_lossy().to_string());
-            let approver_path = registration
-                .as_ref()
-                .map(|(_, _, m)| m.to_string_lossy().to_string());
-            maybe_apply_openwolf(
-                &settings_path,
-                &req.cwd,
-                openwolf_enabled.unwrap_or(false),
-                openwolf_auto_init.unwrap_or(true),
-                openwolf_design_qc.unwrap_or(false),
-            );
-            let channel = req.channel_server.clone();
-            let result = state.providers.send_prompt(
-                ProviderKind::ClaudeAgent,
-                app_handle,
-                ProviderSendPromptRequest::Claude {
-                    req,
-                    settings_path,
-                    approver_mcp_config: approver_path,
-                    channel_server: channel,
-                },
-            );
-            if result.is_err() {
-                if let Some((token, _, _)) = &registration {
-                    state.permission_server.unregister_session(token);
-                }
-            }
-            result
-        }
-        ProviderKind::Codex => {
-            let req: SendCodexPromptRequest = serde_json::from_value(req)
-                .map_err(|e| format!("Invalid OpenAI send request: {}", e))?;
-            maybe_apply_openwolf(
-                &None,
-                &req.cwd,
-                openwolf_enabled.unwrap_or(false),
-                openwolf_auto_init.unwrap_or(true),
-                openwolf_design_qc.unwrap_or(false),
-            );
-            state.providers.send_prompt(
-                ProviderKind::Codex,
-                app_handle,
-                ProviderSendPromptRequest::Codex { req },
-            )
-        }
-        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
-            "Provider {:?} is known but does not have a send IPC binding yet",
-            provider_kind_from_frontend_id(provider)?
-        )),
+    let kind = provider_kind_from_frontend_id(provider)?;
+    if state.providers.get(kind).is_none() {
+        return state.providers.send_prompt(
+            kind,
+            app_handle,
+            ProviderCommandRequest::new(req, ProviderCommandContext::default()),
+        );
     }
+
+    let mut payload = req;
+    let (context, cleanup_token) =
+        prepare_provider_command_context(state, kind, &mut payload, false, "send")?;
+    if let Some(cwd) = provider_payload_cwd(&payload) {
+        maybe_apply_openwolf(
+            &context.settings_path,
+            cwd,
+            openwolf_enabled.unwrap_or(false),
+            openwolf_auto_init.unwrap_or(true),
+            openwolf_design_qc.unwrap_or(false),
+        );
+    }
+    let result = state.providers.send_prompt(
+        kind,
+        app_handle,
+        ProviderCommandRequest::new(payload, context),
+    );
+    if result.is_err() {
+        if let Some(token) = cleanup_token {
+            state.permission_server.unregister_session(&token);
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -649,13 +679,22 @@ fn provider_history_truncate(
     provider: String,
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    match provider_kind_from_frontend_id(&provider)? {
+    let kind = provider_kind_from_frontend_id(&provider)?;
+    if !provider_history_capabilities(state.inner(), kind).rewind {
+        return Ok(provider_history_unsupported(kind, "rewind"));
+    }
+    match kind {
         ProviderKind::ClaudeAgent => {
             let req: ClaudeHistoryTruncateRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid Anthropic history truncate request: {}", e))?;
             let details =
                 truncate_session_jsonl_by_messages(req.session_id, req.cwd, req.keep_messages)?;
             Ok(serde_json::json!({
+                "status": details
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("applied"),
+                "method": "jsonl",
                 "resume_at_uuid": null,
                 "details": details,
             }))
@@ -664,12 +703,19 @@ fn provider_history_truncate(
             let req: CodexHistoryTruncateRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid OpenAI history truncate request: {}", e))?;
             if req.thread_id.trim().is_empty() {
-                return Err("thread_id is required".to_string());
+                return Ok(serde_json::json!({
+                    "status": "unsupported",
+                    "method": "unsupported",
+                    "turns": 0,
+                    "reason": "thread_id_required",
+                }));
             }
             if req.num_turns == 0 {
                 return Ok(serde_json::json!({
+                    "status": "skipped",
                     "method": "noop",
                     "turns": 0,
+                    "reason": "no_turns_to_drop",
                 }));
             }
             match state
@@ -677,6 +723,7 @@ fn provider_history_truncate(
                 .rollback_thread(&req.thread_id, &req.cwd, req.num_turns)
             {
                 Ok(()) => Ok(serde_json::json!({
+                    "status": "applied",
                     "method": "app_server",
                     "turns": req.num_turns,
                 })),
@@ -696,6 +743,7 @@ fn provider_history_truncate(
                         )
                     })?;
                     Ok(serde_json::json!({
+                        "status": "applied",
                         "method": "rollout",
                         "turns": turns,
                         "rollback_error": rollback_error,
@@ -703,10 +751,9 @@ fn provider_history_truncate(
                 }
             }
         }
-        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
-            "Provider {:?} is known but does not have a history truncate IPC binding yet",
-            provider_kind_from_frontend_id(&provider)?
-        )),
+        ProviderKind::Cursor | ProviderKind::OpenCode => {
+            Ok(provider_history_unsupported(kind, "rewind"))
+        }
     }
 }
 
@@ -716,7 +763,11 @@ fn provider_history_fork(
     provider: String,
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    match provider_kind_from_frontend_id(&provider)? {
+    let kind = provider_kind_from_frontend_id(&provider)?;
+    if !provider_history_capabilities(state.inner(), kind).fork {
+        return Ok(provider_history_unsupported(kind, "fork"));
+    }
+    match kind {
         ProviderKind::ClaudeAgent => {
             let req: ClaudeHistoryForkRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid Anthropic history fork request: {}", e))?;
@@ -727,39 +778,57 @@ fn provider_history_fork(
                 req.keep_messages,
             )?;
             Ok(serde_json::json!({
+                "status": "applied",
                 "resume_at_uuid": resume_at_uuid,
             }))
         }
         ProviderKind::Codex => {
             let req: CodexHistoryForkRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid OpenAI history fork request: {}", e))?;
+            if req.thread_id.trim().is_empty() {
+                return Ok(serde_json::json!({
+                    "status": "unsupported",
+                    "reason": "thread_id_required",
+                }));
+            }
             let codex_thread_id =
                 state
                     .codex
                     .fork_thread(&req.thread_id, &req.cwd, req.drop_turns)?;
             Ok(serde_json::json!({
+                "status": "applied",
                 "codex_thread_id": codex_thread_id,
             }))
         }
-        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
-            "Provider {:?} is known but does not have a history fork IPC binding yet",
-            provider_kind_from_frontend_id(&provider)?
-        )),
+        ProviderKind::Cursor | ProviderKind::OpenCode => {
+            Ok(provider_history_unsupported(kind, "fork"))
+        }
     }
 }
 
 #[tauri::command]
 fn provider_history_hydrate(
+    state: tauri::State<'_, AppState>,
     provider: String,
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    match provider_kind_from_frontend_id(&provider)? {
+    let kind = provider_kind_from_frontend_id(&provider)?;
+    if !provider_history_capabilities(state.inner(), kind).hydrate {
+        return Ok(provider_history_unsupported(kind, "hydrate"));
+    }
+    match kind {
         ProviderKind::ClaudeAgent => {
             let req: ClaudeHistoryHydrateRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid Anthropic history hydrate request: {}", e))?;
             let stat = stat_session_jsonl(req.session_id.clone(), req.cwd.clone())?;
             let messages = load_session_history(req.session_id, req.cwd)?;
+            let status = if messages.is_empty() {
+                "empty"
+            } else {
+                "messages"
+            };
             Ok(serde_json::json!({
+                "status": status,
                 "messages": messages,
                 "stat": stat,
             }))
@@ -767,30 +836,49 @@ fn provider_history_hydrate(
         ProviderKind::Codex => {
             let req: CodexHistoryHydrateRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid OpenAI history hydrate request: {}", e))?;
+            if req.thread_id.trim().is_empty() {
+                return Ok(serde_json::json!({
+                    "status": "skipped",
+                    "messages": [],
+                    "stat": null,
+                    "reason": "thread_id_required",
+                }));
+            }
             let messages = load_codex_session_history(req.thread_id)?;
+            let status = if messages.is_empty() {
+                "empty"
+            } else {
+                "messages"
+            };
             Ok(serde_json::json!({
+                "status": status,
                 "messages": messages,
                 "stat": null,
             }))
         }
-        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
-            "Provider {:?} is known but does not have a history hydrate IPC binding yet",
-            provider_kind_from_frontend_id(&provider)?
-        )),
+        ProviderKind::Cursor | ProviderKind::OpenCode => {
+            Ok(provider_history_unsupported(kind, "hydrate"))
+        }
     }
 }
 
 #[tauri::command]
 fn provider_history_delete(
+    state: tauri::State<'_, AppState>,
     provider: String,
     req: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    match provider_kind_from_frontend_id(&provider)? {
+    let kind = provider_kind_from_frontend_id(&provider)?;
+    if !provider_history_capabilities(state.inner(), kind).delete {
+        return Ok(provider_history_unsupported(kind, "delete"));
+    }
+    match kind {
         ProviderKind::ClaudeAgent => {
             let req: ClaudeHistoryDeleteRequest = serde_json::from_value(req)
                 .map_err(|e| format!("Invalid Anthropic history delete request: {}", e))?;
             delete_session_jsonl(req.session_id, req.cwd)?;
             Ok(serde_json::json!({
+                "status": "applied",
                 "method": "deleted",
             }))
         }
@@ -807,14 +895,14 @@ fn provider_history_delete(
                 "codex_thread_id_missing"
             };
             Ok(serde_json::json!({
+                "status": "skipped",
                 "method": "skipped",
                 "reason": reason,
             }))
         }
-        ProviderKind::Cursor | ProviderKind::OpenCode => Err(format!(
-            "Provider {:?} is known but does not have a history delete IPC binding yet",
-            provider_kind_from_frontend_id(&provider)?
-        )),
+        ProviderKind::Cursor | ProviderKind::OpenCode => {
+            Ok(provider_history_unsupported(kind, "delete"))
+        }
     }
 }
 

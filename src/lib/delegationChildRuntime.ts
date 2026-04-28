@@ -55,20 +55,43 @@ export interface PrepareDelegationChildTurnOptions extends DelegationChildRuntim
 }
 
 export type DelegationMcpTransport = "temp-config" | "env";
+type DelegationPermissionPresetSource = "selected" | "bypass_all";
 
 function assertNeverProvider(provider: never): never {
   throw new Error(`Unhandled delegation provider: ${String(provider)}`);
 }
 
+const DELEGATION_PROVIDER_CONFIG: Record<ProviderId, {
+  mcpTransport: DelegationMcpTransport;
+  forceSkipOpenwolf: boolean;
+  noSessionPersistence: boolean;
+  skipGitRepoCheck: boolean;
+  permissionPresetSource: DelegationPermissionPresetSource;
+}> = {
+  anthropic: {
+    mcpTransport: "temp-config",
+    forceSkipOpenwolf: false,
+    noSessionPersistence: true,
+    skipGitRepoCheck: false,
+    permissionPresetSource: "bypass_all",
+  },
+  openai: {
+    mcpTransport: "env",
+    forceSkipOpenwolf: true,
+    noSessionPersistence: false,
+    skipGitRepoCheck: true,
+    permissionPresetSource: "selected",
+  },
+};
+
+function getDelegationProviderConfig(provider: ProviderId): (typeof DELEGATION_PROVIDER_CONFIG)[ProviderId] {
+  const config = DELEGATION_PROVIDER_CONFIG[provider];
+  if (config) return config;
+  return assertNeverProvider(provider as never);
+}
+
 export function getDelegationMcpTransport(provider: ProviderId): DelegationMcpTransport {
-  switch (provider) {
-    case "anthropic":
-      return "temp-config";
-    case "openai":
-      return "env";
-    default:
-      return assertNeverProvider(provider);
-  }
+  return getDelegationProviderConfig(provider).mcpTransport;
 }
 
 export function resolveDelegationChildRuntimeSettings({
@@ -119,7 +142,7 @@ export function buildDelegationChildProviderTurnInput({
   mcpConfigPath,
   mcpEnv,
 }: DelegationChildTurnOptions): ProviderTurnInput {
-  const mcpTransport = getDelegationMcpTransport(provider);
+  const config = getDelegationProviderConfig(provider);
   return {
     provider,
     sessionId,
@@ -130,11 +153,11 @@ export function buildDelegationChildProviderTurnInput({
     selectedEffort,
     selectedCodexPermission,
     permissionOverride: "bypass_all",
-    skipOpenwolf: provider === "openai" ? true : inheritSkipOpenwolf,
-    ...(mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
-    ...(mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
-    ...(provider === "anthropic" ? { noSessionPersistence: true } : {}),
-    ...(provider === "openai" ? { skipGitRepoCheck: true } : {}),
+    skipOpenwolf: config.forceSkipOpenwolf ? true : inheritSkipOpenwolf,
+    ...(config.mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
+    ...(config.mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
+    ...(config.noSessionPersistence ? { noSessionPersistence: true } : {}),
+    ...(config.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
   };
 }
 
@@ -146,7 +169,9 @@ export function buildDelegationChildRuntimeMetadata(
     providerId: settings.provider,
     model: settings.selectedModel,
     effort: settings.selectedEffort,
-    permissionPreset: settings.provider === "openai" ? settings.selectedCodexPermission : "bypass_all",
+    permissionPreset: getDelegationProviderConfig(settings.provider).permissionPresetSource === "selected"
+      ? settings.selectedCodexPermission
+      : "bypass_all",
     cwd,
     cleanupState: "active",
   };

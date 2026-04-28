@@ -4,8 +4,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { resolveSessionProviderState, useClaudeStore, STORAGE_KEY } from "../../stores/claudeStore";
 import { listDiskSessions, listCodexDiskSessions } from "../../lib/tauriApi";
 import type { DiskSession } from "../../lib/types";
-import type { ProviderId } from "../../lib/providers";
-import { AnthropicLogo, OpenAILogo } from "../ui/BrandLogos";
+import { listProviderManifests, type ProviderId } from "../../lib/providers";
+import { ProviderLogo } from "../ui/BrandLogos";
 import { formatRelativeTime } from "../../lib/constants";
 import "./ClaudeDialog.css";
 
@@ -21,6 +21,11 @@ function formatSize(bytes: number): string {
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)}KB`;
   return `${(bytes / 1048576).toFixed(1)}MB`;
 }
+
+const diskSessionFetchers: Partial<Record<ProviderId, (cwd: string) => Promise<DiskSession[]>>> = {
+  anthropic: listDiskSessions,
+  openai: listCodexDiskSessions,
+};
 
 export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: ClaudeDialogProps) {
   const [dir, setDir] = useState("");
@@ -48,7 +53,7 @@ export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: C
   useEffect(() => {
     if (!dir.trim()) { setDiskSessions([]); return; }
     setLoading(true);
-    const fetcher = provider === "openai" ? listCodexDiskSessions : listDiskSessions;
+    const fetcher = diskSessionFetchers[provider] ?? listDiskSessions;
     fetcher(dir.trim()).then((s) => {
       setDiskSessions(s);
       setLoading(false);
@@ -112,22 +117,17 @@ export default function ClaudeDialog({ isOpen, onClose, onConfirm, onReopen }: C
               by it without the user having to scroll. */}
           <label className="claude-dialog-label">Provider</label>
           <div className="claude-dialog-provider-row">
-            <button
-              type="button"
-              className={`claude-dialog-provider-chip ${provider === "anthropic" ? "claude-dialog-provider-chip--active" : ""}`}
-              onClick={() => setProvider("anthropic")}
-            >
-              <AnthropicLogo size={11} />
-              <span>Anthropic</span>
-            </button>
-            <button
-              type="button"
-              className={`claude-dialog-provider-chip ${provider === "openai" ? "claude-dialog-provider-chip--active" : ""}`}
-              onClick={() => setProvider("openai")}
-            >
-              <OpenAILogo size={11} />
-              <span>OpenAI</span>
-            </button>
+            {listProviderManifests().map((manifest) => (
+              <button
+                key={manifest.id}
+                type="button"
+                className={`claude-dialog-provider-chip ${provider === manifest.id ? "claude-dialog-provider-chip--active" : ""}`}
+                onClick={() => setProvider(manifest.id)}
+              >
+                <ProviderLogo provider={manifest.id} size={11} />
+                <span>{manifest.ui.label}</span>
+              </button>
+            ))}
           </div>
 
           {/* Step 1: Directory */}

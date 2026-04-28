@@ -759,12 +759,16 @@ function ChatMessageInner({ message, provider, onRewind, onFork, onEditClick }: 
   const codexTitle = isCodex ? { title: "Codex rewind truncates to a turn boundary" } : {};
   const menuEl = menuOpen && menuPos && createPortal(
     <div id="cc-ctx-menu-portal" className="cc-ctx-menu cc-ctx-menu--portal" style={{ top: menuPos.top, left: menuPos.left }}>
-      <button className="cc-ctx-item" {...codexTitle} onClick={() => { setMenuOpen(false); onRewind?.(message.id, message.role === "user" ? message.content : ""); }}>
-        <span className="cc-ctx-icon">↩</span> Rewind
-      </button>
-      <button className="cc-ctx-item" {...codexTitle} onClick={() => { setMenuOpen(false); onFork?.(message.id); }}>
-        <span className="cc-ctx-icon">⑂</span> Fork
-      </button>
+      {onRewind && (
+        <button className="cc-ctx-item" {...codexTitle} onClick={() => { setMenuOpen(false); onRewind(message.id, message.role === "user" ? message.content : ""); }}>
+          <span className="cc-ctx-icon">↩</span> Rewind
+        </button>
+      )}
+      {onFork && (
+        <button className="cc-ctx-item" {...codexTitle} onClick={() => { setMenuOpen(false); onFork(message.id); }}>
+          <span className="cc-ctx-icon">⑂</span> Fork
+        </button>
+      )}
       <button className="cc-ctx-item" onClick={handleCopy}>
         <span className="cc-ctx-icon">{copied ? "✓" : "⎘"}</span> {copied ? "Copied" : "Copy"}
       </button>

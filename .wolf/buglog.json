@@ -1920,6 +1920,100 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-28T04:48:09+02:00"
+    },
+    {
+      "id": "bug-098",
+      "timestamp": "2026-04-28T05:07:31+02:00",
+      "error_message": "npm run typecheck failed during provider IPC contract refactor with concurrent errors in src/components/ui/BrandLogos.tsx and src/lib/providerModularity.verification.ts.",
+      "file": "src/components/ui/BrandLogos.tsx, src/lib/providerModularity.verification.ts",
+      "root_cause": "Concurrent edits introduced exactOptionalPropertyTypes and ProviderUiMetadata fixture mismatches outside the Agent 1 provider IPC contract files.",
+      "fix": "Not fixed by Agent 1; reported in team chat for the owning agents while confirming no providerIpc/runtime/tauriApi type errors surfaced before these blockers.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "concurrent-work",
+        "exactOptionalPropertyTypes",
+        "provider-verification"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:07:31+02:00"
+    },
+    {
+      "id": "bug-099",
+      "timestamp": "2026-04-28T05:07:00+02:00",
+      "error_message": "cargo fmt --check failed after refactoring backend provider command request dispatch.",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "New provider command helper functions and registry dispatch calls were not in rustfmt's canonical multiline layout.",
+      "fix": "Ran cargo fmt from src-tauri, then reran cargo fmt --check, cargo check, and cargo clippy --all-targets -- -D warnings successfully.",
+      "tags": [
+        "rustfmt",
+        "provider-dispatch",
+        "backend",
+        "ci"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:07:00+02:00"
+    },
+    {
+      "id": "bug-100",
+      "timestamp": "2026-04-28T05:08:00+02:00",
+      "error_message": "npm run typecheck failed after adding future-provider modularity verification coverage.",
+      "file": "src/lib/providerModularity.verification.ts",
+      "root_cause": "The first fixture placed @ts-expect-error before object declarations while TypeScript reported the error on the provider property, the stub manifest missed newly added ProviderUiMetadata fields, and the fixture still used unparameterized ProviderCreateRequest/ProviderSendRequest after provider IPC moved to mapped request contracts.",
+      "fix": "Moved @ts-expect-error comments onto the exact discriminant properties, reused a Codex request for the current fail-closed IPC assertion, added brandTitle and emptyStateLabel to the stub manifest, and switched IPC checks to ProviderCreateRequest<\"openai\"|\"anthropic\"> / ProviderSendRequest<\"openai\">.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "provider-verification",
+        "future-provider",
+        "exactOptionalPropertyTypes"
+      ],
+      "related_bugs": [
+        "bug-098"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:08:00+02:00"
+    },
+    {
+      "id": "bug-101",
+      "timestamp": "2026-04-28T05:09:00+02:00",
+      "error_message": "src/components/ui/BrandLogos.tsx failed npm run typecheck under exactOptionalPropertyTypes after adding ProviderLogo.",
+      "file": "src/components/ui/BrandLogos.tsx",
+      "root_cause": "ProviderLogo forwarded className={className} into AnthropicLogo/OpenAILogo while LogoProps declared className?: string, which does not accept an explicitly passed undefined value when exactOptionalPropertyTypes is enabled.",
+      "fix": "Changed LogoProps.className to className?: string | undefined and reran npm run typecheck successfully.",
+      "tags": [
+        "typecheck",
+        "typescript",
+        "exactOptionalPropertyTypes",
+        "provider-ui",
+        "react-props"
+      ],
+      "related_bugs": [
+        "bug-098"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:09:00+02:00"
+    },
+    {
+      "id": "bug-102",
+      "timestamp": "2026-04-28T05:23:21+02:00",
+      "error_message": "cargo fmt --check failed after adding provider history capability fields and unsupported history IPC responses.",
+      "file": "src-tauri/src/lib.rs, src-tauri/src/providers/claude.rs, src-tauri/src/providers/codex.rs, src-tauri/src/providers/mod.rs, src-tauri/src/providers/registry.rs",
+      "root_cause": "New Rust imports and provider history helper changes were not in rustfmt's canonical multiline layout.",
+      "fix": "Ran cargo fmt from src-tauri, then reran cargo fmt --check, cargo check, and cargo clippy --all-targets -- -D warnings successfully.",
+      "tags": [
+        "rustfmt",
+        "provider-history",
+        "backend",
+        "ci"
+      ],
+      "related_bugs": [
+        "bug-099"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-28T05:23:21+02:00"
     }
   ]
 }

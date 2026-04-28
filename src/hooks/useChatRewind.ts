@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { truncateProviderHistory } from "../lib/providerRuntime";
+import { providerHistorySupports, truncateProviderHistory } from "../lib/providerRuntime";
 import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
 import type { ProviderId } from "../lib/providers";
 import type { ProviderHistoryTruncateInput } from "../contracts/providerRuntime";
@@ -18,6 +18,9 @@ export function useChatRewind() {
     cwd,
     keepMessages,
   }: RewindHistoryInput) => {
+    if (!providerHistorySupports(provider, "rewind")) {
+      throw new Error(`Provider ${provider} does not support history rewind`);
+    }
     const session = useClaudeStore.getState().sessions[sessionId];
     const codexThreadId = resolveSessionProviderState(session).openai?.codexThreadId ?? null;
     const input: ProviderHistoryTruncateInput = {
@@ -31,6 +34,9 @@ export function useChatRewind() {
       input.codexThreadId = codexThreadId;
     }
     const result = await truncateProviderHistory(input);
+    if (result.status === "unsupported") {
+      throw new Error(result.reason ?? `Provider ${provider} does not support history rewind`);
+    }
     useClaudeStore.getState().setResumeAtUuid(sessionId, result.resumeAtUuid ?? null);
   }, []);
 }

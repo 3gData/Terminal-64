@@ -34,10 +34,10 @@ use tokio::sync::mpsc;
 use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderSendPromptRequest,
-    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
-    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
-    ProviderUserInputAnswers,
+    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
+    ProviderKind, ProviderSendPromptRequest, ProviderSendTurnInput, ProviderSession,
+    ProviderSessionModelSwitchMode, ProviderSessionStartInput, ProviderThreadSnapshot,
+    ProviderTurnStartResult, ProviderUserInputAnswers,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
 use crate::types::{
@@ -1778,6 +1778,7 @@ impl CodexAdapter {
             instances: Arc::new(Mutex::new(HashMap::new())),
             capabilities: ProviderAdapterCapabilities {
                 session_model_switch: ProviderSessionModelSwitchMode::InSession,
+                history: ProviderHistoryCapabilities::FULL,
             },
         }
     }
@@ -2024,14 +2025,9 @@ impl ProviderCommandAdapter for CodexAdapter {
         app_handle: &AppHandle,
         req: ProviderCreateSessionRequest,
     ) -> Result<String, ProviderAdapterError> {
-        match req {
-            ProviderCreateSessionRequest::Codex { req } => {
-                CodexAdapter::create_session(self, app_handle, req)
-            }
-            ProviderCreateSessionRequest::Claude { .. } => {
-                Err("CodexAdapter received Claude create-session request".to_string())
-            }
-        }
+        let typed_req: CreateCodexRequest = serde_json::from_value(req.payload)
+            .map_err(|e| format!("Invalid OpenAI create request: {}", e))?;
+        CodexAdapter::create_session(self, app_handle, typed_req)
     }
 
     fn send_prompt(
@@ -2039,14 +2035,9 @@ impl ProviderCommandAdapter for CodexAdapter {
         app_handle: &AppHandle,
         req: ProviderSendPromptRequest,
     ) -> Result<(), ProviderAdapterError> {
-        match req {
-            ProviderSendPromptRequest::Codex { req } => {
-                CodexAdapter::send_prompt(self, app_handle, req)
-            }
-            ProviderSendPromptRequest::Claude { .. } => {
-                Err("CodexAdapter received Claude send-prompt request".to_string())
-            }
-        }
+        let typed_req: SendCodexPromptRequest = serde_json::from_value(req.payload)
+            .map_err(|e| format!("Invalid OpenAI send request: {}", e))?;
+        CodexAdapter::send_prompt(self, app_handle, typed_req)
     }
 
     fn cancel_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {

@@ -24,8 +24,9 @@ pub use events::{ProviderEvent, ProviderEventBase};
 pub use registry::ProviderRegistry;
 pub use traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderKind, ProviderSendPromptRequest,
-    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
-    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderThreadTurnSnapshot,
-    ProviderTurnStartResult, ProviderUserInputAnswers,
+    ProviderCommandAdapter, ProviderCommandContext, ProviderCommandRequest,
+    ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderKind,
+    ProviderSendPromptRequest, ProviderSendTurnInput, ProviderSession,
+    ProviderSessionModelSwitchMode, ProviderSessionStartInput, ProviderThreadSnapshot,
+    ProviderThreadTurnSnapshot, ProviderTurnStartResult, ProviderUserInputAnswers,
 };

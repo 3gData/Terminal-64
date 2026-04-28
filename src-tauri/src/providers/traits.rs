@@ -22,9 +22,6 @@ use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 use crate::providers::events::ProviderEvent;
-use crate::types::{
-    CreateClaudeRequest, CreateCodexRequest, SendClaudePromptRequest, SendCodexPromptRequest,
-};
 
 /// Error type surfaced by every adapter method. The live command adapters
 /// still surface user-facing strings; the normalized async surface can grow a
@@ -54,6 +51,31 @@ pub enum ProviderSessionModelSwitchMode {
 #[derive(Debug, Clone)]
 pub struct ProviderAdapterCapabilities {
     pub session_model_switch: ProviderSessionModelSwitchMode,
+    pub history: ProviderHistoryCapabilities,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderHistoryCapabilities {
+    pub hydrate: bool,
+    pub fork: bool,
+    pub rewind: bool,
+    pub delete: bool,
+}
+
+impl ProviderHistoryCapabilities {
+    pub const NONE: Self = Self {
+        hydrate: false,
+        fork: false,
+        rewind: false,
+        delete: false,
+    };
+
+    pub const FULL: Self = Self {
+        hydrate: true,
+        fork: true,
+        rewind: true,
+        delete: true,
+    };
 }
 
 // Future normalized payloads can replace these `serde_json::Value` aliases
@@ -65,34 +87,32 @@ pub type ProviderUserInputAnswers = serde_json::Value;
 pub type ProviderSession = serde_json::Value;
 pub type ProviderTurnStartResult = serde_json::Value;
 
-/// Existing Tauri IPC create-session payloads, grouped behind one backend
-/// provider command boundary. The enum preserves today's public command
-/// contracts while giving `ProviderRegistry` one shape to dispatch.
-pub enum ProviderCreateSessionRequest {
-    Claude {
-        req: CreateClaudeRequest,
-        settings_path: Option<String>,
-        approver_mcp_config: Option<String>,
-        channel_server: Option<String>,
-    },
-    Codex {
-        req: CreateCodexRequest,
-    },
+/// Sidecar data produced by provider-agnostic command setup. Concrete
+/// adapters decide which fields, if any, apply to their payload.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCommandContext {
+    pub settings_path: Option<String>,
+    pub approver_mcp_config: Option<String>,
 }
 
-/// Existing Tauri IPC send-prompt payloads, grouped behind one backend
-/// provider command boundary.
-pub enum ProviderSendPromptRequest {
-    Claude {
-        req: SendClaudePromptRequest,
-        settings_path: Option<String>,
-        approver_mcp_config: Option<String>,
-        channel_server: Option<String>,
-    },
-    Codex {
-        req: SendCodexPromptRequest,
-    },
+/// Existing Tauri IPC command payload grouped behind one backend provider
+/// command boundary. The raw JSON payload belongs to the selected provider
+/// adapter, avoiding central enums that grow every time a provider adds a
+/// field.
+#[derive(Debug, Clone)]
+pub struct ProviderCommandRequest {
+    pub payload: serde_json::Value,
+    pub context: ProviderCommandContext,
 }
+
+impl ProviderCommandRequest {
+    pub fn new(payload: serde_json::Value, context: ProviderCommandContext) -> Self {
+        Self { payload, context }
+    }
+}
+
+pub type ProviderCreateSessionRequest = ProviderCommandRequest;
+pub type ProviderSendPromptRequest = ProviderCommandRequest;
 
 /// Synchronous command surface used by the current Tauri IPC wrappers. This
 /// is intentionally smaller than the future normalized `ProviderAdapter`
