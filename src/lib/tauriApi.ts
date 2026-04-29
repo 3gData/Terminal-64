@@ -576,6 +576,11 @@ export async function ensureT64Mcp(cwd: string): Promise<void> {
   return invoke("ensure_t64_mcp", { cwd });
 }
 
+/** Ensure Cursor's project MCP config includes the Terminal 64 MCP server. */
+export async function ensureCursorMcp(cwd: string): Promise<void> {
+  return invoke("ensure_cursor_mcp", { cwd });
+}
+
 /**
  * Update the T64 MCP server entry in .mcp.json with delegation env vars.
  * Adds T64_DELEGATION_PORT, T64_DELEGATION_SECRET, T64_GROUP_ID, T64_AGENT_LABEL
@@ -1050,7 +1055,7 @@ export function spawnProviderSessionWithPrompt(
       prompt,
       started: false,
       permissionMode,
-      selectedCodexPermission: manifest.defaultPermission,
+      providerPermissionId: manifest.defaultPermission,
       skipOpenwolf: skip,
     };
 

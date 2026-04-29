@@ -5,38 +5,28 @@
 //! the same provider registry as Codex while preserving the existing
 //! `claude-event` / `claude-done` stream shape.
 //!
-//! The trait impl covers the methods that map 1:1 to today's behaviour
-//! (`interrupt_turn`, `stop_session`, `has_session`, `list_sessions`,
-//! `stop_all`, `stream_events`); the normalized `start_session` /
-//! `send_turn` / `read_thread` / `rollback_thread` / `respond_to_*`
-//! surfaces return an error string until the normalized async provider
-//! contract is wired end to end. The Tauri command layer keeps using the
-//! command-adapter `create_session` / `send_prompt` / `cancel` / `close`
-//! methods so the IPC surface is unchanged.
+//! The provider registry calls this adapter through the same backend
+//! create/send/cancel/close/history contract used by the other providers, so
+//! the public IPC surface remains provider-neutral.
 //!
 //! Shared helpers (`shim_command`, `cap_event_size`,
 //! `sanitize_dangling_tool_uses`) live in [`crate::providers::util`].
 //! OpenWolf helpers stayed in `claude_manager.rs` for now — they aren't
 //! provider-scoped and will move to a dedicated `openwolf.rs` later.
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
 
 use crate::providers::emit_provider_event;
-use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
-    ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
-    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
-    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
-    ProviderUserInputAnswers,
+    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError,
+    ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
+    ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
+    ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{
     cap_event_size, expanded_tool_path, find_existing_claude_session_jsonl,
@@ -480,10 +470,6 @@ fn spawn_and_stream(
 
 pub struct ClaudeAdapter {
     instances: Arc<Mutex<HashMap<String, ClaudeInstance>>>,
-    // Returned by reference from `capabilities()`. Held on the struct so the
-    // `&Self` borrow lives as long as the trait object — required by the
-    // trait signature even though no caller dispatches through it yet.
-    #[allow(dead_code)]
     capabilities: ProviderAdapterCapabilities,
 }
 
@@ -697,7 +683,7 @@ impl Default for ClaudeAdapter {
     }
 }
 
-impl ProviderCommandAdapter for ClaudeAdapter {
+impl ProviderAdapter for ClaudeAdapter {
     fn create_session(
         &self,
         app_handle: &AppHandle,
@@ -741,24 +727,7 @@ impl ProviderCommandAdapter for ClaudeAdapter {
     fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         self.close(session_id)
     }
-}
 
-// ── ProviderAdapter trait impl ─────────────────────────────
-//
-// The command-adapter methods above are what the Tauri command layer calls
-// today. The normalized async trait methods below cover cases that map cleanly
-// to current behavior; anything requiring a new request-shape split
-// (`start_session`, `send_turn`, `read_thread`, `rollback_thread`,
-// `respond_to_*`) returns an error string until that surface is wired.
-//
-// `stream_events` returns a fresh empty channel for now — no producer is
-// wired because nothing consumes the normalized Rust stream yet
-// (`useClaudeEvents.ts` still listens for the legacy `claude-event` topic).
-// A later pass can hook `spawn_and_stream` into a broadcast channel and
-// convert to per-call mpsc here.
-
-#[async_trait]
-impl ProviderAdapter for ClaudeAdapter {
     fn provider(&self) -> ProviderKind {
         ProviderKind::ClaudeAgent
     }
@@ -841,113 +810,5 @@ impl ProviderAdapter for ClaudeAdapter {
             "status": "applied",
             "method": "deleted",
         }))
-    }
-
-    async fn start_session(
-        &self,
-        _input: ProviderSessionStartInput,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err("ClaudeAdapter::start_session not wired into normalized provider surface; call create_session through ProviderCommandAdapter".to_string())
-    }
-
-    async fn send_turn(
-        &self,
-        _input: ProviderSendTurnInput,
-    ) -> Result<ProviderTurnStartResult, ProviderAdapterError> {
-        Err("ClaudeAdapter::send_turn not wired into normalized provider surface; call send_prompt through ProviderCommandAdapter".to_string())
-    }
-
-    async fn interrupt_turn(
-        &self,
-        thread_id: &str,
-        _turn_id: Option<&str>,
-    ) -> Result<(), ProviderAdapterError> {
-        self.cancel(thread_id)
-    }
-
-    async fn respond_to_request(
-        &self,
-        _thread_id: &str,
-        _request_id: &str,
-        _decision: ProviderApprovalDecision,
-    ) -> Result<(), ProviderAdapterError> {
-        // Claude routes approvals via the MCP permission-prompt tool
-        // (see `build_command` / permission_server.rs). This normalized
-        // approval surface is not wired to the current command adapter.
-        Err("ClaudeAdapter::respond_to_request: approvals flow through the MCP shim".to_string())
-    }
-
-    async fn respond_to_user_input(
-        &self,
-        _thread_id: &str,
-        _request_id: &str,
-        _answers: ProviderUserInputAnswers,
-    ) -> Result<(), ProviderAdapterError> {
-        Err("ClaudeAdapter::respond_to_user_input not implemented".to_string())
-    }
-
-    async fn stop_session(&self, thread_id: &str) -> Result<(), ProviderAdapterError> {
-        self.close(thread_id)
-    }
-
-    async fn list_sessions(&self) -> Vec<ProviderSession> {
-        let Ok(instances) = self.instances.lock() else {
-            return Vec::new();
-        };
-        instances
-            .keys()
-            .map(|sid| {
-                serde_json::json!({
-                    "provider": "claudeAgent",
-                    "threadId": sid,
-                })
-            })
-            .collect()
-    }
-
-    async fn has_session(&self, thread_id: &str) -> bool {
-        self.instances
-            .lock()
-            .map(|m| m.contains_key(thread_id))
-            .unwrap_or(false)
-    }
-
-    async fn read_thread(
-        &self,
-        _thread_id: &str,
-    ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
-        // JSONL parsing lives in lib.rs (`load_session_history`); the trait
-        // hook stays a stub until that surface is refactored.
-        Err("ClaudeAdapter::read_thread: use load_session_history command".to_string())
-    }
-
-    async fn rollback_thread(
-        &self,
-        _thread_id: &str,
-        _num_turns: u32,
-    ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
-        Err(
-            "ClaudeAdapter::rollback_thread: use truncate_session_jsonl / --resume-session-at"
-                .to_string(),
-        )
-    }
-
-    async fn stop_all(&self) -> Result<(), ProviderAdapterError> {
-        let ids: Vec<String> = match self.instances.lock() {
-            Ok(m) => m.keys().cloned().collect(),
-            Err(_) => return Ok(()),
-        };
-        for sid in ids {
-            let _ = self.cancel(&sid);
-        }
-        Ok(())
-    }
-
-    async fn stream_events(&self) -> mpsc::Receiver<ProviderEvent> {
-        // Producer not wired: the legacy `claude-event` channel still carries
-        // events. Hand callers an empty receiver so the trait contract holds
-        // until a broadcast-to-mpsc bridge is added around `spawn_and_stream`.
-        let (_tx, rx) = mpsc::channel(1);
-        rx
     }
 }

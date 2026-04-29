@@ -2,6 +2,7 @@ import { useDelegationStore } from "../../stores/delegationStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import {
   getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
   useClaudeStore,
   type ClaudeSession,
@@ -30,7 +31,7 @@ function providerTurnForSession(
     threadId: openaiMetadata?.codexThreadId ?? null,
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? "workspace",
+    providerPermissionId: getProviderPermissionId(providerState, providerState.provider),
     permissionMode: "auto",
     permissionOverride: "bypass_all",
     skipOpenwolf: session.skipOpenwolf,

@@ -86,7 +86,7 @@ export function useChatSend({
           threadId: codexThreadId,
           selectedModel,
           selectedEffort,
-          selectedCodexPermission: selectedProviderPermissionId,
+          providerPermissionId: selectedProviderPermissionId,
           permissionMode,
           skipOpenwolf: sess?.skipOpenwolf || false,
           seedTranscript,

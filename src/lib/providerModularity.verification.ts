@@ -16,6 +16,12 @@ import {
   resolveDelegationChildRuntimeSettings,
 } from "./delegationChildRuntime";
 import {
+  buildDelegationChildSpawnPlan,
+  buildDelegationPlanRequest,
+  parseDelegateCommand,
+  parseDelegationStartFromMessage,
+} from "./delegationWorkflow";
+import {
   CODEX_MAX_TURN_PROMPT_CHARS,
   codexPermissionForOverride,
   codexDropTurnsForKeepMessages,
@@ -23,6 +29,8 @@ import {
   buildCodexSendRequest,
   promptWithCodexSeed,
 } from "./providerRuntimes/openai";
+import { buildCursorRequest } from "./providerRuntimes/cursor";
+import { CursorLiveEventDecoder } from "./cursorEventDecoder";
 import {
   codexInputChangedPaths,
   codexItemChangedPaths,
@@ -33,9 +41,11 @@ import {
 } from "./codexEventDecoder";
 import {
   decodeCodexPermission,
+  getProviderHistoryPolicy,
   getProviderManifest,
   isProviderId,
   PROVIDER_IDS,
+  providerPersistsLocalTranscript,
   providerSupports,
   type ProviderId,
   type ProviderManifest,
@@ -47,6 +57,8 @@ import {
   getProviderRuntime,
   hydrateProviderHistory,
   prepareProviderFork,
+  prepareProviderTurnInput,
+  providerHistorySource,
   providerHistorySupports,
   providerTurnOperation,
   runProviderTurn,
@@ -63,10 +75,11 @@ import {
 import {
   getProviderSessionMetadata,
   getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
-  resolveOpenAiProviderSessionMetadata,
   resolveProviderSessionMetadata,
   STORAGE_KEY,
+  flushSave,
   useClaudeStore,
   type ProviderSessionState,
 } from "../stores/claudeStore";
@@ -81,13 +94,16 @@ type VerificationResult = {
 type FutureProviderId = ProviderId | "opencode";
 type FutureProviderManifest = Omit<ProviderManifest, "id"> & { id: FutureProviderId };
 type FutureProviderRuntime = Omit<ProviderRuntime, "provider"> & { provider: FutureProviderId };
-type FutureProviderSessionState = Omit<ProviderSessionState, "provider" | "providerMetadata"> & {
+type FutureProviderSessionState = Omit<ProviderSessionState, "provider" | "providerMetadata" | "providerPermissions"> & {
   provider: FutureProviderId;
   providerMetadata: ProviderSessionState["providerMetadata"] & {
     opencode?: {
       threadId: string | null;
       permissionProfile: string | null;
     };
+  };
+  providerPermissions: ProviderSessionState["providerPermissions"] & {
+    opencode?: string | null;
   };
 };
 type FutureProviderCreateRequest =
@@ -158,12 +174,24 @@ const futureProviderStubManifest = {
     skipOpenwolf: "always",
     noSessionPersistence: false,
     skipGitRepoCheck: true,
+    planner: {
+      permissionOverride: "inherit",
+    },
     childRuntime: {
       permissionPreset: "selected",
     },
   },
   permissionControl: {
-    persistence: "provider-metadata",
+    persistence: "provider-state",
+  },
+  history: {
+    source: "none",
+    hydrateFailureLabel: "OpenCode",
+  },
+  controls: {
+    model: { id: "model", label: "Model" },
+    effort: { id: "effort", label: "Effort" },
+    permission: { id: "permission", label: "Profile", inputSuffix: "profile" },
   },
   models: [{ id: "stub-model", label: "Stub Model" }],
   efforts: [{ id: "stub-effort", label: "Stub Effort" }],
@@ -193,6 +221,7 @@ function createUnsupportedFutureRuntime(provider: FutureProviderId): FutureProvi
       throw unsupportedFutureProvider(provider, "close");
     },
     history: {
+      source: "none",
       capabilities: {
         hydrate: false,
         fork: false,
@@ -227,6 +256,7 @@ const providerHistoryHandlerNames = {
 export function verifyProviderManifestDefaults(): VerificationResult {
   const anthropic = getProviderManifest("anthropic");
   const openai = getProviderManifest("openai");
+  const cursor = getProviderManifest("cursor");
 
   assertEqual(anthropic.defaultModel, "sonnet", "Anthropic default model");
   assertEqual(anthropic.defaultEffort, "high", "Anthropic default effort");
@@ -236,17 +266,21 @@ export function verifyProviderManifestDefaults(): VerificationResult {
   assert(anthropic.permissions.some((permission) => permission.id === anthropic.defaultPermission), "Anthropic default permission is listed");
   assertEqual(anthropic.delegation.mcpTransport, "temp-config", "Anthropic delegation MCP transport is manifest-owned");
   assertEqual(anthropic.delegation.skipOpenwolf, "inherit", "Anthropic delegation inherits OpenWolf setting");
+  assertEqual(anthropic.delegation.planner.permissionOverride, "inherit", "Anthropic delegation planner inherits explicit overrides");
   assertEqual(
     anthropic.delegation.childRuntime.permissionPreset,
     "bypass_all",
     "Anthropic delegation metadata records bypass permission",
   );
-  assertEqual(anthropic.permissionControl.persistence, "settings", "Anthropic permission control uses settings");
+  assertEqual(anthropic.permissionControl.persistence, "provider-state", "Anthropic permission control uses provider state");
   assertEqual(
     anthropic.permissionControl.skipPermissionId,
     "bypass_all",
     "Anthropic skip-permissions preset is manifest-owned",
   );
+  assertEqual(anthropic.history.source, "claude-jsonl", "Anthropic history source is manifest-owned");
+  assertEqual(getProviderHistoryPolicy("anthropic").source, "claude-jsonl", "Anthropic history policy helper uses manifest source");
+  assert(!providerPersistsLocalTranscript("anthropic"), "Anthropic does not persist local transcripts");
 
   assertEqual(openai.defaultModel, "gpt-5.5", "OpenAI default model");
   assertEqual(openai.defaultEffort, "medium", "OpenAI default effort");
@@ -256,15 +290,33 @@ export function verifyProviderManifestDefaults(): VerificationResult {
   assert(openai.permissions.some((permission) => permission.id === openai.defaultPermission), "OpenAI default permission is listed");
   assertEqual(openai.delegation.mcpTransport, "env", "OpenAI delegation MCP transport is manifest-owned");
   assertEqual(openai.delegation.skipOpenwolf, "always", "OpenAI delegation always skips OpenWolf bootstrap");
+  assertEqual(openai.delegation.planner.permissionOverride, "inherit", "OpenAI delegation planner inherits explicit overrides");
   assertEqual(
     openai.delegation.childRuntime.permissionPreset,
     "selected",
     "OpenAI delegation metadata records selected permission preset",
   );
-  assertEqual(openai.permissionControl.persistence, "provider-metadata", "OpenAI permission control uses provider metadata");
+  assertEqual(openai.permissionControl.persistence, "provider-state", "OpenAI permission control uses provider state");
+  assertEqual(openai.history.source, "codex-rollout", "OpenAI history source is manifest-owned");
+  assert(!providerPersistsLocalTranscript("openai"), "OpenAI does not persist local transcripts");
   assert(providerSupports("openai", "fork"), "OpenAI manifest advertises fork support");
   assert(providerSupports("openai", "rewind"), "OpenAI manifest advertises rewind support");
   assert(!providerSupports("openai", "hookLog"), "OpenAI manifest does not expose Claude hook log");
+
+  assertEqual(cursor.defaultModel, "composer-2-fast", "Cursor default model");
+  assertEqual(cursor.defaultEffort, "default", "Cursor default effort");
+  assertEqual(cursor.defaultPermission, "default", "Cursor default permission");
+  assert(cursor.models.some((model) => model.id === cursor.defaultModel), "Cursor default model is listed");
+  assert(cursor.efforts.some((effort) => effort.id === cursor.defaultEffort), "Cursor default effort is listed");
+  assert(cursor.permissions.some((permission) => permission.id === cursor.defaultPermission), "Cursor default permission is listed");
+  assertEqual(cursor.delegation.mcpTransport, "env", "Cursor delegation MCP transport is manifest-owned");
+  assertEqual(cursor.delegation.skipOpenwolf, "always", "Cursor delegation skips OpenWolf bootstrap");
+  assertEqual(cursor.delegation.planner.permissionOverride, "bypass_all", "Cursor delegation planner uses manifest-owned force mode");
+  assertEqual(cursor.permissionControl.persistence, "provider-state", "Cursor permission control uses provider state");
+  assertEqual(cursor.history.source, "local-transcript", "Cursor local transcript source is manifest-owned");
+  assert(providerPersistsLocalTranscript("cursor"), "Cursor persists local transcript by manifest history source");
+  assert(!providerSupports("cursor", "fork"), "Cursor manifest fails closed on fork until history support exists");
+  assert(!providerSupports("cursor", "rewind"), "Cursor manifest fails closed on rewind until history support exists");
 
   return { name: "provider manifest defaults", ok: true };
 }
@@ -274,6 +326,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
 
   const sessionId = "provider-verification-legacy-openai";
   const stateSessionId = "provider-verification-state-openai";
+  const cursorSessionId = "provider-verification-cursor-local";
   const previousStorage = localStorage.getItem(STORAGE_KEY);
   const previousSessions = useClaudeStore.getState().sessions;
 
@@ -319,12 +372,33 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
         selectedEffort: "high",
         selectedCodexPermission: "yolo",
       },
+      [cursorSessionId]: {
+        sessionId: cursorSessionId,
+        name: "Cursor Local",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 3,
+        schemaVersion: 6,
+        providerState: {
+          provider: "cursor",
+          providerLocked: true,
+          selectedModel: "composer-2-fast",
+          selectedEffort: "default",
+          seedTranscript: null,
+          providerMetadata: {},
+        },
+        provider: "cursor",
+        providerLocked: true,
+        localTranscript: transcriptFixture.slice(0, 2),
+      },
     }));
     useClaudeStore.setState({ sessions: {} });
     useClaudeStore.getState().createSession(sessionId);
     useClaudeStore.getState().createSession(stateSessionId);
+    useClaudeStore.getState().createSession(cursorSessionId);
     const migrated = useClaudeStore.getState().sessions[sessionId];
     const stateBacked = useClaudeStore.getState().sessions[stateSessionId];
+    const cursorBacked = useClaudeStore.getState().sessions[cursorSessionId];
 
     assert(migrated, "legacy OpenAI metadata creates a session");
     assertEqual(migrated.providerState.provider, "openai", "legacy provider migrates into providerState");
@@ -332,7 +406,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(migrated.providerLocked, true, "legacy provider lock mirror migrates");
     const migratedOpenAi = getOpenAiProviderSessionMetadata(migrated.providerState);
     assertEqual(migratedOpenAi?.codexThreadId, "thread-legacy", "legacy Codex thread id migrates");
-    assertEqual(migratedOpenAi?.selectedCodexPermission, "yolo", "legacy Codex permission migrates");
+    assertEqual(getProviderPermissionId(migrated.providerState, "openai"), "yolo", "legacy Codex permission migrates");
     assertEqual(migrated.providerState.selectedModel, "gpt-5.4", "legacy selected model migrates");
     assertEqual(migrated.providerState.selectedEffort, "high", "legacy selected effort migrates");
     assertEqual(migrated.messages.length, 2, "legacy seed transcript hydrates into visible messages");
@@ -344,8 +418,21 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(stateBacked.providerLocked, true, "provider lock mirror follows providerState");
     const stateBackedOpenAi = getOpenAiProviderSessionMetadata(stateBacked.providerState);
     assertEqual(stateBackedOpenAi?.codexThreadId, "thread-provider-state", "providerState thread id wins over stale flat mirror");
-    assertEqual(stateBackedOpenAi?.selectedCodexPermission, "workspace", "providerState permission wins over stale flat mirror");
+    assertEqual(getProviderPermissionId(stateBacked.providerState, "openai"), "workspace", "providerState permission wins over stale flat mirror");
     assertEqual(stateBacked.providerState.selectedModel, "gpt-5.5", "providerState selected model wins over stale flat mirror");
+
+    assert(cursorBacked, "Cursor local transcript metadata creates a session");
+    assertEqual(cursorBacked.providerState.provider, "cursor", "Cursor provider state hydrates from metadata");
+    assertEqual(cursorBacked.messages.length, 2, "Cursor local transcript hydrates into visible messages");
+    useClaudeStore.getState().addUserMessage(cursorSessionId, "persist this");
+    useClaudeStore.getState().finalizeAssistantMessage(cursorSessionId, "persisted");
+    flushSave();
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") as Record<string, { localTranscript?: ChatMessage[] }>;
+    const savedCursorTranscript = saved[cursorSessionId]?.localTranscript ?? [];
+    assertEqual(savedCursorTranscript.length, 4, "Cursor transcript writes back to metadata");
+    assertEqual(savedCursorTranscript[3]?.content, "persisted", "Cursor assistant message persists locally");
+    assertEqual(saved[sessionId]?.localTranscript, undefined, "OpenAI transcript stays provider-owned after metadata save");
+    assertEqual(saved[stateSessionId]?.localTranscript, undefined, "Provider-state OpenAI transcript stays out of local metadata");
 
     const hotReloadFallback = resolveSessionProviderState({
       provider: "openai",
@@ -360,7 +447,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(hotReloadFallback.providerLocked, true, "hot-reloaded flat provider lock falls back into providerState");
     const hotReloadFallbackOpenAi = getOpenAiProviderSessionMetadata(hotReloadFallback);
     assertEqual(hotReloadFallbackOpenAi?.codexThreadId, "thread-hot-reload", "hot-reloaded flat thread id falls back into providerState");
-    assertEqual(hotReloadFallbackOpenAi?.selectedCodexPermission, "full-auto", "hot-reloaded flat permission falls back into providerState");
+    assertEqual(getProviderPermissionId(hotReloadFallback, "openai"), "full-auto", "hot-reloaded flat permission falls back into providerState");
 
     return { name: "providerState legacy migration", ok: true };
   } finally {
@@ -429,20 +516,19 @@ export function verifyProviderPickerLockFixtures(): VerificationResult {
     blank = useClaudeStore.getState().sessions["picker-blank"];
     assert(blank, "switched blank session still exists");
     const openaiManifest = getProviderManifest("openai");
-    const blankOpenAi = getOpenAiProviderSessionMetadata(blank.providerState);
     assertEqual(blank.providerState.provider, "openai", "pre-send provider picker writes providerState provider");
     assertEqual(blank.provider, "openai", "pre-send provider picker writes compatibility provider mirror");
     assertEqual(blank.providerState.providerLocked, false, "pre-send provider switch keeps session unlocked");
     assertEqual(blank.providerState.selectedModel, openaiManifest.defaultModel, "pre-send provider switch resets default model");
     assertEqual(blank.providerState.selectedEffort, openaiManifest.defaultEffort, "pre-send provider switch resets default effort");
-    assertEqual(blankOpenAi?.selectedCodexPermission, openaiManifest.defaultPermission, "pre-send provider switch resets provider permission");
+    assertEqual(getProviderPermissionId(blank.providerState, "openai"), openaiManifest.defaultPermission, "pre-send provider switch resets provider permission");
     assertEqual(
       providerTurnOperation(providerInput({
         provider: blank.providerState.provider,
         started: blank.hasBeenStarted && blank.promptCount > 0,
         selectedModel: blank.providerState.selectedModel,
         selectedEffort: blank.providerState.selectedEffort,
-        selectedCodexPermission: blankOpenAi?.selectedCodexPermission ?? undefined,
+        providerPermissionId: getProviderPermissionId(blank.providerState, "openai"),
       })),
       "create",
       "first send from provider-picked blank session routes through create for selected provider",
@@ -517,7 +603,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   const createReq = buildCodexCreateRequest(providerInput({
     selectedModel: "gpt-5.4",
     selectedEffort: "xhigh",
-    selectedCodexPermission: "workspace",
+    providerPermissionId: "workspace",
     codexCollaborationMode: "plan",
   }));
   assertEqual(createReq.session_id, "session-1", "Codex create keeps local session id");
@@ -536,6 +622,29 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
     "default",
     "Codex build-after-plan requests explicitly exit plan collaboration mode",
   );
+
+  const cursorReviewReq = buildCursorRequest(providerInput({
+    provider: "cursor",
+    selectedModel: "auto",
+    providerPermissionId: "default",
+  }));
+  assertEqual(cursorReviewReq.session_id, "session-1", "Cursor request keeps local session id");
+  assertEqual(cursorReviewReq.permission_mode, "default", "Cursor request carries selected permission mode");
+  assert(!Object.prototype.hasOwnProperty.call(cursorReviewReq, "model"), "Cursor auto model omits --model");
+  assert(!Object.prototype.hasOwnProperty.call(cursorReviewReq, "force"), "Cursor review mode does not force writes");
+
+  const cursorForceReq = buildCursorRequest(providerInput({
+    provider: "cursor",
+    threadId: "cursor-thread",
+    selectedModel: "gpt-5.3-codex",
+    selectedEffort: "ask",
+    providerPermissionId: "bypass_all",
+  }));
+  assertEqual(cursorForceReq.thread_id, "cursor-thread", "Cursor request can carry resume thread id");
+  assertEqual(cursorForceReq.model, "gpt-5.3-codex", "Cursor explicit model is included");
+  assertEqual(cursorForceReq.mode, "ask", "Cursor effort selector maps to CLI mode");
+  assertEqual(cursorForceReq.force, true, "Cursor bypass permission maps to --force");
+  assertNoUndefinedOwnValues(cursorForceReq as unknown as Record<string, unknown>, "cursorForceReq");
 
   const sendReq = buildCodexSendRequest(
     providerInput({ threadId: "thread-1" }),
@@ -559,7 +668,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   );
 
   const yoloReq = buildCodexCreateRequest(providerInput({
-    selectedCodexPermission: "workspace",
+    providerPermissionId: "workspace",
     permissionOverride: "bypass_all",
   }));
   assertEqual(yoloReq.yolo, true, "Claude bypass override maps to Codex yolo request");
@@ -596,6 +705,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
 export function verifyProviderLifecycleAndHistorySurfaceFixtures(): VerificationResult {
   const providerRuntimeHelpers = {
     runProviderTurn,
+    prepareProviderTurnInput,
     cancelProviderSession,
     closeProviderSession,
     truncateProviderHistory,
@@ -604,6 +714,7 @@ export function verifyProviderLifecycleAndHistorySurfaceFixtures(): Verification
     deleteProviderHistory,
   } satisfies {
     runProviderTurn: typeof runProviderTurn;
+    prepareProviderTurnInput: typeof prepareProviderTurnInput;
     cancelProviderSession: typeof cancelProviderSession;
     closeProviderSession: typeof closeProviderSession;
     truncateProviderHistory: typeof truncateProviderHistory;
@@ -617,6 +728,11 @@ export function verifyProviderLifecycleAndHistorySurfaceFixtures(): Verification
     assert(isProviderId(provider), `${provider} is a supported provider id`);
     const runtime = getProviderRuntime(provider);
     assertEqual(runtime.provider, provider, `${provider} runtime keeps its provider id`);
+    assertEqual(
+      providerHistorySource(provider),
+      getProviderManifest(provider).history.source,
+      `${provider} runtime history source matches manifest`,
+    );
 
     for (const operation of providerLifecycleOperations) {
       assertEqual(typeof runtime[operation], "function", `${provider} runtime exposes ${operation}`);
@@ -635,8 +751,12 @@ export function verifyProviderLifecycleAndHistorySurfaceFixtures(): Verification
     }
   }
 
+  assertEqual(typeof getProviderRuntime("anthropic").prepareTurn, "function", "Anthropic runtime owns temp MCP setup hook");
+  assertEqual(typeof getProviderRuntime("openai").prepareTurn, "function", "OpenAI runtime owns frontend turn setup hook");
+
   const futureUnsupported = createUnsupportedFutureRuntime("opencode");
   assertEqual(futureUnsupported.provider, "opencode", "unsupported future runtime keeps provider id");
+  assertEqual(futureUnsupported.history.source, "none", "unsupported future runtime starts with no history source");
   for (const capability of providerHistoryCapabilities) {
     assertEqual(
       futureUnsupported.history.capabilities[capability],
@@ -714,13 +834,13 @@ export function verifyProviderMetadataHelperFixtures(): VerificationResult {
     "generic metadata helper reads provider-owned OpenAI thread id",
   );
   assertEqual(
-    resolveOpenAiProviderSessionMetadata({
+    getProviderPermissionId(resolveSessionProviderState({
       provider: "openai",
       codexThreadId: "thread-flat-compat",
       selectedCodexPermission: "full-auto",
-    })?.selectedCodexPermission,
+    }), "openai"),
     "full-auto",
-    "OpenAI metadata resolver keeps flat compatibility fallback",
+    "OpenAI permission helper keeps flat compatibility fallback",
   );
   assertEqual(
     resolveProviderSessionMetadata({ provider: "anthropic" }, "anthropic"),
@@ -746,6 +866,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
   assert(mcpEnv, "delegation MCP env is built when port and secret are available");
   assertEqual(getDelegationMcpTransport("anthropic"), "temp-config", "Anthropic delegation uses a temp MCP config");
   assertEqual(getDelegationMcpTransport("openai"), "env", "OpenAI delegation uses runtime MCP env");
+  assertEqual(getDelegationMcpTransport("cursor"), "env", "Cursor delegation uses runtime MCP env");
 
   const inheritedRuntime = resolveDelegationChildRuntimeSettings({
     parentSession: {
@@ -754,6 +875,9 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
         providerLocked: true,
         selectedModel: "gpt-5.4",
         selectedEffort: "medium",
+        providerPermissions: {
+          openai: "full-auto",
+        },
         seedTranscript: null,
         providerMetadata: {
           openai: {
@@ -767,12 +891,12 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     selectedProvider: "anthropic",
     selectedModel: "sonnet",
     selectedEffort: "high",
-    selectedCodexPermission: "workspace",
+    selectedProviderPermissionId: "workspace",
   });
   assertEqual(inheritedRuntime.provider, "openai", "delegation child inherits parent provider");
   assertEqual(inheritedRuntime.selectedModel, "gpt-5.4", "delegation child inherits parent model");
   assertEqual(inheritedRuntime.selectedEffort, "medium", "delegation child inherits parent effort");
-  assertEqual(inheritedRuntime.selectedCodexPermission, "full-auto", "delegation child inherits parent Codex permission");
+  assertEqual(inheritedRuntime.selectedProviderPermissionId, "full-auto", "delegation child inherits parent provider permission");
   assertEqual(inheritedRuntime.inheritSkipOpenwolf, true, "delegation child inherits parent OpenWolf skip preference");
 
   const openaiChild = buildDelegationChildProviderTurnInput({
@@ -782,7 +906,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     prompt: "do the task",
     selectedModel: "gpt-5.5",
     selectedEffort: "high",
-    selectedCodexPermission: "workspace",
+    selectedProviderPermissionId: "workspace",
     inheritSkipOpenwolf: false,
     mcpEnv,
   });
@@ -797,6 +921,25 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
   assert(!Object.prototype.hasOwnProperty.call(openaiChild, "noSessionPersistence"), "delegation OpenAI child omits Claude persistence flag");
   assertNoUndefinedOwnValues(openaiChild as unknown as Record<string, unknown>, "openaiChild");
 
+  const cursorChild = buildDelegationChildProviderTurnInput({
+    provider: "cursor",
+    sessionId: "child-cursor",
+    cwd: "/repo",
+    prompt: "do the task",
+    selectedModel: "auto",
+    selectedEffort: "default",
+    selectedProviderPermissionId: "bypass_all",
+    inheritSkipOpenwolf: false,
+    mcpEnv,
+  });
+
+  assertEqual(cursorChild.provider, "cursor", "delegation Cursor child keeps provider");
+  assertEqual(cursorChild.skipOpenwolf, true, "delegation Cursor child skips OpenWolf bootstrap");
+  assertEqual(cursorChild.skipGitRepoCheck, true, "delegation Cursor child skips git repo check");
+  assertEqual(cursorChild.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Cursor child receives MCP env");
+  assert(!Object.prototype.hasOwnProperty.call(cursorChild, "mcpConfig"), "delegation Cursor child does not receive Claude MCP config");
+  assertNoUndefinedOwnValues(cursorChild as unknown as Record<string, unknown>, "cursorChild");
+
   const anthropicChild = buildDelegationChildProviderTurnInput({
     provider: "anthropic",
     sessionId: "child-anthropic",
@@ -804,20 +947,87 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     prompt: "do the task",
     selectedModel: "sonnet",
     selectedEffort: "high",
-    selectedCodexPermission: "workspace",
+    selectedProviderPermissionId: "workspace",
     inheritSkipOpenwolf: true,
-    mcpConfigPath: "/tmp/t64-mcp.json",
+    mcpEnv,
   });
 
   assertEqual(anthropicChild.provider, "anthropic", "delegation Anthropic child keeps provider");
   assertEqual(anthropicChild.skipOpenwolf, true, "delegation Anthropic child inherits OpenWolf preference");
-  assertEqual(anthropicChild.mcpConfig, "/tmp/t64-mcp.json", "delegation Anthropic child receives MCP config path");
+  assertEqual(anthropicChild.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Anthropic child carries MCP env for runtime temp config");
   assertEqual(anthropicChild.noSessionPersistence, true, "delegation Anthropic child disables session persistence");
-  assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "mcpEnv"), "delegation Anthropic child omits Codex MCP env");
+  assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "mcpConfig"), "delegation Anthropic child defers temp MCP config creation to runtime prep");
   assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "skipGitRepoCheck"), "delegation Anthropic child omits Codex git flag");
   assertNoUndefinedOwnValues(anthropicChild as unknown as Record<string, unknown>, "anthropicChild");
 
   return { name: "delegation child provider turn fixtures", ok: true };
+}
+
+export function verifyDelegationWorkflowFixtures(): VerificationResult {
+  assertEqual(parseDelegateCommand("/delegate split this safely"), "split this safely", "/delegate command parser extracts the user goal");
+  assertEqual(parseDelegateCommand("/delegate   "), null, "empty /delegate command does not build a planner turn");
+
+  const openAiPlan = buildDelegationPlanRequest({
+    provider: "openai",
+    userGoal: "split frontend and backend work",
+  });
+  assertEqual(openAiPlan.displayText, "/delegate split frontend and backend work", "delegation plan keeps user-facing command text");
+  assert(openAiPlan.providerPrompt.includes("StartDelegation"), "delegation planner prompt asks for the MCP StartDelegation tool");
+  assert(openAiPlan.providerPrompt.includes("<T64_START_DELEGATION>"), "delegation planner prompt includes provider-neutral fallback tag");
+  assert(!Object.prototype.hasOwnProperty.call(openAiPlan, "permissionOverride"), "OpenAI delegation planner does not invent an override");
+
+  const cursorPlan = buildDelegationPlanRequest({
+    provider: "cursor",
+    userGoal: "split the work",
+  });
+  assertEqual(cursorPlan.permissionOverride, "bypass_all", "Cursor delegation planner permission comes from manifest policy");
+
+  const explicitPlan = buildDelegationPlanRequest({
+    provider: "cursor",
+    userGoal: "plan only",
+    permissionOverride: "plan",
+  });
+  assertEqual(explicitPlan.permissionOverride, "plan", "explicit delegation permission override wins over manifest default");
+
+  const parsedTool = parseDelegationStartFromMessage({
+    content: "",
+    toolCalls: [{
+      id: "tool-1",
+      name: "terminal-64-StartDelegation",
+      input: {
+        context: "shared context",
+        tasks: [{ description: "task one" }, { description: "task two" }],
+      },
+    }],
+  });
+  assert(parsedTool, "StartDelegation tool call parses into a delegation plan");
+  assertEqual(parsedTool.tasks.length, 2, "StartDelegation parser keeps task objects");
+
+  const parsedFallback = parseDelegationStartFromMessage({
+    content: `<T64_START_DELEGATION>{"context":"fallback context","tasks":["task one","task two"]}</T64_START_DELEGATION>`,
+  });
+  assertEqual(parsedFallback?.context, "fallback context", "fallback JSON tag parses shared context");
+  assertEqual(parsedFallback?.tasks[0]?.description, "task one", "fallback JSON parser accepts string tasks");
+
+  const parsedLegacy = parseDelegationStartFromMessage({
+    content: "[DELEGATION_START]\n[CONTEXT] legacy context\n[TASK] task one\n[TASK] task two\n[DELEGATION_END]",
+  });
+  assertEqual(parsedLegacy?.context, "legacy context", "legacy delegation block remains supported");
+
+  const childSpawn = buildDelegationChildSpawnPlan({
+    sharedContext: "shared",
+    taskDescription: "write tests",
+    taskIndex: 1,
+    taskCount: 3,
+    teamChatEnabled: true,
+  });
+  assertEqual(childSpawn.agentLabel, "Agent 2", "child spawn helper builds deterministic agent label");
+  assert(childSpawn.initialPrompt.includes("read_team"), "child spawn prompt includes team chat instructions when available");
+
+  assertNoUndefinedOwnValues(openAiPlan as unknown as Record<string, unknown>, "openAiPlan");
+  assertNoUndefinedOwnValues(cursorPlan as unknown as Record<string, unknown>, "cursorPlan");
+
+  return { name: "delegation workflow fixtures", ok: true };
 }
 
 export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
@@ -838,6 +1048,10 @@ export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
       permission_mode: "default",
     },
   } satisfies ProviderCreateRequest<"anthropic">;
+  const cursorCreate = {
+    provider: "cursor",
+    req: buildCursorRequest(providerInput({ provider: "cursor" })),
+  } satisfies ProviderCreateRequest<"cursor">;
 
   // @ts-expect-error provider ids are intentionally closed until a runtime is implemented.
   const unsupportedProvider = { provider: "opencode", req: openaiCreate.req } satisfies ProviderCreateRequest;
@@ -852,6 +1066,7 @@ export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
   assertEqual(openaiCreate.provider, "openai", "generic provider_create carries OpenAI discriminator");
   assertEqual(openaiSend.req.thread_id, "thread-1", "generic provider_send carries OpenAI thread id");
   assertEqual(anthropicCreate.req.permission_mode, "default", "generic provider_create carries Anthropic request shape");
+  assertEqual(cursorCreate.req.permission_mode, "default", "generic provider_create carries Cursor request shape");
 
   return { name: "generic provider IPC request typing fixtures", ok: true };
 }
@@ -862,6 +1077,7 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
   const currentProviderRegistry = {
     anthropic: getProviderManifest("anthropic"),
     openai: getProviderManifest("openai"),
+    cursor: getProviderManifest("cursor"),
   };
   // @ts-expect-error adding a ProviderId must also add a manifest entry.
   const missingFutureManifestRegistry: Record<FutureProviderId, FutureProviderManifest> = currentProviderRegistry;
@@ -882,6 +1098,11 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
     "future stub manifest starts with unsupported capabilities fail-closed",
   );
   assertEqual(
+    futureProviderRegistry.opencode.history.source,
+    "none",
+    "future stub manifest starts with explicit no-history source",
+  );
+  assertEqual(
     futureProviderRegistry.opencode.delegation.mcpTransport,
     "env",
     "future stub manifest declares delegation MCP transport",
@@ -890,6 +1111,7 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
   const currentRuntimeRegistry = {
     anthropic: getProviderRuntime("anthropic"),
     openai: getProviderRuntime("openai"),
+    cursor: getProviderRuntime("cursor"),
   };
   // @ts-expect-error adding a ProviderId must also add a runtime entry.
   const missingFutureRuntimeRegistry: Record<FutureProviderId, FutureProviderRuntime> = currentRuntimeRegistry;
@@ -913,6 +1135,7 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
     selectedEffort: null,
     seedTranscript: null,
     providerMetadata: {},
+    providerPermissions: {},
   } satisfies ProviderSessionState;
   void currentProviderStateCannotUseOpenCode;
 
@@ -927,6 +1150,9 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
         threadId: null,
         permissionProfile: "stub",
       },
+    },
+    providerPermissions: {
+      opencode: "stub",
     },
   } satisfies FutureProviderSessionState;
   assertEqual(
@@ -1029,6 +1255,43 @@ export function verifyProviderEventNormalizationFixtures(): VerificationResult {
   assert(claudeResult, "Claude tool_result normalizes into a provider tool result");
   assertEqual(claudeResult.result, "done", "Claude text result extracts content");
 
+  const cursorDecoder = new CursorLiveEventDecoder();
+  const cursorToolEvents = cursorDecoder.decode("cursor-session", JSON.stringify({
+    type: "tool_call",
+    subtype: "started",
+    call_id: "cursor-tool",
+    tool_call: {
+      mcpToolCall: {
+        args: {
+          name: "terminal-64-StartDelegation",
+          args: {
+            context: "shared context",
+            tasks: [{ description: "task one" }, { description: "task two" }],
+          },
+          toolName: "StartDelegation",
+        },
+      },
+    },
+  }));
+  const cursorToolEvent = cursorToolEvents.find((event) => event.kind === "tool_call");
+  assert(cursorToolEvent?.kind === "tool_call", "Cursor MCP tool_call normalizes into a provider tool call");
+  assertEqual(cursorToolEvent.toolCall.name, "terminal-64-StartDelegation", "Cursor MCP tool name keeps provider-prefixed name");
+  assertEqual(cursorToolEvent.toolCall.input.context, "shared context", "Cursor MCP nested args unwrap into provider input");
+  assert(Array.isArray(cursorToolEvent.toolCall.input.tasks), "Cursor MCP nested task array is visible to delegation parser");
+
+  const cursorMcpStatus = cursorDecoder.decode("cursor-session", JSON.stringify({
+    type: "mcp_status",
+    servers: [{
+      name: "terminal-64",
+      status: "ready",
+      transport: "stdio",
+      tools: [{ name: "StartDelegation" }],
+    }],
+  }));
+  const cursorMcpEvent = cursorMcpStatus.find((event) => event.kind === "mcp_status");
+  assert(cursorMcpEvent?.kind === "mcp_status", "Cursor synthetic MCP status normalizes into provider event");
+  assertEqual(cursorMcpEvent.servers.length, 1, "Cursor MCP status keeps server list");
+
   return { name: "provider event/tool normalization fixtures", ok: true };
 }
 
@@ -1040,6 +1303,7 @@ export function runProviderModularityVerification(): VerificationResult[] {
     verifyProviderPermissionHelperFixtures(),
     verifyProviderMetadataHelperFixtures(),
     verifyDelegationChildSpawnFixtures(),
+    verifyDelegationWorkflowFixtures(),
     verifyProviderIpcRequestTypingFixtures(),
     verifyFutureProviderStubFixtures(),
     verifyCodexPermissionFixtures(),

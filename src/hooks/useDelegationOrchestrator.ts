@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import {
   getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
   useClaudeStore,
   type ClaudeSession,
@@ -78,7 +79,9 @@ function providerTurnForSession({
       threadId: openaiMetadata?.codexThreadId ?? null,
       selectedModel: providerState.selectedModel,
       selectedEffort: providerState.selectedEffort,
-      selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? defaultCodexPermission,
+      providerPermissionId: providerState.providerPermissions[providerState.provider]
+        ?? defaultCodexPermission
+        ?? getProviderPermissionId(providerState, providerState.provider),
     permissionMode,
     skipOpenwolf: session.skipOpenwolf,
     seedTranscript: providerState.seedTranscript,

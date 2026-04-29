@@ -14,7 +14,10 @@ import "./SettingsPanel.css";
 import { FONT_OPTIONS, fontStack } from "../../lib/fonts";
 import type { ThemeDefinition } from "../../lib/types";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useClaudeStore, STORAGE_KEY as CLAUDE_STORAGE_KEY } from "../../stores/claudeStore";
+import {
+  PROVIDER_SESSIONS_STORAGE_KEY,
+  useProviderSessionStore,
+} from "../../stores/providerSessionStore";
 import { useVoiceStore } from "../../stores/voiceStore";
 import { useWidgetMetricsStore, type WidgetMetrics } from "../../stores/widgetMetricsStore";
 import { usePerformanceStore, type PerformanceDebugEvent } from "../../stores/performanceStore";
@@ -469,7 +472,7 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const [wolfDaemonRunning, setWolfDaemonRunning] = useState(false);
   const [wolfDaemonLoading, setWolfDaemonLoading] = useState(false);
 
-  const wolfCwd = useClaudeStore((s) => {
+  const wolfCwd = useProviderSessionStore((s) => {
     for (const sid in s.sessions) {
       const sess = s.sessions[sid];
       if (sess?.cwd) return sess.cwd;
@@ -1127,12 +1130,12 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                     // Canvas `t.title` is a stale snapshot; read the live name from the session store.
                     let savedSessions: Record<string, { name?: string; cwd?: string }> = {};
                     try {
-                      const raw = localStorage.getItem(CLAUDE_STORAGE_KEY);
+                      const raw = localStorage.getItem(PROVIDER_SESSIONS_STORAGE_KEY);
                       if (raw) savedSessions = JSON.parse(raw);
                     } catch (err) {
                       console.warn("[discord] Failed to read session store:", err);
                     }
-                    const providerSessions = useClaudeStore.getState().sessions;
+                    const providerSessions = useProviderSessionStore.getState().sessions;
                     for (const t of terminals) {
                       if (t.panelType !== "claude") continue;
                       const liveName = providerSessions[t.terminalId]?.name;

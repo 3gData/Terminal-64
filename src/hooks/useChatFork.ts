@@ -1,6 +1,11 @@
 import { useCallback } from "react";
 import { useCanvasStore } from "../stores/canvasStore";
-import { getOpenAiProviderSessionMetadata, resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
+import {
+  getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
+  resolveSessionProviderState,
+  useClaudeStore,
+} from "../stores/claudeStore";
 import { prepareProviderFork, providerHistorySupports } from "../lib/providerRuntime";
 import type { ProviderForkInput, ProviderForkResult } from "../contracts/providerRuntime";
 
@@ -45,7 +50,7 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     store.createSession(newPanel.terminalId, undefined, false, undefined, effectiveCwd, provider, true);
     store.setSelectedModel(newPanel.terminalId, providerState.selectedModel);
     store.setSelectedEffort(newPanel.terminalId, providerState.selectedEffort);
-    store.setSelectedCodexPermission(newPanel.terminalId, openaiMetadata?.selectedCodexPermission ?? null);
+    store.setProviderPermission(newPanel.terminalId, provider, getProviderPermissionId(providerState, provider));
 
     let forkResult: ProviderForkResult = {};
     if (forkedMessages.length > 0) {

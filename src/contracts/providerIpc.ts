@@ -105,3 +105,27 @@ export interface SendCodexPromptRequest {
   mcp_env?: Record<string, string>;
   collaboration_mode?: "plan" | "default";
 }
+
+export interface CreateCursorRequest {
+  session_id: string;
+  thread_id?: string;
+  cwd: string;
+  prompt: string;
+  model?: string;
+  mode?: "ask" | "plan";
+  permission_mode?: string;
+  force?: boolean;
+  mcp_env?: Record<string, string>;
+}
+
+export interface SendCursorPromptRequest {
+  session_id: string;
+  thread_id?: string;
+  cwd: string;
+  prompt: string;
+  model?: string;
+  mode?: "ask" | "plan";
+  permission_mode?: string;
+  force?: boolean;
+  mcp_env?: Record<string, string>;
+}

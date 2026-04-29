@@ -1,5 +1,5 @@
 import type { ChatMessage, PermissionMode } from "../lib/types";
-import type { ProviderId } from "../lib/providers";
+import type { ProviderHistorySource, ProviderId } from "../lib/providers";
 
 export interface ProviderTurnInput {
   provider: ProviderId;
@@ -10,6 +10,8 @@ export interface ProviderTurnInput {
   threadId?: string | null;
   selectedModel?: string | null | undefined;
   selectedEffort?: string | null | undefined;
+  providerPermissionId?: string | null | undefined;
+  /** @deprecated Use providerPermissionId. */
   selectedCodexPermission?: string | null | undefined;
   permissionMode?: PermissionMode | undefined;
   permissionOverride?: PermissionMode | undefined;
@@ -120,6 +122,7 @@ export type ProviderHydrateResult =
   };
 
 export interface ProviderHistoryRuntime {
+  source: ProviderHistorySource;
   capabilities: ProviderHistoryCapabilities;
   rewind?: (input: ProviderHistoryTruncateInput) => Promise<ProviderHistoryTruncateResult>;
   fork?: (input: ProviderForkInput) => Promise<ProviderForkResult>;
@@ -129,6 +132,7 @@ export interface ProviderHistoryRuntime {
 
 export interface ProviderRuntime {
   provider: ProviderId;
+  prepareTurn?: (input: ProviderTurnInput) => Promise<ProviderTurnInput> | ProviderTurnInput;
   create: (input: ProviderTurnInput) => Promise<ProviderTurnResult>;
   send: (input: ProviderTurnInput) => Promise<ProviderTurnResult>;
   cancel: (sessionId: string) => Promise<void>;

@@ -1,8 +1,7 @@
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
 import type { ProviderSessionState } from "../stores/claudeStore";
-import { getOpenAiProviderSessionMetadata, resolveSessionProviderState } from "../stores/claudeStore";
+import { getProviderPermissionId, resolveSessionProviderState } from "../stores/claudeStore";
 import type { ChatMessage, DelegationChildRuntimeMetadata } from "./types";
-import { createMcpConfigFile } from "./tauriApi";
 import { getProviderDelegationPolicy, getProviderManifest, type ProviderId } from "./providers";
 import type { DelegationMcpTransport } from "./providers";
 
@@ -15,7 +14,6 @@ interface DelegationParentSessionSource {
   seedTranscript?: ChatMessage[] | null | undefined;
   selectedModel?: string | null | undefined;
   selectedEffort?: string | null | undefined;
-  selectedCodexPermission?: string | null | undefined;
   skipOpenwolf?: boolean | undefined;
 }
 
@@ -23,7 +21,7 @@ export interface DelegationChildRuntimeSettings {
   provider: ProviderId;
   selectedModel: string;
   selectedEffort: string;
-  selectedCodexPermission: string;
+  selectedProviderPermissionId: string;
   inheritSkipOpenwolf: boolean;
 }
 
@@ -32,7 +30,7 @@ export interface ResolveDelegationChildRuntimeSettingsOptions {
   selectedProvider: ProviderId;
   selectedModel: string;
   selectedEffort: string;
-  selectedCodexPermission: string;
+  selectedProviderPermissionId: string;
 }
 
 export interface DelegationMcpConnection {
@@ -66,19 +64,18 @@ export function resolveDelegationChildRuntimeSettings({
   selectedProvider,
   selectedModel,
   selectedEffort,
-  selectedCodexPermission,
+  selectedProviderPermissionId,
 }: ResolveDelegationChildRuntimeSettingsOptions): DelegationChildRuntimeSettings {
   const parentProviderState = resolveSessionProviderState(parentSession);
-  const parentOpenAiMetadata = getOpenAiProviderSessionMetadata(parentProviderState);
   const provider = parentSession ? parentProviderState.provider : selectedProvider;
 
   return {
     provider,
     selectedModel: parentProviderState.selectedModel ?? selectedModel,
     selectedEffort: parentProviderState.selectedEffort ?? selectedEffort,
-    selectedCodexPermission: parentOpenAiMetadata?.selectedCodexPermission
-      ?? selectedCodexPermission
-      ?? getProviderManifest("openai").defaultPermission,
+    selectedProviderPermissionId: parentSession
+      ? getProviderPermissionId(parentProviderState, provider)
+      : selectedProviderPermissionId ?? getProviderManifest(provider).defaultPermission,
     inheritSkipOpenwolf: !!parentSession?.skipOpenwolf,
   };
 }
@@ -105,7 +102,7 @@ export function buildDelegationChildProviderTurnInput({
   prompt,
   selectedModel,
   selectedEffort,
-  selectedCodexPermission,
+  selectedProviderPermissionId,
   inheritSkipOpenwolf,
   mcpConfigPath,
   mcpEnv,
@@ -119,11 +116,11 @@ export function buildDelegationChildProviderTurnInput({
     started: false,
     selectedModel,
     selectedEffort,
-    selectedCodexPermission,
+    providerPermissionId: selectedProviderPermissionId,
     permissionOverride: "bypass_all",
     skipOpenwolf: policy.skipOpenwolf === "always" ? true : inheritSkipOpenwolf,
     ...(policy.mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
-    ...(policy.mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
+    ...((policy.mcpTransport === "env" || policy.mcpTransport === "temp-config") && mcpEnv ? { mcpEnv } : {}),
     ...(policy.noSessionPersistence ? { noSessionPersistence: true } : {}),
     ...(policy.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
   };
@@ -139,7 +136,7 @@ export function buildDelegationChildRuntimeMetadata(
     model: settings.selectedModel,
     effort: settings.selectedEffort,
     permissionPreset: policy.childRuntime.permissionPreset === "selected"
-      ? settings.selectedCodexPermission
+      ? settings.selectedProviderPermissionId
       : "bypass_all",
     cwd,
     cleanupState: "active",
@@ -151,20 +148,9 @@ export async function prepareDelegationChildProviderTurnInput({
   ...turnOptions
 }: PrepareDelegationChildTurnOptions): Promise<ProviderTurnInput> {
   const mcpEnv = buildDelegationMcpEnv(mcp);
-  let mcpConfigPath = "";
-
-  if (getDelegationMcpTransport(turnOptions.provider) === "temp-config" && mcpEnv) {
-    mcpConfigPath = await createMcpConfigFile(
-      mcp.delegationPort,
-      mcp.delegationSecret,
-      mcp.groupId,
-      mcp.agentLabel,
-    );
-  }
 
   return buildDelegationChildProviderTurnInput({
     ...turnOptions,
-    ...(mcpConfigPath ? { mcpConfigPath } : {}),
     ...(mcpEnv ? { mcpEnv } : {}),
   });
 }

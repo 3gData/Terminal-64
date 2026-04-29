@@ -273,6 +273,7 @@ export const ${runtimeExport}: ProviderRuntime = {
     return providerClose("${providerId}", sessionId);
   },
   history: {
+    source: "none",
     capabilities: {
       hydrate: false,
       fork: false,
@@ -633,7 +634,16 @@ ${providerId}: {
     },
   },
   permissionControl: {
-    persistence: "provider-metadata",
+    persistence: "provider-state",
+  },
+  history: {
+    source: "none",
+    hydrateFailureLabel: "${label}",
+  },
+  controls: {
+    model: { id: "model", label: "Model" },
+    effort: { id: "effort", label: "Effort" },
+    permission: { id: "permission", label: "Permissions", inputSuffix: "permissions" },
   },
   models: ${providerId.toUpperCase()}_MODELS,
   efforts: ${providerId.toUpperCase()}_EFFORTS,
@@ -658,7 +668,9 @@ const PROVIDER_RUNTIMES = {
 } satisfies Record<ProviderId, ProviderRuntime>;
 \`\`\`
 
-The generated runtime starts with unsupported history capabilities. Flip each
+The generated manifest/runtime starts with \`history.source: "none"\` and
+unsupported history capabilities. Change the source only when the provider owns
+durable history or intentionally stores a local transcript, and flip each
 capability only when the frontend runtime and backend adapter both implement
 that operation.
 

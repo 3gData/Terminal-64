@@ -1,7 +1,7 @@
 name: Release
 
 # Builds and publishes Terminal 64 installers for macOS (universal), Linux (x86_64), and Windows (x86_64).
-# Triggers on a semver tag push (v*.*.*) or manual dispatch.
+# Triggers on a v-prefixed tag push or manual dispatch.
 #
 # App binaries remain OS-code-signing unsigned until Apple/Azure signing is configured.
 # Tauri updater artifacts are signed with Tauri's mandatory free updater key.
@@ -9,20 +9,68 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.1.0). Required for manual runs; a draft release is created if it does not exist."
-        required: true
+        description: "Optional tag to build (e.g. v20 or v0.1.0). Blank resolves to v<git commit count>."
+        required: false
         type: string
 
 permissions:
   contents: write
 
 jobs:
+  resolve-tag:
+    name: Resolve Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag and app version
+        id: resolve
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            count="$(git rev-list --count HEAD)"
+            tag="v${count}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "Release tag must look like v20, v1.2, or v1.2.3; got: $tag" >&2
+            exit 1
+          fi
+
+          raw="${tag#v}"
+          IFS='.' read -r major minor patch extra <<< "$raw"
+          if [[ -n "${extra:-}" ]]; then
+            echo "Release tag has too many version components: $tag" >&2
+            exit 1
+          elif [[ -z "${minor:-}" ]]; then
+            version="0.0.${major}"
+          elif [[ -z "${patch:-}" ]]; then
+            version="${major}.${minor}.0"
+          else
+            version="${major}.${minor}.${patch}"
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag ${tag} with app version ${version}"
+
   build:
     name: Build (${{ matrix.platform.name }})
+    needs: resolve-tag
     strategy:
       fail-fast: false
       matrix:
@@ -78,6 +126,25 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Apply release version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.resolve-tag.outputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const version = process.env.RELEASE_VERSION;
+          const files = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json"];
+          for (const file of files) {
+            const json = JSON.parse(fs.readFileSync(file, "utf8"));
+            json.version = version;
+            if (file === "package-lock.json" && json.packages?.[""]) {
+              json.packages[""].version = version;
+            }
+            fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
+          }
+          NODE
+
       - name: Install npm dependencies
         run: npm ci
 
@@ -111,8 +178,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseName: "Terminal 64 ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          tagName: ${{ needs.resolve-tag.outputs.tag }}
+          releaseName: "Terminal 64 ${{ needs.resolve-tag.outputs.tag }}"
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.platform.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
@@ -149,7 +216,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [resolve-tag, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -164,8 +231,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          name: "Terminal 64 ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          name: "Terminal 64 ${{ needs.resolve-tag.outputs.tag }}"
           draft: true
           prerelease: false
           generate_release_notes: true

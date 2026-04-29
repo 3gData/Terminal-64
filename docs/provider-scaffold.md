@@ -44,15 +44,18 @@ contains snippets for `src/lib/providers.ts`, `src/lib/providerRuntime.ts`,
 7. Extend `src/lib/providerModularity.verification.ts` so `tsc --noEmit`
    proves the new provider has manifest/runtime/IPC/metadata coverage.
 
-Keep history capabilities disabled until both the frontend runtime and backend
-adapter implement hydrate/fork/rewind/delete. Generic history IPC returns
-structured `unsupported` results, so a new provider can start with create/send
-without weakening Claude or Codex behavior.
+Keep `history.source` set to `none` and history capabilities disabled until
+the provider has a durable transcript source or intentionally uses local
+transcript persistence. Generic history IPC returns structured `unsupported`
+results, so a new provider can start with create/send without weakening Claude
+or Codex behavior.
 
 ## Provider Ownership Rules
 
 - UI labels, model options, effort options, permissions, feature gates, and
   delegation policy belong in the provider manifest.
+- Transcript ownership belongs in manifest/runtime `history.source`; the store
+  should only apply generic source policies like local transcript persistence.
 - Create/send request shaping belongs in `src/lib/providerRuntimes/<provider>.ts`.
 - Raw provider event drift belongs in `src/lib/<provider>EventDecoder.ts`;
   backend providers should emit the shared `provider-event` envelope and keep

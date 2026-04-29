@@ -6,12 +6,12 @@ import Canvas from "./components/canvas/Canvas";
 import CommandPalette from "./components/command-palette/CommandPalette";
 import SettingsPanel from "./components/settings/SettingsPanel";
 import PopOutTerminal from "./components/canvas/PopOutTerminal";
-import { ProviderSessionDialog } from "./components/canvas/ClaudeDialog";
+import { ProviderSessionDialog } from "./components/canvas/ProviderSessionDialog";
 import WidgetDialog from "./components/widget/WidgetDialog";
 import SkillDialog from "./components/skill/SkillDialog";
 import { useTheme } from "./hooks/useTheme";
 import { useKeybindings } from "./hooks/useKeybindings";
-import { useProviderEvents } from "./hooks/useClaudeEvents";
+import { useProviderEvents } from "./hooks/useProviderEvents";
 import { useDelegationOrchestrator } from "./hooks/useDelegationOrchestrator";
 import { usePartyMode } from "./hooks/usePartyMode";
 import { useVoiceControl } from "./hooks/useVoiceControl";
@@ -31,7 +31,7 @@ import {
   resolveSessionProviderState,
   useProviderSessionStore,
   flushSave as flushProviderSessionSave,
-} from "./stores/claudeStore";
+} from "./stores/providerSessionStore";
 import {
   checkForUpdate,
   downloadAndInstallUpdate,

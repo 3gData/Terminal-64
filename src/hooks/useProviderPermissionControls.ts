@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import {
   getDefaultProviderPermissionId,
   getNextProviderPermissionId,
@@ -7,19 +7,16 @@ import {
   permissionModeFromProviderPermission,
 } from "../lib/providerPermissions";
 import {
-  getProviderManifest,
   getProviderPermissionControlPolicy,
-  isClaudePermissionId,
   type PermissionOption,
   type ProviderId,
 } from "../lib/providers";
 import type { PermissionMode } from "../lib/types";
 import {
-  getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
   useClaudeStore,
 } from "../stores/claudeStore";
-import { useSettingsStore } from "../stores/settingsStore";
 
 export interface ProviderPermissionControls {
   permissionId: string;
@@ -35,19 +32,6 @@ interface UseProviderPermissionControlsArgs {
   skipPermissions: boolean;
 }
 
-function initialSettingsPermissionId(skipPermissions: boolean): PermissionMode {
-  const manifest = getProviderManifest("anthropic");
-  const policy = getProviderPermissionControlPolicy("anthropic");
-  if (skipPermissions && policy.skipPermissionId && isClaudePermissionId(policy.skipPermissionId)) {
-    return policy.skipPermissionId;
-  }
-
-  const settings = useSettingsStore.getState();
-  const candidate = settings.claudeDefaultPermMode ?? settings.claudePermMode ?? manifest.defaultPermission;
-  if (isClaudePermissionId(candidate)) return candidate;
-  return isClaudePermissionId(manifest.defaultPermission) ? manifest.defaultPermission : "default";
-}
-
 function coerceProviderPermissionId(provider: ProviderId, permissionId: string | null | undefined): string {
   return isProviderPermissionId(provider, permissionId ?? "")
     ? permissionId!
@@ -59,45 +43,33 @@ export function useProviderPermissionControls({
   provider,
   skipPermissions,
 }: UseProviderPermissionControlsArgs): ProviderPermissionControls {
-  const [settingsPermissionId, setSettingsPermissionId] = useState<PermissionMode>(() =>
-    initialSettingsPermissionId(skipPermissions),
-  );
-  const providerMetadataPermissionId = useClaudeStore((state) => {
+  const providerPermissionId = useClaudeStore((state) => {
     const providerState = resolveSessionProviderState(state.sessions[sessionId]);
-    return getOpenAiProviderSessionMetadata(providerState)?.selectedCodexPermission ?? null;
+    return getProviderPermissionId(providerState, provider);
   });
 
-  const permissionId = useMemo(() => {
+  useEffect(() => {
     const policy = getProviderPermissionControlPolicy(provider);
-    if (policy.persistence === "settings") {
-      return coerceProviderPermissionId(provider, settingsPermissionId);
+    if (skipPermissions && policy.skipPermissionId && isProviderPermissionId(provider, policy.skipPermissionId)) {
+      useClaudeStore.getState().setProviderPermission(sessionId, provider, policy.skipPermissionId);
     }
-    return coerceProviderPermissionId(provider, providerMetadataPermissionId);
-  }, [provider, providerMetadataPermissionId, settingsPermissionId]);
+  }, [provider, sessionId, skipPermissions]);
+
+  const permissionId = useMemo(
+    () => coerceProviderPermissionId(provider, providerPermissionId),
+    [provider, providerPermissionId],
+  );
 
   const permission = useMemo(
     () => getProviderPermissionOption(provider, permissionId),
     [provider, permissionId],
   );
-  const permissionMode = permissionModeFromProviderPermission(permissionId, settingsPermissionId);
+  const permissionMode = permissionModeFromProviderPermission(permissionId);
 
   const selectPermissionId = useCallback(
-    (nextPermissionId: string, options?: { persist?: boolean }) => {
+    (nextPermissionId: string, _options?: { persist?: boolean }) => {
       if (!isProviderPermissionId(provider, nextPermissionId)) return false;
-      const policy = getProviderPermissionControlPolicy(provider);
-      if (policy.persistence === "settings") {
-        const nextMode = permissionModeFromProviderPermission(nextPermissionId);
-        setSettingsPermissionId(nextMode);
-        if (options?.persist) {
-          const settings = useSettingsStore.getState();
-          if (!settings.claudeDefaultPermMode) {
-            settings.set({ claudePermMode: nextMode });
-          }
-        }
-        return true;
-      }
-
-      useClaudeStore.getState().setSelectedCodexPermission(sessionId, nextPermissionId);
+      useClaudeStore.getState().setProviderPermission(sessionId, provider, nextPermissionId);
       return true;
     },
     [provider, sessionId],

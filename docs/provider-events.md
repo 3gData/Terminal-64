@@ -10,6 +10,10 @@ should consume normalized events and tool calls.
 - Provider decoders translate raw shapes into `NormalizedProviderEvent` and
   `ProviderToolCall`/`ProviderToolResult` objects from
   `src/contracts/providerEvents.ts`.
+- `src/lib/providerEventSemantics.ts` projects normalized provider events into
+  provider-neutral semantic events for UI/store side effects: MCP status,
+  hidden tool filtering, plan/task updates, pending questions, modified files,
+  and delegation requests.
 - Zustand store actions receive only normalized chat/tool shapes.
 - React tool-card UI reads normalized tool names and normalized input helpers
   such as `getProviderToolFilePath`, `getProviderToolChanges`, and
@@ -46,3 +50,12 @@ onto the existing display names instead of introducing new UI-only branches.
 Provider-specific raw field drift belongs inside decoders. New providers should
 not require `ChatMessage`, row construction, or store actions to know their IPC
 schema.
+
+## Semantic Events
+
+Provider-neutral side effects are derived after raw decoding and before React
+store mutation. `useProviderEvents` should handle semantic events instead of
+re-parsing provider tool input directly. This keeps compatibility with legacy
+Claude-shaped tool names while giving future providers a stable handoff for
+delegation requests, plan/task state, MCP menus, question prompts, file-change
+tracking, and internal tool visibility.

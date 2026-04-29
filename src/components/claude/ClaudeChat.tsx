@@ -5,6 +5,7 @@ import {
   queuedPromptDisplayText,
   queuedPromptProviderPrompt,
   getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
   selectSessionProvider,
   useProviderSessionStore,
@@ -17,6 +18,12 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { listSlashCommands, resolvePermission, readFile, writeFile, listMcpServers, restoreCheckpoint, cleanupCheckpoints, deleteFiles, shellExec, filterUntrackedFiles, setT64DelegationEnv, getDelegationPort, getDelegationSecret, getAppDir, createMcpConfigFile, resolveSkillPrompt } from "../../lib/tauriApi";
 import type { SlashCommand, PermissionMode, McpServer, HookEvent } from "../../lib/types";
 import { getProviderManifest, providerSupports, type ProviderId } from "../../lib/providers";
+import {
+  buildDelegationPlanRequest,
+  parseDelegateCommand,
+  parseDelegationStartFromMessage,
+} from "../../lib/delegationWorkflow";
+import { subscribeProviderDelegationRequests } from "../../lib/providerEventSemantics";
 import { rewritePromptStream } from "../../lib/ai";
 import { toolHeader } from "./ChatMessage";
 import FileTree from "./FileTree";
@@ -132,7 +139,6 @@ function providerTurnForSession({
   disallowedTools?: string;
 }): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
-  const manifest = getProviderManifest(providerState.provider);
   const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
   const input: ProviderTurnInput = {
     provider: providerState.provider,
@@ -143,7 +149,7 @@ function providerTurnForSession({
     threadId: openAiMetadata?.codexThreadId ?? null,
     selectedModel: selectedModel ?? providerState.selectedModel,
     selectedEffort: selectedEffort ?? providerState.selectedEffort,
-    selectedCodexPermission: openAiMetadata?.selectedCodexPermission ?? manifest.defaultPermission,
+    providerPermissionId: getProviderPermissionId(providerState, providerState.provider),
     permissionMode,
     skipOpenwolf: session.skipOpenwolf,
     seedTranscript: providerState.seedTranscript,
@@ -486,10 +492,14 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
   const providerDefaults = getProviderManifest(selectedProvider);
   const globalModel = useSettingsStore.getState().claudeModel;
   const globalEffort = useSettingsStore.getState().claudeEffort;
-  const selectedModel = persistedSelectedModel
-    ?? (providerDefaults.models.some((m) => m.id === globalModel) ? globalModel : providerDefaults.defaultModel);
-  const selectedEffort = persistedSelectedEffort
-    ?? (providerDefaults.efforts.some((e) => e.id === globalEffort) ? globalEffort : providerDefaults.defaultEffort);
+  const selectedModel = providerDefaults.controls.model
+    ? persistedSelectedModel
+      ?? (providerDefaults.models.some((m) => m.id === globalModel) ? globalModel : providerDefaults.defaultModel)
+    : "";
+  const selectedEffort = providerDefaults.controls.effort
+    ? persistedSelectedEffort
+      ?? (providerDefaults.efforts.some((e) => e.id === globalEffort) ? globalEffort : providerDefaults.defaultEffort)
+    : "";
   const setSelectedModel = useCallback((id: string) => {
     useProviderSessionStore.getState().setSelectedModel(sessionId, id);
   }, [sessionId]);
@@ -584,10 +594,10 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
   // would carry an invalid model string.
   useEffect(() => {
     const cfg = getProviderManifest(selectedProvider);
-    if (!cfg.models.find((m) => m.id === selectedModel)) {
+    if (cfg.controls.model && !cfg.models.find((m) => m.id === selectedModel)) {
       setSelectedModel(cfg.defaultModel);
     }
-    if (!cfg.efforts.find((e) => e.id === selectedEffort)) {
+    if (cfg.controls.effort && !cfg.efforts.find((e) => e.id === selectedEffort)) {
       setSelectedEffort(cfg.defaultEffort);
     }
     // Only re-evaluate on provider change — selectedModel/Effort are user-driven
@@ -906,46 +916,26 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
         return;
       }
 
-      const delegateMatch = text.match(/^\/delegate\s+([\s\S]+)/i);
-      if (delegateMatch) {
-        const userGoal = delegateMatch[1]!.trim();
-        if (!userGoal) return;
-
-        const skillPrompt = `You are orchestrating a delegation. The user wants to split work across multiple parallel coding agents.
-
-USER'S GOAL: ${userGoal}
-
-Your job: analyze this goal and decide how many parallel agents are needed (minimum 2, maximum 8). Use your judgment — simple tasks may only need 2 agents, complex multi-part tasks may need 5+. Don't over-parallelize; only create agents for truly independent work.
-
-Output ONLY a delegation plan in this EXACT format (no other text before or after):
-
-[DELEGATION_START]
-[CONTEXT] <one paragraph of shared context all agents need>
-[TASK] <concise description of task 1>
-[TASK] <concise description of task 2>
-...as many [TASK] lines as needed...
-[DELEGATION_END]
-
-Rules:
-- Each [TASK] must be independently completable — no task should depend on another's output
-- Keep task descriptions specific and actionable
-- The [CONTEXT] should include project info, constraints, and the overall goal
-- Fewer focused agents > many tiny agents. If two things are tightly coupled, keep them in one task
-- Output the delegation block IMMEDIATELY, nothing else`;
-
+      const delegateGoal = parseDelegateCommand(text);
+      if (delegateGoal) {
+        const delegationPlan = buildDelegationPlanRequest({
+          provider: selectedProvider,
+          userGoal: delegateGoal,
+          permissionOverride,
+        });
         if (useProviderSessionStore.getState().sessions[sessionId]?.isStreaming) {
           useProviderSessionStore.getState().enqueuePrompt(sessionId, {
-            displayText: `/delegate ${userGoal}`,
-            providerPrompt: skillPrompt,
-            ...(permissionOverride !== undefined ? { permissionOverride } : {}),
-            command: { kind: "delegate-plan", name: "delegate", originalText: `/delegate ${userGoal}` },
+            displayText: delegationPlan.displayText,
+            providerPrompt: delegationPlan.providerPrompt,
+            ...(delegationPlan.permissionOverride !== undefined ? { permissionOverride: delegationPlan.permissionOverride } : {}),
+            command: delegationPlan.command,
           });
           setQueueExpanded(true);
           return;
         }
         delegateRequested.current = true;
-        addUserMessage(sessionId, `/delegate ${userGoal}`);
-        await actualSend(skillPrompt, permissionOverride);
+        addUserMessage(sessionId, delegationPlan.displayText);
+        await actualSend(delegationPlan.providerPrompt, delegationPlan.permissionOverride);
         return;
       }
 
@@ -1386,7 +1376,7 @@ Rules:
     permissionMode,
     selectedModel,
     selectedEffort,
-    selectedCodexPermission: selectedProviderPermissionId,
+    selectedProviderPermissionId,
     addUserMessage,
   });
 
@@ -1394,23 +1384,28 @@ Rules:
   const delegateRequested = useRef(false);
   const lastDelegationParsed = useRef<string | null>(null);
   useEffect(() => {
+    return subscribeProviderDelegationRequests((event) => {
+      if (event.sessionId !== sessionId || !delegateRequested.current) return;
+      const eventKey = event.toolId ?? `${event.source}:${event.request.tasks.map((task) => task.description).join("|")}`;
+      if (lastDelegationParsed.current === eventKey) return;
+      lastDelegationParsed.current = eventKey;
+      delegateRequested.current = false;
+      spawnDelegation(event.request.tasks, event.request.context);
+    });
+  }, [sessionId, spawnDelegation]);
+
+  // Compatibility fallback for already-finalized assistant messages and older
+  // providers that do not pass through the semantic event projection.
+  useEffect(() => {
     if (!session || !delegateRequested.current) return;
     const msgs = session.messages;
     const last = [...msgs].reverse().find((m) => m.role === "assistant");
     if (!last || last.id === lastDelegationParsed.current) return;
-    const text = last.content;
-    const startIdx = text.indexOf("[DELEGATION_START]");
-    const endIdx = text.indexOf("[DELEGATION_END]");
-    if (startIdx === -1 || endIdx === -1) return;
+    const parsed = parseDelegationStartFromMessage(last);
+    if (!parsed) return;
     lastDelegationParsed.current = last.id;
     delegateRequested.current = false;
-    const block = text.slice(startIdx, endIdx + "[DELEGATION_END]".length);
-    const contextMatch = block.match(/\[CONTEXT\]\s*(.*)/);
-    const taskMatches = [...block.matchAll(/\[TASK\]\s*(.*)/g)];
-    if (taskMatches.length === 0) return;
-    const context = contextMatch?.[1]?.trim() || "";
-    const tasks = taskMatches.map((m) => ({ description: m[1]!.trim() }));
-    spawnDelegation(tasks, context);
+    spawnDelegation(parsed.tasks, parsed.context);
   }, [session?.messages, spawnDelegation]);
 
   const activeTasks = useMemo(() => session?.tasks?.filter(t => t.status !== "deleted") ?? [], [session?.tasks]);

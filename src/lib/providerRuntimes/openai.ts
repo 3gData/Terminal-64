@@ -1,5 +1,4 @@
 import {
-  ensureCodexMcp,
   ensureCodexSkills,
   mapHistoryMessages,
   providerCancel,
@@ -170,13 +169,14 @@ export function promptWithCodexSeed(prompt: string, seedTranscript: ChatMessage[
 }
 
 async function ensureCodexRuntime(input: ProviderTurnInput) {
-  await Promise.allSettled([ensureCodexMcp(input.cwd), ensureCodexSkills()]);
+  await ensureCodexSkills().catch(() => {});
+  return input;
 }
 
 export function buildCodexCreateRequest(input: ProviderTurnInput): CreateCodexRequest {
   const prompt = promptWithCodexSeed(input.prompt, input.seedTranscript);
   const codexPerm = codexPermissionForOverride(
-    input.selectedCodexPermission || "workspace",
+    input.providerPermissionId ?? input.selectedCodexPermission ?? "workspace",
     input.permissionOverride,
   );
   return {
@@ -214,7 +214,6 @@ function operationStatus(status: "applied" | "skipped" | "unsupported" | undefin
 }
 
 async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
-  await ensureCodexRuntime(input);
   const createReq = buildCodexCreateRequest(input);
   const sendReq = buildCodexSendRequest(input, createReq);
   try {
@@ -232,7 +231,6 @@ async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
 }
 
 async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
-  await ensureCodexRuntime(input);
   const createReq = buildCodexCreateRequest(input);
   const sendReq = buildCodexSendRequest(input, createReq);
   if (!input.threadId) {
@@ -257,6 +255,8 @@ async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
 export const openaiRuntime: ProviderRuntime = {
   provider: "openai",
 
+  prepareTurn: ensureCodexRuntime,
+
   create,
 
   send,
@@ -270,6 +270,7 @@ export const openaiRuntime: ProviderRuntime = {
   },
 
   history: {
+    source: "codex-rollout",
     capabilities: {
       hydrate: true,
       fork: true,

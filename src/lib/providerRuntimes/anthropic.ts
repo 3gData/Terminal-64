@@ -1,4 +1,5 @@
 import {
+  createMcpConfigFile,
   ensureT64Mcp,
   mapHistoryMessages,
   providerCancel,
@@ -89,12 +90,43 @@ async function ensureFirstTurnMcp(input: ProviderTurnInput) {
   }
 }
 
+function delegationMcpEnvConfig(env: Record<string, string> | undefined) {
+  if (!env) return null;
+  const port = Number(env.T64_DELEGATION_PORT || "0");
+  const delegationSecret = env.T64_DELEGATION_SECRET || "";
+  const groupId = env.T64_GROUP_ID || "";
+  if (!Number.isFinite(port) || port <= 0 || !delegationSecret || !groupId) {
+    return null;
+  }
+  return {
+    delegationPort: port,
+    delegationSecret,
+    groupId,
+    agentLabel: env.T64_AGENT_LABEL || "Agent",
+  };
+}
+
+async function prepareTurn(input: ProviderTurnInput): Promise<ProviderTurnInput> {
+  await ensureFirstTurnMcp(input);
+  if (input.mcpConfig) return input;
+
+  const delegation = delegationMcpEnvConfig(input.mcpEnv);
+  if (!delegation) return input;
+
+  const mcpConfig = await createMcpConfigFile(
+    delegation.delegationPort,
+    delegation.delegationSecret,
+    delegation.groupId,
+    delegation.agentLabel,
+  );
+  return { ...input, mcpConfig };
+}
+
 function legacyResumeResult(input: ProviderTurnInput): ProviderTurnResult {
   return input.resumeAtUuid ? { clearResumeAtUuid: true } : {};
 }
 
 async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
-  await ensureFirstTurnMcp(input);
   const req = buildClaudeRequest(input);
   try {
     await providerCreate({ provider: "anthropic", req }, input.skipOpenwolf);
@@ -105,7 +137,6 @@ async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
 }
 
 async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
-  await ensureFirstTurnMcp(input);
   const req = buildClaudeSendRequest(input);
   if (input.forkParentSessionId) {
     const forkReq: SendClaudePromptRequest = { ...req, fork_session: input.forkParentSessionId };
@@ -130,6 +161,8 @@ function operationStatus(status: "applied" | "skipped" | "unsupported" | undefin
 export const anthropicRuntime: ProviderRuntime = {
   provider: "anthropic",
 
+  prepareTurn,
+
   create,
 
   send,
@@ -143,6 +176,7 @@ export const anthropicRuntime: ProviderRuntime = {
   },
 
   history: {
+    source: "claude-jsonl",
     capabilities: {
       hydrate: true,
       fork: true,

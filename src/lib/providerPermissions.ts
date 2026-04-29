@@ -1,4 +1,10 @@
-import { getProviderManifest, isClaudePermissionId, type PermissionOption, type ProviderId } from "./providers";
+import {
+  getProviderControl,
+  getProviderManifest,
+  isClaudePermissionId,
+  type PermissionOption,
+  type ProviderId,
+} from "./providers";
 import type { PermissionMode } from "./types";
 
 export interface ProviderPermissionInputPresentation {
@@ -37,11 +43,12 @@ export function getProviderPermissionInputPresentation(
   permissionId: string | null | undefined,
 ): ProviderPermissionInputPresentation {
   const manifest = getProviderManifest(provider);
+  const permissionControl = getProviderControl(provider, "permission");
   const option = getProviderPermissionOption(provider, permissionId);
   const label = option.inputLabel ?? option.label.toLowerCase();
   return {
     option,
-    label: `${label} ${manifest.ui.inputPermissionSuffix}`,
+    label: `${label} ${permissionControl?.inputSuffix ?? manifest.ui.inputPermissionSuffix}`,
     color: option.color,
   };
 }

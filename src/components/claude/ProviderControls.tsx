@@ -62,6 +62,8 @@ export default function ProviderControls({
 }: ProviderControlsProps) {
   const [openMenu, setOpenMenu] = useState<TopMenu>(null);
   const providerCfg = getProviderManifest(provider);
+  const modelControl = providerCfg.controls.model;
+  const effortControl = providerCfg.controls.effort;
   const activeModels = providerCfg.models;
   const activeEfforts = providerCfg.efforts;
   const currentModel =
@@ -83,49 +85,53 @@ export default function ProviderControls({
         />
       )}
 
-      <DropdownMenu open={openMenu === "model"} onOpenChange={(open) => setOpenMenu(open ? "model" : null)}>
-        <DropdownMenuTrigger asChild>
-          <button className="shadcn-trigger" aria-label="Model">
-            {currentModel.label}
-            <span className="shadcn-trigger-chev">▾</span>
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuLabel>{providerCfg.ui.modelMenuLabel}</DropdownMenuLabel>
-          {activeModels.map((model) => (
-            <DropdownMenuItem
-              key={model.id}
-              active={model.id === selectedModel}
-              onSelect={() => onSelectModel(model.id)}
-            >
-              <span className="shadcn-menu-text">{model.label}</span>
-              <span className="shadcn-menu-check">{model.id === selectedModel ? "✓" : ""}</span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {modelControl && activeModels.length > 0 && (
+        <DropdownMenu open={openMenu === "model"} onOpenChange={(open) => setOpenMenu(open ? "model" : null)}>
+          <DropdownMenuTrigger asChild>
+            <button className="shadcn-trigger" aria-label={modelControl.label}>
+              {currentModel.label}
+              <span className="shadcn-trigger-chev">▾</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuLabel>{modelControl.label}</DropdownMenuLabel>
+            {activeModels.map((model) => (
+              <DropdownMenuItem
+                key={model.id}
+                active={model.id === selectedModel}
+                onSelect={() => onSelectModel(model.id)}
+              >
+                <span className="shadcn-menu-text">{model.label}</span>
+                <span className="shadcn-menu-check">{model.id === selectedModel ? "✓" : ""}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
-      <DropdownMenu open={openMenu === "effort"} onOpenChange={(open) => setOpenMenu(open ? "effort" : null)}>
-        <DropdownMenuTrigger asChild>
-          <button className="shadcn-trigger" aria-label="Reasoning effort">
-            {currentEffort.label}
-            <span className="shadcn-trigger-chev">▾</span>
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuLabel>{providerCfg.ui.effortMenuLabel}</DropdownMenuLabel>
-          {activeEfforts.map((effort) => (
-            <DropdownMenuItem
-              key={effort.id}
-              active={effort.id === selectedEffort}
-              onSelect={() => onSelectEffort(effort.id)}
-            >
-              <span className="shadcn-menu-text">{effort.label}</span>
-              <span className="shadcn-menu-check">{effort.id === selectedEffort ? "✓" : ""}</span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {effortControl && activeEfforts.length > 0 && (
+        <DropdownMenu open={openMenu === "effort"} onOpenChange={(open) => setOpenMenu(open ? "effort" : null)}>
+          <DropdownMenuTrigger asChild>
+            <button className="shadcn-trigger" aria-label={effortControl.label}>
+              {currentEffort.label}
+              <span className="shadcn-trigger-chev">▾</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuLabel>{effortControl.label}</DropdownMenuLabel>
+            {activeEfforts.map((effort) => (
+              <DropdownMenuItem
+                key={effort.id}
+                active={effort.id === selectedEffort}
+                onSelect={() => onSelectEffort(effort.id)}
+              >
+                <span className="shadcn-menu-text">{effort.label}</span>
+                <span className="shadcn-menu-check">{effort.id === selectedEffort ? "✓" : ""}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </>
   );
 }

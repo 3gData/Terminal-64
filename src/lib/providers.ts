@@ -6,7 +6,7 @@
 
 import type { PermissionMode } from "./types";
 
-export type ProviderId = "anthropic" | "openai";
+export type ProviderId = "anthropic" | "openai" | "cursor";
 export type ProviderFeature =
   | "mcp"
   | "plan"
@@ -35,11 +35,34 @@ export interface PermissionOption {
   inputLabel?: string;
 }
 
-export type ProviderPermissionPersistence = "settings" | "provider-metadata";
+export type ProviderControlId = "model" | "effort" | "permission";
+
+export interface ProviderControlMetadata {
+  id: ProviderControlId;
+  label: string;
+  inputSuffix?: string;
+}
+
+export type ProviderControlsMetadata = Partial<Record<ProviderControlId, ProviderControlMetadata>>;
+
+export type ProviderPermissionPersistence = "provider-state";
 
 export interface ProviderPermissionControlPolicy {
   persistence: ProviderPermissionPersistence;
   skipPermissionId?: PermissionMode;
+}
+
+// Provider-owned history/transcript source. The store uses this policy for
+// local persistence choices; runtime/backend adapters own the actual IO.
+export type ProviderHistorySource =
+  | "claude-jsonl"
+  | "codex-rollout"
+  | "local-transcript"
+  | "none";
+
+export interface ProviderHistoryPolicy {
+  source: ProviderHistorySource;
+  hydrateFailureLabel: string;
 }
 
 export interface ProviderCapabilities {
@@ -56,12 +79,16 @@ export interface ProviderCapabilities {
 export type DelegationMcpTransport = "temp-config" | "env";
 export type DelegationOpenwolfPolicy = "inherit" | "always";
 export type DelegationPermissionPresetPolicy = "selected" | "bypass_all";
+export type DelegationPlannerPermissionPolicy = "inherit" | PermissionMode;
 
 export interface ProviderDelegationPolicy {
   mcpTransport: DelegationMcpTransport;
   skipOpenwolf: DelegationOpenwolfPolicy;
   noSessionPersistence: boolean;
   skipGitRepoCheck: boolean;
+  planner: {
+    permissionOverride: DelegationPlannerPermissionPolicy;
+  };
   childRuntime: {
     permissionPreset: DelegationPermissionPresetPolicy;
   };
@@ -73,8 +100,11 @@ export interface ProviderUiMetadata {
   brandTitle: string;
   emptyStateLabel: string;
   defaultSessionName: string;
+  /** @deprecated Use controls.model.label. */
   modelMenuLabel: string;
+  /** @deprecated Use controls.effort.label. */
   effortMenuLabel: string;
+  /** @deprecated Use controls.permission.inputSuffix. */
   inputPermissionSuffix: string;
 }
 
@@ -84,6 +114,8 @@ export interface ProviderManifest {
   capabilities: ProviderCapabilities;
   delegation: ProviderDelegationPolicy;
   permissionControl: ProviderPermissionControlPolicy;
+  history: ProviderHistoryPolicy;
+  controls: ProviderControlsMetadata;
   models: ModelOption[];
   efforts: EffortOption[];
   permissions: PermissionOption[];
@@ -162,6 +194,48 @@ const OPENAI_PERMISSIONS: PermissionOption[] = [
   { id: "yolo", label: "YOLO", color: "#f38ba8", desc: "No sandbox, no approvals" },
 ];
 
+const CURSOR_MODELS: ModelOption[] = [
+  { id: "auto", label: "Auto" },
+  { id: "composer-2-fast", label: "Composer 2 Fast" },
+  { id: "composer-2", label: "Composer 2" },
+  { id: "composer-1.5", label: "Composer 1.5" },
+  { id: "gpt-5.3-codex", label: "Codex 5.3" },
+  { id: "gpt-5.3-codex-fast", label: "Codex 5.3 Fast" },
+  { id: "gpt-5.3-codex-high", label: "Codex 5.3 High" },
+  { id: "gpt-5.3-codex-xhigh", label: "Codex 5.3 Extra High" },
+  { id: "gpt-5.3-codex-spark-preview", label: "Codex 5.3 Spark" },
+  { id: "gpt-5.2", label: "GPT-5.2" },
+  { id: "gpt-5.5-medium", label: "GPT-5.5 1M" },
+  { id: "gpt-5.5-high", label: "GPT-5.5 1M High" },
+  { id: "gpt-5.5-extra-high", label: "GPT-5.5 1M Extra High" },
+  { id: "gpt-5.4-medium", label: "GPT-5.4 1M" },
+  { id: "gpt-5.4-high", label: "GPT-5.4 1M High" },
+  { id: "gpt-5.4-xhigh", label: "GPT-5.4 1M Extra High" },
+  { id: "gpt-5.4-mini-medium", label: "GPT-5.4 Mini" },
+  { id: "claude-opus-4-7-medium", label: "Opus 4.7 1M Medium" },
+  { id: "claude-opus-4-7-high", label: "Opus 4.7 1M High" },
+  { id: "claude-opus-4-7-thinking-high", label: "Opus 4.7 1M High Thinking" },
+  { id: "claude-4.6-sonnet-medium", label: "Sonnet 4.6 1M" },
+  { id: "claude-4.6-sonnet-medium-thinking", label: "Sonnet 4.6 1M Thinking" },
+  { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro" },
+  { id: "gemini-3-flash", label: "Gemini 3 Flash" },
+  { id: "grok-4-20", label: "Grok 4.20" },
+  { id: "grok-4-20-thinking", label: "Grok 4.20 Thinking" },
+  { id: "kimi-k2.5", label: "Kimi K2.5" },
+];
+
+const CURSOR_EFFORTS: EffortOption[] = [
+  { id: "default", label: "Default" },
+  { id: "ask", label: "Ask" },
+  { id: "plan", label: "Plan" },
+];
+
+const CURSOR_PERMISSIONS: PermissionOption[] = [
+  { id: "default", label: "Review", color: "#89b4fa", desc: "Propose changes without force-applying them", inputLabel: "review" },
+  { id: "plan", label: "Plan", color: "#94e2d5", desc: "Planning prompt without direct writes", inputLabel: "plan" },
+  { id: "bypass_all", label: "Force", color: "#f38ba8", desc: "Pass --force so Cursor can apply changes", inputLabel: "force" },
+];
+
 export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
   anthropic: {
     id: "anthropic",
@@ -190,13 +264,25 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       skipOpenwolf: "inherit",
       noSessionPersistence: true,
       skipGitRepoCheck: false,
+      planner: {
+        permissionOverride: "inherit",
+      },
       childRuntime: {
         permissionPreset: "bypass_all",
       },
     },
     permissionControl: {
-      persistence: "settings",
+      persistence: "provider-state",
       skipPermissionId: "bypass_all",
+    },
+    history: {
+      source: "claude-jsonl",
+      hydrateFailureLabel: "Claude JSONL",
+    },
+    controls: {
+      model: { id: "model", label: "Model" },
+      effort: { id: "effort", label: "Effort" },
+      permission: { id: "permission", label: "Permissions", inputSuffix: "on" },
     },
     models: ANTHROPIC_MODELS,
     efforts: ANTHROPIC_EFFORTS,
@@ -232,12 +318,24 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       skipOpenwolf: "always",
       noSessionPersistence: false,
       skipGitRepoCheck: true,
+      planner: {
+        permissionOverride: "inherit",
+      },
       childRuntime: {
         permissionPreset: "selected",
       },
     },
     permissionControl: {
-      persistence: "provider-metadata",
+      persistence: "provider-state",
+    },
+    history: {
+      source: "codex-rollout",
+      hydrateFailureLabel: "Codex",
+    },
+    controls: {
+      model: { id: "model", label: "Model" },
+      effort: { id: "effort", label: "Effort" },
+      permission: { id: "permission", label: "Sandbox", inputSuffix: "sandbox" },
     },
     models: OPENAI_MODELS,
     efforts: OPENAI_EFFORTS,
@@ -245,6 +343,60 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
     defaultModel: "gpt-5.5",
     defaultEffort: "medium",
     defaultPermission: "workspace",
+  },
+  cursor: {
+    id: "cursor",
+    ui: {
+      label: "Cursor",
+      shortLabel: "Cursor",
+      brandTitle: "Cursor Agent",
+      emptyStateLabel: "Cursor Agent",
+      defaultSessionName: "Cursor",
+      modelMenuLabel: "Model",
+      effortMenuLabel: "Mode",
+      inputPermissionSuffix: "mode",
+    },
+    capabilities: {
+      mcp: true,
+      plan: true,
+      fork: false,
+      rewind: false,
+      images: false,
+      hookLog: false,
+      nativeSlashCommands: false,
+      compact: false,
+    },
+    delegation: {
+      mcpTransport: "env",
+      skipOpenwolf: "always",
+      noSessionPersistence: false,
+      skipGitRepoCheck: true,
+      planner: {
+        permissionOverride: "bypass_all",
+      },
+      childRuntime: {
+        permissionPreset: "selected",
+      },
+    },
+    permissionControl: {
+      persistence: "provider-state",
+      skipPermissionId: "bypass_all",
+    },
+    history: {
+      source: "local-transcript",
+      hydrateFailureLabel: "Cursor local transcript",
+    },
+    controls: {
+      model: { id: "model", label: "Model" },
+      effort: { id: "effort", label: "Mode" },
+      permission: { id: "permission", label: "Mode", inputSuffix: "mode" },
+    },
+    models: CURSOR_MODELS,
+    efforts: CURSOR_EFFORTS,
+    permissions: CURSOR_PERMISSIONS,
+    defaultModel: "composer-2-fast",
+    defaultEffort: "default",
+    defaultPermission: "default",
   },
 };
 
@@ -262,6 +414,22 @@ export function getProviderDelegationPolicy(provider: ProviderId): ProviderDeleg
 
 export function getProviderPermissionControlPolicy(provider: ProviderId): ProviderPermissionControlPolicy {
   return PROVIDER_REGISTRY[provider].permissionControl;
+}
+
+export function getProviderControl(provider: ProviderId, control: ProviderControlId): ProviderControlMetadata | undefined {
+  return PROVIDER_REGISTRY[provider].controls[control];
+}
+
+export function providerHasControl(provider: ProviderId, control: ProviderControlId): boolean {
+  return !!getProviderControl(provider, control);
+}
+
+export function getProviderHistoryPolicy(provider: ProviderId): ProviderHistoryPolicy {
+  return PROVIDER_REGISTRY[provider].history;
+}
+
+export function providerPersistsLocalTranscript(provider: ProviderId): boolean {
+  return getProviderHistoryPolicy(provider).source === "local-transcript";
 }
 
 export function listProviderManifests(): ProviderManifest[] {

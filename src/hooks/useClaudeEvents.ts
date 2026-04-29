@@ -1,10 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  providerToolChangedPaths,
   type NormalizedProviderEvent,
-  type ProviderToolCall,
-  type ProviderToolInput,
   type ProviderToolResult,
 } from "../contracts/providerEvents";
 import { publishProviderLifecycleFromProviderEvent } from "../lib/providerLifecycleBus";
@@ -13,6 +10,13 @@ import {
   subscribeProviderEventIngestion,
   type ProviderIngestionMessage,
 } from "../lib/providerEventIngestion";
+import {
+  mergeProviderMcpServerStatuses,
+  projectProviderEventSemantics,
+  publishProviderDelegationRequest,
+  resetProviderEventSemantics,
+  type ProviderSemanticEvent,
+} from "../lib/providerEventSemantics";
 import { cancelProviderSession } from "../lib/tauriApi";
 import { getProviderManifest, providerSupports, type ProviderId } from "../lib/providers";
 import { runProviderTurn } from "../lib/providerRuntime";
@@ -21,88 +25,12 @@ import type { PermissionRequestPayload } from "../lib/claudeEventDecoder";
 import { useSettingsStore } from "../stores/settingsStore";
 import {
   getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
   useProviderSessionStore,
   type ProviderTask,
-  type McpServerStatus,
   type PendingQuestionItem,
 } from "../stores/claudeStore";
-
-const sessionToolMaps = new Map<string, Map<string, string>>();
-const sessionFilePathMaps = new Map<string, Map<string, string>>();
-
-const MAX_TOOL_MAP_ENTRIES = 2000;
-function getSessionMap<V>(store: Map<string, Map<string, V>>, sessionId: string): Map<string, V> {
-  let map = store.get(sessionId);
-  if (!map) {
-    map = new Map<string, V>();
-    store.set(sessionId, map);
-  }
-  return map;
-}
-
-function evictIfNeeded<V>(map: Map<string, V>) {
-  if (map.size > MAX_TOOL_MAP_ENTRIES) {
-    const excess = map.size - MAX_TOOL_MAP_ENTRIES;
-    const iter = map.keys();
-    for (let i = 0; i < excess; i++) { map.delete(iter.next().value!); }
-  }
-}
-
-function normalizeMcpServerStatus(raw: unknown): McpServerStatus | null {
-  if (!raw || typeof raw !== "object") return null;
-  const obj = raw as Record<string, unknown>;
-  const name = obj.name ?? obj.server ?? obj.serverName;
-  if (typeof name !== "string" || !name) return null;
-  const rawStatus = obj.status ?? obj.startupStatus;
-  const status = rawStatus === "ready" ? "connected" : String(rawStatus || "unknown");
-  const tools = Array.isArray(obj.tools) ? obj.tools.map((tool) => {
-    if (!tool || typeof tool !== "object") return { name: "" };
-    const t = tool as Record<string, unknown>;
-    return {
-      name: String(t.name || ""),
-      ...(t.description ? { description: String(t.description) } : {}),
-    };
-  }).filter((tool) => tool.name.length > 0) : undefined;
-  return {
-    name,
-    status,
-    ...(obj.error ? { error: String(obj.error) } : {}),
-    ...(obj.type || obj.transport ? { transport: String(obj.type || obj.transport) } : {}),
-    ...(obj.scope ? { scope: String(obj.scope) } : {}),
-    ...(tools ? { tools, toolCount: tools.length } : {}),
-  };
-}
-
-function mcpServerKey(name: string): string {
-  return name === "t64" || name === "terminal-64" ? "terminal-64" : name;
-}
-
-function mergeMcpServerStatuses(current: McpServerStatus[], incoming: McpServerStatus[]): McpServerStatus[] {
-  const merged = new Map<string, McpServerStatus>();
-  for (const server of current) {
-    merged.set(mcpServerKey(server.name), server);
-  }
-  for (const server of incoming) {
-    const key = mcpServerKey(server.name);
-    const previous = merged.get(key);
-    const next: McpServerStatus = {
-      ...previous,
-      ...server,
-      name: key === "terminal-64" ? "terminal-64" : server.name,
-    };
-    const transport = server.transport ?? previous?.transport;
-    if (transport) next.transport = transport;
-    const scope = server.scope ?? previous?.scope;
-    if (scope) next.scope = scope;
-    const tools = server.tools ?? previous?.tools;
-    if (tools) next.tools = tools;
-    const toolCount = server.toolCount ?? previous?.toolCount;
-    if (toolCount != null) next.toolCount = toolCount;
-    merged.set(key, next);
-  }
-  return Array.from(merged.values());
-}
 
 // RAF batching for streaming text — coalesces deltas into one store update per frame.
 const pendingText = new Map<string, string>();
@@ -132,21 +60,6 @@ function flushBeforeFinalization() {
   flushPendingText();
 }
 
-// Tools hidden from the UI (handled internally by the wrapper).
-const HIDDEN_TOOLS = new Set([
-  "EnterPlanMode", "ExitPlanMode",
-  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
-]);
-
-interface ProviderQuestion {
-  question?: string;
-  text?: string;
-  description?: string;
-  header?: string;
-  options?: (string | { label?: string; description?: string })[];
-  multiSelect?: boolean;
-}
-
 async function runAutoCompact(sessionId: string) {
   const store = useProviderSessionStore.getState();
   const session = store.sessions[sessionId];
@@ -171,7 +84,8 @@ async function runAutoCompact(sessionId: string) {
       threadId: openAiMetadata?.codexThreadId ?? null,
       selectedModel: providerState.selectedModel ?? manifest.defaultModel,
       selectedEffort: providerState.selectedEffort ?? manifest.defaultEffort,
-      selectedCodexPermission: openAiMetadata?.selectedCodexPermission ?? manifest.defaultPermission,
+      providerPermissionId: providerState.providerPermissions[providerState.provider]
+        ?? getProviderPermissionId(providerState, providerState.provider),
       permissionMode: "auto",
       skipOpenwolf: session.skipOpenwolf,
       seedTranscript: providerState.seedTranscript,
@@ -189,87 +103,8 @@ async function runAutoCompact(sessionId: string) {
   }
 }
 
-function toolQuestions(input: ProviderToolInput): ProviderQuestion[] {
-  const rawInput: unknown = input;
-  if (Array.isArray(rawInput)) return rawInput as ProviderQuestion[];
-  if (input.question || input.options) return [input as ProviderQuestion];
-  const vals = Object.values(input);
-  const arr = vals.find((v) => Array.isArray(v));
-  if (arr) return arr as ProviderQuestion[];
-  return [{ question: (input.description as string) || (input.text as string) || "The assistant has a question", options: [] }];
-}
-
-function applyToolCallSideEffects(
-  sessionId: string,
-  provider: ProviderId,
-  toolCall: ProviderToolCall,
-  store: ReturnType<typeof useProviderSessionStore.getState>,
-): ToolCall | null {
-  const name = toolCall.name;
-  const toolId = toolCall.id;
-  const input = toolCall.input;
-  const toolMap = getSessionMap(sessionToolMaps, sessionId);
-  toolMap.set(toolId, name);
-  evictIfNeeded(toolMap);
-
-  if ((name === "Write" || name === "Edit" || name === "MultiEdit") && input.file_path) {
-    const fileMap = getSessionMap(sessionFilePathMaps, sessionId);
-    fileMap.set(toolId, String(input.file_path));
-    evictIfNeeded(fileMap);
-  }
-
-  if (name === "EnterPlanMode") {
-    store.setPlanMode(sessionId, true);
-  } else if (name === "ExitPlanMode") {
-    store.setPlanMode(sessionId, false);
-  } else if (name === "AskUserQuestion") {
-    const items: PendingQuestionItem[] = toolQuestions(input).map((q) => ({
-      question: q.question || q.text || q.description || "Question",
-      ...(q.header !== undefined ? { header: q.header } : {}),
-      options: (q.options || []).map((o) =>
-        typeof o === "string"
-          ? { label: o }
-          : {
-              label: o.label || String(o),
-              ...(o.description !== undefined ? { description: o.description } : {}),
-            }
-      ),
-      multiSelect: q.multiSelect || false,
-    }));
-
-    if (items.length > 0) {
-      store.setPendingQuestions(sessionId, {
-        toolUseId: toolId,
-        items,
-        currentIndex: 0,
-        answers: [],
-      });
-      cancelProviderSession(sessionId, provider).catch(() => {});
-      store.setStreaming(sessionId, false);
-    }
-  } else if (name === "TaskCreate") {
-    const task: ProviderTask = {
-      id: toolId,
-      subject: String(input.subject || input.title || "Task"),
-      status: "pending",
-      ...(input.description ? { description: String(input.description) } : {}),
-    };
-    store.addTask(sessionId, task);
-  } else if (name === "TaskUpdate") {
-    if (input.taskId) {
-      store.updateTask(sessionId, String(input.taskId), {
-        ...(input.status ? { status: String(input.status) as ProviderTask["status"] } : {}),
-        ...(input.subject ? { subject: String(input.subject) } : {}),
-      });
-    }
-  }
-
-  return HIDDEN_TOOLS.has(name) ? null : toolCall;
-}
-
 function applyAssistantMessage(
   sessionId: string,
-  provider: ProviderId,
   event: Extract<NormalizedProviderEvent, { kind: "assistant_message" }>,
   store: ReturnType<typeof useProviderSessionStore.getState>,
 ) {
@@ -277,11 +112,7 @@ function applyAssistantMessage(
   const text = event.useBufferedText && !event.text
     ? session?.streamingText || ""
     : event.text;
-  const visibleToolCalls: ToolCall[] = [];
-  for (const toolCall of event.toolCalls || []) {
-    const visible = applyToolCallSideEffects(sessionId, provider, toolCall, store);
-    if (visible) visibleToolCalls.push(visible);
-  }
+  const visibleToolCalls: ToolCall[] = event.toolCalls || [];
 
   const trimmedText = text.trim();
   if (trimmedText || visibleToolCalls.length > 0) {
@@ -299,40 +130,7 @@ function applyToolResult(
   sessionId: string,
   toolResult: ProviderToolResult,
   store: ReturnType<typeof useProviderSessionStore.getState>,
-  options?: { trackModifiedFiles?: boolean },
 ) {
-  const toolName = getSessionMap(sessionToolMaps, sessionId).get(toolResult.id);
-
-  if (toolName === "TaskCreate" && toolResult.result) {
-    const match = toolResult.result.match(/#(\d+)/);
-    const newId = match?.[1];
-    if (newId) {
-      const s = useProviderSessionStore.getState();
-      const session = s.sessions[sessionId];
-      if (session) {
-        const newTasks = session.tasks.map((t) =>
-          t.id === toolResult.id ? { ...t, id: newId } : t
-        );
-        useProviderSessionStore.setState({
-          sessions: { ...s.sessions, [sessionId]: { ...session, tasks: newTasks } },
-        });
-      }
-    }
-  }
-
-  if (!toolResult.isError && options?.trackModifiedFiles !== false) {
-    const changedPaths = new Set<string>();
-    const filePath = getSessionMap(sessionFilePathMaps, sessionId).get(toolResult.id);
-    if (filePath) changedPaths.add(filePath);
-    for (const path of providerToolChangedPaths(toolResult.patch?.input ?? {})) {
-      changedPaths.add(path);
-    }
-    if (changedPaths.size > 0) {
-      store.addModifiedFiles(sessionId, [...changedPaths]);
-    }
-  }
-
-  if (toolName && HIDDEN_TOOLS.has(toolName)) return;
   store.updateToolResult(sessionId, toolResult.id, toolResult.result, toolResult.isError, toolResult.patch);
 }
 
@@ -367,17 +165,78 @@ function handleSessionStarted(
   }
 }
 
-function handleMcpStatus(
+function updateProviderTaskId(sessionId: string, oldTaskId: string, newTaskId: string) {
+  const state = useProviderSessionStore.getState();
+  const session = state.sessions[sessionId];
+  if (!session) return;
+  const tasks = session.tasks.map((task) =>
+    task.id === oldTaskId ? { ...task, id: newTaskId } : task
+  );
+  useProviderSessionStore.setState({
+    sessions: { ...state.sessions, [sessionId]: { ...session, tasks } },
+  });
+}
+
+function handleSemanticEvent(
   sessionId: string,
-  event: Extract<NormalizedProviderEvent, { kind: "mcp_status" }>,
+  provider: ProviderId,
+  event: ProviderSemanticEvent,
   store: ReturnType<typeof useProviderSessionStore.getState>,
 ) {
-  const incoming = event.servers
-    .map((server) => normalizeMcpServerStatus(server))
-    .filter((server): server is McpServerStatus => server != null);
-  if (incoming.length === 0) return;
-  const current = store.sessions[sessionId]?.mcpServers ?? [];
-  store.setMcpServers(sessionId, mergeMcpServerStatuses(current, incoming));
+  switch (event.kind) {
+    case "mcp_status": {
+      const current = store.sessions[sessionId]?.mcpServers ?? [];
+      store.setMcpServers(sessionId, mergeProviderMcpServerStatuses(current, event.servers));
+      break;
+    }
+    case "tool_visibility":
+      break;
+    case "plan_mode":
+      store.setPlanMode(sessionId, event.active);
+      break;
+    case "pending_questions": {
+      const items: PendingQuestionItem[] = event.items.map((item) => {
+        const next: PendingQuestionItem = {
+          question: item.question,
+          options: item.options,
+          multiSelect: item.multiSelect,
+        };
+        if (item.header !== undefined) next.header = item.header;
+        return next;
+      });
+      if (items.length === 0) break;
+      store.setPendingQuestions(sessionId, {
+        toolUseId: event.toolUseId,
+        items,
+        currentIndex: 0,
+        answers: [],
+      });
+      cancelProviderSession(sessionId, provider).catch(() => {});
+      store.setStreaming(sessionId, false);
+      break;
+    }
+    case "task_created":
+      store.addTask(sessionId, event.task as ProviderTask);
+      break;
+    case "task_updated":
+      store.updateTask(sessionId, event.taskId, event.update as Partial<ProviderTask>);
+      break;
+    case "task_id_resolved":
+      updateProviderTaskId(sessionId, event.oldTaskId, event.newTaskId);
+      break;
+    case "modified_files":
+      store.addModifiedFiles(sessionId, event.paths);
+      break;
+    case "delegation_request":
+      publishProviderDelegationRequest({
+        sessionId,
+        provider,
+        request: event.request,
+        source: event.source,
+        ...(event.toolId !== undefined ? { toolId: event.toolId } : {}),
+      });
+      break;
+  }
 }
 
 function handleUsage(
@@ -400,21 +259,21 @@ function handleTurnCompleted(
   sessionId: string,
   provider: ProviderId,
   event: Extract<NormalizedProviderEvent, { kind: "turn_completed" }>,
-  store: ReturnType<typeof useProviderSessionStore.getState>,
 ) {
   flushBeforeFinalization();
-  const session = store.sessions[sessionId];
+  const postFlushStore = useProviderSessionStore.getState();
+  const session = postFlushStore.sessions[sessionId];
   if (session?.streamingText?.trim()) {
-    store.finalizeAssistantMessage(sessionId, session.streamingText.trim());
+    postFlushStore.finalizeAssistantMessage(sessionId, session.streamingText.trim());
   }
 
-  store.setStreaming(sessionId, false);
-  store.clearStreamingText(sessionId);
+  postFlushStore.setStreaming(sessionId, false);
+  postFlushStore.clearStreamingText(sessionId);
 
-  if (event.costUsd) store.addCost(sessionId, event.costUsd);
+  if (event.costUsd) postFlushStore.addCost(sessionId, event.costUsd);
   const totalTokens = event.totalTokens
     ?? ((event.inputTokens ?? event.usage?.input_tokens ?? 0) + (event.outputTokens ?? event.usage?.output_tokens ?? 0));
-  if (totalTokens > 0) store.addTokens(sessionId, totalTokens);
+  if (totalTokens > 0) postFlushStore.addTokens(sessionId, totalTokens);
 
   const latestSession = useProviderSessionStore.getState().sessions[sessionId];
   if (latestSession) {
@@ -424,7 +283,7 @@ function handleTurnCompleted(
     let contextMax = event.contextMax ?? latestSession.contextMax ?? modelContextMax;
     if (modelContextMax > contextMax) contextMax = modelContextMax;
     if (contextMax !== (latestSession.contextMax || 0)) {
-      store.setContextUsage(sessionId, latestSession.contextUsed || 0, contextMax);
+      postFlushStore.setContextUsage(sessionId, latestSession.contextUsed || 0, contextMax);
     }
   }
 
@@ -451,12 +310,11 @@ function handleTurnCompleted(
     useProviderSessionStore.getState().setAutoCompactStatus(sessionId, "done");
   }
 
-  if (event.error) store.setError(sessionId, event.error);
+  if (event.error) postFlushStore.setError(sessionId, event.error);
 }
 
 function cleanupSessionTracking(sessionId: string) {
-  sessionToolMaps.delete(sessionId);
-  sessionFilePathMaps.delete(sessionId);
+  resetProviderEventSemantics(sessionId);
   pendingText.delete(sessionId);
 }
 
@@ -466,16 +324,17 @@ function handleProviderEvent(message: ProviderIngestionMessage) {
 
   if (message.type === "done") {
     flushBeforeFinalization();
-    const session = store.sessions[sessionId];
+    const postFlushStore = useProviderSessionStore.getState();
+    const session = postFlushStore.sessions[sessionId];
     if (session?.streamingText?.trim()) {
-      store.finalizeAssistantMessage(sessionId, session.streamingText.trim());
+      postFlushStore.finalizeAssistantMessage(sessionId, session.streamingText.trim());
     }
     const current = useProviderSessionStore.getState().sessions[sessionId];
     if (current && !current.isStreaming) {
-      store.setStreaming(sessionId, true);
+      postFlushStore.setStreaming(sessionId, true);
     }
-    store.setStreaming(sessionId, false);
-    store.clearStreamingText(sessionId);
+    postFlushStore.setStreaming(sessionId, false);
+    postFlushStore.clearStreamingText(sessionId);
     cleanupSessionTracking(sessionId);
     return;
   }
@@ -488,49 +347,54 @@ function handleProviderEvent(message: ProviderIngestionMessage) {
     flushBeforeFinalization();
   }
 
-  switch (event.kind) {
+  const projection = projectProviderEventSemantics({ sessionId, provider, event });
+  for (const semanticEvent of projection.semanticEvents) {
+    handleSemanticEvent(sessionId, provider, semanticEvent, store);
+  }
+
+  const visibleEvent = projection.visibleEvent;
+  if (visibleEvent) switch (visibleEvent.kind) {
     case "session_started":
-      handleSessionStarted(sessionId, provider, event, store);
-      break;
-    case "mcp_status":
-      handleMcpStatus(sessionId, event, store);
+      handleSessionStarted(sessionId, provider, visibleEvent, store);
       break;
     case "turn_started":
       store.setStreaming(sessionId, true);
-      if (event.resetStreamingText) store.clearStreamingText(sessionId);
+      if (visibleEvent.resetStreamingText) store.clearStreamingText(sessionId);
       break;
     case "assistant_delta": {
       const existing = pendingText.get(sessionId) || "";
-      pendingText.set(sessionId, existing + event.text);
+      pendingText.set(sessionId, existing + visibleEvent.text);
       scheduleFlush();
       break;
     }
     case "assistant_message":
-      applyAssistantMessage(sessionId, provider, event, store);
+      applyAssistantMessage(sessionId, visibleEvent, store);
       break;
     case "tool_call":
-      applyAssistantMessage(sessionId, provider, { kind: "assistant_message", text: "", toolCalls: [event.toolCall] }, store);
+      applyAssistantMessage(sessionId, { kind: "assistant_message", text: "", toolCalls: [visibleEvent.toolCall] }, store);
       break;
     case "tool_update":
-      store.updateToolCall(sessionId, event.id, event.patch);
-      if (event.result) applyToolResult(sessionId, event.result, store, { trackModifiedFiles: false });
+      store.updateToolCall(sessionId, visibleEvent.id, visibleEvent.patch);
+      if (visibleEvent.result) applyToolResult(sessionId, visibleEvent.result, store);
       break;
     case "tool_result":
-      applyToolResult(sessionId, event.toolResult, store);
+      applyToolResult(sessionId, visibleEvent.toolResult, store);
       break;
     case "usage":
-      handleUsage(sessionId, provider, event, store);
+      handleUsage(sessionId, provider, visibleEvent, store);
       break;
     case "turn_completed":
-      handleTurnCompleted(sessionId, provider, event, store);
+      handleTurnCompleted(sessionId, provider, visibleEvent);
       break;
     case "error":
-      store.setError(sessionId, event.message);
-      if (event.terminal !== false) {
+      store.setError(sessionId, visibleEvent.message);
+      if (visibleEvent.terminal !== false) {
         store.setStreaming(sessionId, false);
         store.clearStreamingText(sessionId);
         cleanupSessionTracking(sessionId);
       }
+      break;
+    case "mcp_status":
       break;
   }
 

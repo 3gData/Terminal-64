@@ -3,6 +3,7 @@
 // OpenAI:    knotted-flower silhouette.
 
 import { getProviderManifest, type ProviderId } from "../../lib/providers";
+import cursorIcon from "../../assets/cursor.png";
 
 interface LogoProps {
   size?: number;
@@ -41,9 +42,29 @@ export function OpenAILogo({ size = 12, className }: LogoProps) {
   );
 }
 
+export function CursorLogo({ size = 12, className }: LogoProps) {
+  return (
+    <img
+      src={cursorIcon}
+      width={size}
+      height={size}
+      className={className}
+      alt=""
+      aria-hidden="true"
+      style={{
+        width: size,
+        height: size,
+        objectFit: "contain",
+        display: "block",
+      }}
+    />
+  );
+}
+
 const PROVIDER_LOGOS: Partial<Record<ProviderId, typeof AnthropicLogo>> = {
   anthropic: AnthropicLogo,
   openai: OpenAILogo,
+  cursor: CursorLogo,
 };
 
 export function ProviderLogo({ provider, size = 12, className }: LogoProps & { provider: ProviderId }) {

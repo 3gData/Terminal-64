@@ -1,6 +1,7 @@
 import type { NormalizedProviderEvent } from "../contracts/providerEvents";
 import { ClaudeLiveEventDecoder, getClaudeContextWindowForModel } from "./claudeEventDecoder";
 import { CodexLiveEventDecoder, getCodexContextWindow } from "./codexEventDecoder";
+import { CursorLiveEventDecoder } from "./cursorEventDecoder";
 import { isProviderId, type ProviderId } from "./providers";
 import { onClaudeDone, onClaudeEvent, onCodexDone, onCodexEvent, onProviderEvent } from "./tauriApi";
 
@@ -28,6 +29,7 @@ type ProviderLiveEventDecoder = {
 const contextWindowResolvers: Partial<Record<ProviderId, ContextWindowResolver>> = {
   anthropic: (model) => getClaudeContextWindowForModel(model || ""),
   openai: getCodexContextWindow,
+  cursor: () => 200_000,
 };
 
 export function getProviderEventContextWindow(
@@ -42,9 +44,11 @@ export async function subscribeProviderEventIngestion(
 ): Promise<() => void> {
   const claudeDecoder = new ClaudeLiveEventDecoder();
   const codexDecoder = new CodexLiveEventDecoder();
+  const cursorDecoder = new CursorLiveEventDecoder();
   const decoders: Record<ProviderId, ProviderLiveEventDecoder> = {
     anthropic: claudeDecoder,
     openai: codexDecoder,
+    cursor: cursorDecoder,
   };
   const providersWithUnifiedEvents = new Set<ProviderId>();
   const unlistens: (() => void)[] = [];

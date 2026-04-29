@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import type { ChatMessage, ToolCall, McpTool, HookEvent, PermissionMode } from "../lib/types";
-import { getProviderManifest, type ProviderId } from "../lib/providers";
+import {
+  getProviderHistoryPolicy,
+  getProviderManifest,
+  isProviderId,
+  providerPersistsLocalTranscript,
+  type ProviderId,
+} from "../lib/providers";
 import { hydrateProviderHistory } from "../lib/providerRuntime";
 import type { ProviderHydrateInput } from "../contracts/providerRuntime";
 
@@ -12,11 +18,15 @@ export const PROVIDER_SESSIONS_STORAGE_KEY = "terminal64-claude-sessions";
 export const STORAGE_KEY = PROVIDER_SESSIONS_STORAGE_KEY;
 const STALE_UNNAMED_META_MS = 14 * 24 * 60 * 60 * 1000;
 const MAX_PERSISTED_META_ENTRIES = 160;
+const MAX_LOCAL_TRANSCRIPT_MESSAGES = 500;
 
 export interface OpenAiProviderSessionMetadata {
   codexThreadId: string | null;
+  /** @deprecated Use providerState.providerPermissions.openai. */
   selectedCodexPermission: string | null;
 }
+
+export type ProviderPermissionMap = Partial<Record<ProviderId, string | null>>;
 
 export interface ProviderSessionMetadataRegistry {
   anthropic: Record<string, never>;
@@ -38,11 +48,13 @@ export interface ProviderSessionState {
   selectedEffort: string | null;
   seedTranscript: ChatMessage[] | null;
   providerMetadata: ProviderSessionMetadataMap;
+  providerPermissions: ProviderPermissionMap;
 }
 
 interface ProviderCompatibilityFields {
   provider: ProviderId;
   providerLocked: boolean;
+  providerPermissions: ProviderPermissionMap;
   codexThreadId: string | null;
   seedTranscript: ChatMessage[] | null;
   selectedModel: string | null;
@@ -55,6 +67,7 @@ type ProviderStateSource = {
   provider?: ProviderId | undefined;
   providerLocked?: boolean | undefined;
   providerMetadata?: ProviderSessionMetadataMap | undefined;
+  providerPermissions?: ProviderPermissionMap | undefined;
   codexThreadId?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
   selectedModel?: string | null | undefined;
@@ -90,6 +103,23 @@ function providerMetadataFromUnknown(value: unknown): ProviderSessionMetadataMap
   return metadata;
 }
 
+function isPermissionIdForProvider(provider: ProviderId, value: unknown): value is string {
+  return typeof value === "string" && getProviderManifest(provider).permissions.some((permission) => permission.id === value);
+}
+
+function providerPermissionsFromUnknown(value: unknown): ProviderPermissionMap {
+  if (!isRecord(value)) return {};
+  const permissions: ProviderPermissionMap = {};
+  for (const provider of Object.keys(value)) {
+    if (!isProviderId(provider)) continue;
+    const permissionId = value[provider];
+    if (permissionId === null || isPermissionIdForProvider(provider, permissionId)) {
+      permissions[provider] = permissionId;
+    }
+  }
+  return permissions;
+}
+
 function legacyOpenAiMetadataFromProviderState(value: unknown): OpenAiProviderSessionMetadata | null {
   if (!isRecord(value)) return null;
   if (isRecord(value.providerMetadata) && isRecord(value.providerMetadata.openai)) {
@@ -108,6 +138,7 @@ function createProviderState({
   selectedEffort,
   seedTranscript,
   providerMetadata,
+  providerPermissions,
   codexThreadId,
   selectedCodexPermission,
 }: {
@@ -117,19 +148,26 @@ function createProviderState({
   selectedEffort?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
   providerMetadata?: ProviderSessionMetadataMap | undefined;
+  providerPermissions?: ProviderPermissionMap | undefined;
   codexThreadId?: string | null | undefined;
   selectedCodexPermission?: string | null | undefined;
 }): ProviderSessionState {
   const metadata = providerMetadataFromUnknown(providerMetadata);
-  if (provider === "openai") {
-    const existingOpenAi = openAiMetadataFromUnknown(metadata.openai);
-    metadata.openai = {
-      codexThreadId: codexThreadId !== undefined ? codexThreadId : existingOpenAi.codexThreadId,
-      selectedCodexPermission: selectedCodexPermission !== undefined
-        ? selectedCodexPermission
-        : existingOpenAi.selectedCodexPermission,
-    };
+  const permissions = providerPermissionsFromUnknown(providerPermissions);
+  const existingOpenAi = openAiMetadataFromUnknown(metadata.openai);
+  const migratedOpenAiPermission = selectedCodexPermission !== undefined
+    ? selectedCodexPermission
+    : existingOpenAi.selectedCodexPermission;
+  if (
+    permissions.openai === undefined
+    && (migratedOpenAiPermission === null || isPermissionIdForProvider("openai", migratedOpenAiPermission))
+  ) {
+    permissions.openai = migratedOpenAiPermission;
   }
+  metadata.openai = {
+    codexThreadId: codexThreadId !== undefined ? codexThreadId : existingOpenAi.codexThreadId,
+    selectedCodexPermission: permissions.openai ?? null,
+  };
 
   return {
     provider,
@@ -138,6 +176,7 @@ function createProviderState({
     selectedEffort: selectedEffort ?? null,
     seedTranscript: seedTranscript ?? null,
     providerMetadata: metadata,
+    providerPermissions: permissions,
   };
 }
 
@@ -151,6 +190,7 @@ export function resolveSessionProviderState(session: ProviderStateSource | null 
       selectedEffort: session.providerState.selectedEffort,
       seedTranscript: session.providerState.seedTranscript,
       providerMetadata: session.providerState.providerMetadata,
+      providerPermissions: session.providerState.providerPermissions,
       ...(legacyOpenAiMetadata ? legacyOpenAiMetadata : {}),
     });
   }
@@ -161,6 +201,7 @@ export function resolveSessionProviderState(session: ProviderStateSource | null 
     selectedEffort: session?.selectedEffort ?? null,
     seedTranscript: session?.seedTranscript ?? null,
     providerMetadata: session?.providerMetadata,
+    providerPermissions: session?.providerPermissions,
     codexThreadId: session?.codexThreadId ?? null,
     selectedCodexPermission: session?.selectedCodexPermission ?? null,
   });
@@ -192,6 +233,23 @@ export function resolveOpenAiProviderSessionMetadata(
   return resolveProviderSessionMetadata(session, "openai");
 }
 
+export function getProviderPermissionId(
+  providerState: ProviderSessionState | null | undefined,
+  provider: ProviderId,
+): string {
+  const candidate = providerState?.providerPermissions[provider];
+  if (isPermissionIdForProvider(provider, candidate)) return candidate;
+  return getProviderManifest(provider).defaultPermission;
+}
+
+export function resolveProviderPermissionId(
+  session: ProviderStateSource | null | undefined,
+  provider?: ProviderId,
+): string {
+  const providerState = resolveSessionProviderState(session);
+  return getProviderPermissionId(providerState, provider ?? providerState.provider);
+}
+
 function providerCompatibilityFields(providerState: ProviderSessionState): ProviderCompatibilityFields {
   const openaiMetadata = providerState.provider === "openai"
     ? getOpenAiProviderSessionMetadata(providerState)
@@ -199,11 +257,14 @@ function providerCompatibilityFields(providerState: ProviderSessionState): Provi
   return {
     provider: providerState.provider,
     providerLocked: providerState.providerLocked,
+    providerPermissions: providerState.providerPermissions,
     codexThreadId: openaiMetadata?.codexThreadId ?? null,
     seedTranscript: providerState.seedTranscript,
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? null,
+    selectedCodexPermission: providerState.provider === "openai"
+      ? getProviderPermissionId(providerState, "openai")
+      : openaiMetadata?.selectedCodexPermission ?? null,
   };
 }
 
@@ -213,7 +274,10 @@ function hasOwn<K extends PropertyKey>(value: object, key: K): value is Record<K
 
 function normalizeProviderState(
   base: ProviderSessionState,
-  patch: Partial<ProviderCompatibilityFields> & { providerState?: ProviderSessionState },
+  patch: Partial<ProviderCompatibilityFields> & {
+    providerState?: ProviderSessionState;
+    providerPermissions?: ProviderPermissionMap;
+  },
 ): ProviderSessionState {
   const source = patch.providerState ?? base;
   const provider = hasOwn(patch, "provider") ? (patch.provider as ProviderId) : source.provider;
@@ -234,13 +298,23 @@ function normalizeProviderState(
     ? (patch.providerMetadata as ProviderSessionMetadataMap | undefined)
     : undefined;
   const providerMetadata = patchMetadata ? { ...sourceMetadata, ...patchMetadata } : sourceMetadata;
+  const sourcePermissions = source.providerPermissions ?? {};
+  const patchPermissions = hasOwn(patch, "providerPermissions")
+    ? (patch.providerPermissions as ProviderPermissionMap | undefined)
+    : undefined;
+  let providerPermissions = patchPermissions
+    ? { ...sourcePermissions, ...patchPermissions }
+    : sourcePermissions;
   const sourceOpenAiMetadata = getOpenAiProviderSessionMetadata(source);
   const codexThreadId = hasOwn(patch, "codexThreadId")
     ? (patch.codexThreadId as string | null)
     : sourceOpenAiMetadata?.codexThreadId ?? null;
   const selectedCodexPermission = hasOwn(patch, "selectedCodexPermission")
     ? (patch.selectedCodexPermission as string | null)
-    : sourceOpenAiMetadata?.selectedCodexPermission ?? null;
+    : providerPermissions.openai ?? sourceOpenAiMetadata?.selectedCodexPermission ?? null;
+  if (hasOwn(patch, "selectedCodexPermission")) {
+    providerPermissions = { ...providerPermissions, openai: selectedCodexPermission };
+  }
 
   return createProviderState({
     provider,
@@ -249,6 +323,7 @@ function normalizeProviderState(
     selectedEffort,
     seedTranscript,
     providerMetadata,
+    providerPermissions,
     codexThreadId,
     selectedCodexPermission,
   });
@@ -262,16 +337,16 @@ function createDefaultProviderState(provider: ProviderId, providerLocked: boolea
     selectedModel: manifest.defaultModel,
     selectedEffort: manifest.defaultEffort,
     providerMetadata: {},
+    providerPermissions: { [provider]: manifest.defaultPermission },
     codexThreadId: null,
     selectedCodexPermission: provider === "openai" ? manifest.defaultPermission : null,
     seedTranscript: null,
   });
 }
 
-// localStorage stores only lightweight provider-session UI metadata. Messages
-// and token/cost counters are derived from each provider's history backend, so
-// wiping localStorage must never lose chat history; dropping this metadata costs
-// only a draft prompt and a friendly name.
+// localStorage stores provider-session UI metadata. Messages and token/cost
+// counters normally come from provider-owned history; providers without that
+// history may store a bounded `localTranscript` here to survive reloads.
 export interface PersistedSessionMeta {
   sessionId: string;
   name: string;
@@ -280,6 +355,7 @@ export interface PersistedSessionMeta {
   lastSeenAt: number;
   schemaVersion: number;
   providerState?: ProviderSessionState;
+  providerPermissions?: ProviderPermissionMap;
   provider?: ProviderId;
   providerLocked?: boolean;
   codexThreadId?: string | null;
@@ -299,6 +375,9 @@ export interface PersistedSessionMeta {
   // the topbar Shift+Tab handler; Codex doesn't have an equivalent so the
   // chosen preset is what we re-send on each `codex exec resume`.
   selectedCodexPermission?: string | null;
+  // Providers without durable provider-owned history can persist a bounded
+  // local transcript so reload does not reopen an empty chat.
+  localTranscript?: ChatMessage[];
 }
 
 // Bump when the shape of PersistedSessionMeta changes. Older clients that
@@ -481,12 +560,15 @@ export interface ProviderSession {
   compactionCount: number;
   subagentIds: string[];
   hookEventLog: HookEvent[];
-  // True once the JSONL on disk has been loaded (or load attempted and failed).
+  // Compatibility name: true once provider history has loaded (or load
+  // attempted and failed).
   // UI uses this to know when it's safe to claim "no messages" vs "still loading".
   jsonlLoaded: boolean;
   // Canonical provider-owned metadata. New provider integrations should add
   // provider-specific state here instead of widening the flat session shape.
   providerState: ProviderSessionState;
+  /** @deprecated Use providerState.providerPermissions. Kept as a compatibility mirror. */
+  providerPermissions: ProviderPermissionMap;
   // Which backend CLI this session is bound to. Existing sessions hydrated
   // from older metadata default to "anthropic" for backward compatibility.
   /** @deprecated Use providerState.provider. Kept as a compatibility mirror. */
@@ -516,9 +598,8 @@ export interface ProviderSession {
   selectedModel: string | null;
   /** @deprecated Use providerState.selectedEffort. */
   selectedEffort: string | null;
-  // Codex sandbox/approval preset id. Null on Anthropic sessions; defaults
-  // to PROVIDER_CONFIG.openai.defaultPermission for OpenAI.
-  /** @deprecated Use getOpenAiProviderSessionMetadata(providerState)?.selectedCodexPermission. */
+  // Codex sandbox/approval preset compatibility mirror.
+  /** @deprecated Use providerState.providerPermissions.openai. */
   selectedCodexPermission: string | null;
 }
 
@@ -550,6 +631,7 @@ export interface ProviderSessionStoreState {
   clearSeedTranscript: (sessionId: string) => void;
   setSelectedModel: (sessionId: string, model: string | null) => void;
   setSelectedEffort: (sessionId: string, effort: string | null) => void;
+  setProviderPermission: (sessionId: string, provider: ProviderId, permission: string | null) => void;
   setSelectedCodexPermission: (sessionId: string, permission: string | null) => void;
   removeSession: (sessionId: string) => void;
   addUserMessage: (sessionId: string, text: string) => void;
@@ -748,9 +830,9 @@ function prunePersistedMeta(
 }
 
 function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSessionState {
-  const legacyProvider: ProviderId = entry.provider === "openai" ? "openai" : "anthropic";
+  const legacyProvider: ProviderId = isProviderId(entry.provider) ? entry.provider : "anthropic";
   const savedState = entry.providerState;
-  const provider: ProviderId = savedState?.provider === "openai" ? "openai" : legacyProvider;
+  const provider: ProviderId = isProviderId(savedState?.provider) ? savedState.provider : legacyProvider;
   const providerLocked = typeof savedState?.providerLocked === "boolean"
     ? savedState.providerLocked
     : typeof entry.providerLocked === "boolean"
@@ -776,6 +858,10 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
   const selectedCodexPermission =
     savedOpenAiMetadata?.selectedCodexPermission ??
     (typeof entry.selectedCodexPermission === "string" ? entry.selectedCodexPermission : null);
+  const providerPermissions = {
+    ...providerPermissionsFromUnknown(entry.providerPermissions),
+    ...providerPermissionsFromUnknown(savedState?.providerPermissions),
+  };
 
   return createProviderState({
     provider,
@@ -784,9 +870,29 @@ function providerStateFromPersistedMeta(entry: PersistedSessionMeta): ProviderSe
     selectedEffort,
     seedTranscript,
     providerMetadata: providerMetadataFromUnknown(savedState?.providerMetadata),
+    providerPermissions,
     codexThreadId,
     selectedCodexPermission,
   });
+}
+
+function shouldPersistLocalTranscript(provider: ProviderId): boolean {
+  return providerPersistsLocalTranscript(provider);
+}
+
+function localTranscriptFromMessages(provider: ProviderId, messages: ChatMessage[]): ChatMessage[] | undefined {
+  if (!shouldPersistLocalTranscript(provider) || messages.length === 0) return undefined;
+  return messages.slice(-MAX_LOCAL_TRANSCRIPT_MESSAGES);
+}
+
+function localTranscriptFromUnknown(value: unknown): ChatMessage[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((message): message is ChatMessage => {
+    if (!isRecord(message)) return false;
+    return (message.role === "user" || message.role === "assistant")
+      && typeof message.content === "string"
+      && typeof message.id === "string";
+  }).slice(-MAX_LOCAL_TRANSCRIPT_MESSAGES);
 }
 
 function buildPersistedMeta(
@@ -808,6 +914,9 @@ function buildPersistedMeta(
       ? { ...providerState, seedTranscript: null }
       : providerState;
     const compat = providerCompatibilityFields(persistedProviderState);
+    const localTranscript = dropSeedTranscripts
+      ? undefined
+      : localTranscriptFromMessages(compat.provider, s.messages);
     next[id] = {
       sessionId: s.sessionId,
       name: s.name,
@@ -816,10 +925,12 @@ function buildPersistedMeta(
       lastSeenAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       providerState: persistedProviderState,
+      providerPermissions: persistedProviderState.providerPermissions,
       provider: compat.provider,
       providerLocked: compat.providerLocked,
       codexThreadId: compat.codexThreadId,
       ...(!dropSeedTranscripts && compat.seedTranscript ? { seedTranscript: compat.seedTranscript } : {}),
+      ...(localTranscript ? { localTranscript } : {}),
       ...(compat.selectedModel ? { selectedModel: compat.selectedModel } : {}),
       ...(compat.selectedEffort ? { selectedEffort: compat.selectedEffort } : {}),
       ...(compat.selectedCodexPermission ? { selectedCodexPermission: compat.selectedCodexPermission } : {}),
@@ -835,6 +946,9 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
   if (!entry) return null;
   const providerState = providerStateFromPersistedMeta(entry);
   const compat = providerCompatibilityFields(providerState);
+  const localTranscript = shouldPersistLocalTranscript(compat.provider)
+    ? localTranscriptFromUnknown(entry.localTranscript)
+    : null;
   return {
     sessionId: entry.sessionId || sessionId,
     name: entry.name || "",
@@ -843,12 +957,14 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
     lastSeenAt: entry.lastSeenAt || 0,
     schemaVersion: (entry as { schemaVersion?: number }).schemaVersion ?? 0,
     providerState,
+    providerPermissions: providerState.providerPermissions,
     provider: compat.provider,
     providerLocked: compat.providerLocked,
     codexThreadId: compat.codexThreadId,
     // v2 blobs lack seedTranscript — leave undefined so consumers treat the
     // session as un-seeded. Stored as ChatMessage[] when present.
     ...(compat.seedTranscript ? { seedTranscript: compat.seedTranscript } : {}),
+    ...(localTranscript ? { localTranscript } : {}),
     // v3 and earlier didn't carry per-session model/effort; v4+ does.
     selectedModel: compat.selectedModel,
     selectedEffort: compat.selectedEffort,
@@ -856,8 +972,9 @@ function loadMetadata(sessionId: string): PersistedSessionMeta | null {
   };
 }
 
-// Write only lightweight metadata. Messages live in JSONL and are reloaded on
-// demand, so this payload stays small and cannot exhaust the storage quota.
+// Write lightweight metadata. Claude/Codex messages live in provider-owned
+// history and are reloaded on demand; providers without durable history keep a
+// bounded local transcript so reloads do not reopen an empty chat.
 function saveToStorage(sessions: Record<string, ProviderSession>) {
   if (downgradeLockActive) return;
   try {
@@ -901,15 +1018,20 @@ function debouncedSave() {
   }, 1000);
 }
 
+function sessionNeedsLocalTranscriptSave(session: ProviderSession | undefined): boolean {
+  if (!session || session.ephemeral) return false;
+  return shouldPersistLocalTranscript(resolveSessionProviderState(session).provider);
+}
+
 function patchSession(sessionId: string, patch: Partial<ProviderSession>) {
   useClaudeStore.setState((s) => ({ sessions: updateSession(s.sessions, sessionId, patch) }));
 }
 
 // In-memory hydration cache keyed by {mtime_ms, size}. Reloading the same
 // session within one app session is common (switching chat tabs, re-opening a
-// dialog) — if the JSONL hasn't changed, reuse the parsed messages instead of
-// streaming 10k records over IPC + reparsing in Rust. Not persisted: a process
-// restart will always do a fresh parse.
+// dialog) — if provider history hasn't changed, reuse the parsed messages
+// instead of streaming 10k records over IPC + reparsing in Rust. Not persisted:
+// a process restart will always do a fresh parse.
 interface HydrationCacheEntry {
   mtimeMs: number;
   size: number;
@@ -998,7 +1120,7 @@ async function hydrateSessionHistory(
       patchSession(sessionId, { jsonlLoaded: true });
     }
   } catch (err) {
-    const label = input.provider === "openai" ? "Codex" : "JSONL";
+    const label = getProviderHistoryPolicy(input.provider).hydrateFailureLabel;
     console.warn(`[claudeStore] ${label} hydrate failed:`, sessionId, err);
     patchSession(sessionId, { jsonlLoaded: true });
     throw err;
@@ -1008,7 +1130,7 @@ async function hydrateSessionHistory(
 // Async provider history hydration. Fire-and-forget — errors are logged but
 // non-fatal so the user can still interact with a session whose history hasn't
 // loaded yet.
-function hydrateFromJsonl(sessionId: string, cwd: string) {
+function hydrateFromProviderHistory(sessionId: string, cwd: string) {
   hydrateSessionHistory(sessionId, cwd, "extend").catch(() => {});
 }
 
@@ -1033,7 +1155,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
           saveToStorage(updated);
           return { sessions: updated };
         });
-        if (!existing.jsonlLoaded) hydrateFromJsonl(sessionId, cwd);
+        if (!existing.jsonlLoaded) hydrateFromProviderHistory(sessionId, cwd);
       }
       if (providerLocked === true && !existing.providerLocked) {
         set((s) => {
@@ -1064,7 +1186,12 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       : Array.isArray(meta?.seedTranscript) && meta.seedTranscript.length > 0
         ? meta.seedTranscript
         : null;
-    const seededMessages: ChatMessage[] = seededTranscript ? [...seededTranscript] : [];
+    const localTranscript = localTranscriptFromUnknown(meta?.localTranscript);
+    const seededMessages: ChatMessage[] = seededTranscript
+      ? [...seededTranscript]
+      : localTranscript
+        ? [...localTranscript]
+        : [];
     const seededPromptCount = seededMessages.filter((m) => m.role === "user").length;
     const seededProviderLocked = providerLocked !== undefined
       ? providerLocked || seededPromptCount > 0
@@ -1073,6 +1200,10 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
     const seededSelectedEffort = metaProviderState?.selectedEffort ?? meta?.selectedEffort ?? null;
     const seededSelectedCodexPermission =
       metaOpenAiMetadata?.selectedCodexPermission ?? meta?.selectedCodexPermission ?? null;
+    const seededProviderPermissions = {
+      ...providerPermissionsFromUnknown(meta?.providerPermissions),
+      ...providerPermissionsFromUnknown(metaProviderState?.providerPermissions),
+    };
     const seededProviderState = createProviderState({
       provider: seededProvider,
       providerLocked: seededProviderLocked,
@@ -1080,6 +1211,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       selectedEffort: seededSelectedEffort,
       seedTranscript: seededTranscript,
       providerMetadata: metaProviderState?.providerMetadata,
+      providerPermissions: seededProviderPermissions,
       codexThreadId: seededCodexThreadId,
       selectedCodexPermission: seededSelectedCodexPermission,
     });
@@ -1133,11 +1265,11 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       return { sessions };
     });
 
-    // Kick off JSONL hydration when we know where to look. Ephemeral and
+    // Kick off provider history hydration when we know where to look. Ephemeral and
     // cwd-less sessions skip this; the provider chat shell calls createSession
     // again with a cwd (or calls setCwd) once the panel mounts with its working dir.
     if (!ephemeral && seededCwd) {
-      hydrateFromJsonl(sessionId, seededCwd);
+      hydrateFromProviderHistory(sessionId, seededCwd);
     }
   },
 
@@ -1211,7 +1343,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
         error: null,
         providerLocked: true,
       });
-      if (shouldLockProvider && !session.ephemeral) debouncedSave();
+      if ((shouldLockProvider && !session.ephemeral) || sessionNeedsLocalTranscriptSave(session)) debouncedSave();
       return { sessions: updated };
     });
   },
@@ -1243,7 +1375,9 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
         timestamp: Date.now(),
         ...(toolCalls !== undefined && { toolCalls }),
       };
-      return { sessions: updateSession(s.sessions, sessionId, { messages: [...session.messages, msg], streamingText: "" }) };
+      const updated = updateSession(s.sessions, sessionId, { messages: [...session.messages, msg], streamingText: "" });
+      if (sessionNeedsLocalTranscriptSave(session)) debouncedSave();
+      return { sessions: updated };
     });
   },
 
@@ -1267,7 +1401,9 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
             };
             const messages = msgs.slice();
             messages[i] = { ...msg, toolCalls: updatedToolCalls };
-            return { sessions: updateSession(s.sessions, sessionId, { messages }) };
+            const updated = updateSession(s.sessions, sessionId, { messages });
+            if (sessionNeedsLocalTranscriptSave(session)) debouncedSave();
+            return { sessions: updated };
           }
         }
       }
@@ -1297,7 +1433,9 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
             };
             const messages = msgs.slice();
             messages[i] = { ...msg, toolCalls: updatedToolCalls };
-            return { sessions: updateSession(s.sessions, sessionId, { messages }) };
+            const updated = updateSession(s.sessions, sessionId, { messages });
+            if (sessionNeedsLocalTranscriptSave(session)) debouncedSave();
+            return { sessions: updated };
           }
         }
       }
@@ -1434,10 +1572,10 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       debouncedSave();
       return { sessions: updated };
     });
-    // Hydrate from JSONL the first time we learn the cwd for a non-ephemeral
-    // session that hasn't been loaded yet.
+    // Hydrate from provider history the first time we learn the cwd for a
+    // non-ephemeral session that hasn't been loaded yet.
     if (prev && !prev.ephemeral && !prev.jsonlLoaded && cwd && cwd !== prev.cwd) {
-      hydrateFromJsonl(sessionId, cwd);
+      hydrateFromProviderHistory(sessionId, cwd);
     }
   },
 
@@ -1453,7 +1591,10 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       const providerState = resolveSessionProviderState(session);
       const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
       if (!session || openaiMetadata?.codexThreadId === threadId) return s;
-      shouldHydrate = providerState.provider === "openai" && !!threadId && !!session.cwd && session.jsonlLoaded;
+      shouldHydrate = getProviderHistoryPolicy(providerState.provider).source === "codex-rollout"
+        && !!threadId
+        && !!session.cwd
+        && session.jsonlLoaded;
       hydrateCwd = session.cwd;
       const updated = updateSession(s.sessions, sessionId, { codexThreadId: threadId });
       if (!session.ephemeral) debouncedSave();
@@ -1461,7 +1602,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
     });
     if (shouldHydrate && hydrateCwd) {
       patchSession(sessionId, { jsonlLoaded: false });
-      hydrateFromJsonl(sessionId, hydrateCwd);
+      hydrateFromProviderHistory(sessionId, hydrateCwd);
     }
   },
 
@@ -1506,12 +1647,31 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
     });
   },
 
+  setProviderPermission: (sessionId, provider, permission) => {
+    set((s) => {
+      const session = s.sessions[sessionId];
+      if (!session) return s;
+      const providerState = resolveSessionProviderState(session);
+      if (getProviderPermissionId(providerState, provider) === permission) return s;
+      const updated = updateSession(s.sessions, sessionId, {
+        providerPermissions: { [provider]: permission },
+        ...(provider === "openai" ? { selectedCodexPermission: permission } : {}),
+      });
+      if (!session.ephemeral) debouncedSave();
+      return { sessions: updated };
+    });
+  },
+
   setSelectedCodexPermission: (sessionId, permission) => {
     set((s) => {
       const session = s.sessions[sessionId];
-      const openaiMetadata = resolveOpenAiProviderSessionMetadata(session);
-      if (!session || openaiMetadata?.selectedCodexPermission === permission) return s;
-      const updated = updateSession(s.sessions, sessionId, { selectedCodexPermission: permission });
+      if (!session) return s;
+      const providerState = resolveSessionProviderState(session);
+      if (getProviderPermissionId(providerState, "openai") === permission) return s;
+      const updated = updateSession(s.sessions, sessionId, {
+        providerPermissions: { openai: permission },
+        selectedCodexPermission: permission,
+      });
       if (!session.ephemeral) debouncedSave();
       return { sessions: updated };
     });
@@ -1550,7 +1710,7 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
     set((s) => ({ sessions: updateSession(s.sessions, sessionId, { promptQueue: [] }) }));
   },
 
-  // Hydrate an empty/shorter session from the authoritative JSONL snapshot.
+  // Hydrate an empty/shorter session from the authoritative provider snapshot.
   // Refuses to shrink existing history so a stale load can't clobber a live
   // session that has already accumulated turns.
   loadFromDisk: (sessionId, messages) => {
@@ -1694,10 +1854,12 @@ const providerSessionStore = create<ProviderSessionStoreState>((set, get) => ({
       if (idx < 0) return s;
       const messages = session.messages.slice(0, idx);
       const promptCount = messages.filter((m) => m.role === "user").length;
-      return { sessions: updateSession(s.sessions, sessionId, {
+      const updated = updateSession(s.sessions, sessionId, {
         messages, promptCount, hasBeenStarted: promptCount > 0, streamingText: "", isStreaming: false, error: null,
         pendingPermission: null, pendingQuestions: null, activeLoop: null, promptQueue: [],
-      }) };
+      });
+      if (sessionNeedsLocalTranscriptSave(session)) debouncedSave();
+      return { sessions: updated };
     });
   },
 
@@ -1782,8 +1944,8 @@ export function getSessionsForVoiceMatch(): { id: string; name: string }[] {
   return out;
 }
 
-// Emergency metadata flush on tab hide / close. Cheap now that the payload is
-// just a handful of strings per session.
+// Emergency metadata flush on tab hide / close. Usually cheap provider UI
+// metadata; providers without history may also include a bounded transcript.
 export function flushSave() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (idleSaveHandle !== null) {

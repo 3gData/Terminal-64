@@ -35,6 +35,14 @@ impl ProviderRegistry {
     /// Register an adapter under its `ProviderKind`. Later registrations for
     /// the same kind replace the earlier one.
     pub fn register(&mut self, kind: ProviderKind, adapter: Arc<dyn ProviderAdapter>) {
+        assert_eq!(
+            kind,
+            adapter.provider(),
+            "provider registry key must match adapter provider"
+        );
+        // Keep the full capability shape live; adding a capability field should
+        // force registry-level consideration instead of becoming silent dead code.
+        let _model_switch_capability = adapter.capabilities().session_model_switch;
         self.adapters.insert(kind, adapter);
     }
 
@@ -181,23 +189,6 @@ impl ProviderRegistry {
     pub fn kinds(&self) -> Vec<ProviderKind> {
         self.adapters.keys().copied().collect()
     }
-
-    /// Fan out `stop_all` to every registered adapter. Collects per-adapter
-    /// errors rather than short-circuiting so one misbehaving provider can't
-    /// leak another's sessions on shutdown.
-    pub async fn stop_all(&self) -> Result<(), Vec<ProviderAdapterError>> {
-        let mut errors = Vec::new();
-        for adapter in self.adapters.values() {
-            if let Err(err) = adapter.stop_all().await {
-                errors.push(err);
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
-    }
 }
 
 impl Default for ProviderRegistry {
@@ -211,24 +202,16 @@ impl Default for ProviderRegistry {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
     use serde_json::json;
-    use tokio::sync::mpsc;
 
     use super::*;
-    use crate::providers::events::ProviderEvent;
-    use crate::providers::traits::{
-        ProviderAdapterCapabilities, ProviderApprovalDecision, ProviderCommandAdapter,
-        ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
-        ProviderSessionStartInput, ProviderThreadSnapshot, ProviderThreadTurnSnapshot,
-        ProviderTurnStartResult, ProviderUserInputAnswers,
-    };
+    use crate::providers::traits::{ProviderAdapterCapabilities, ProviderSessionModelSwitchMode};
+    use crate::providers::{ClaudeAdapter, CodexAdapter, CursorAdapter};
 
     struct MockAdapter {
         kind: ProviderKind,
         capabilities: ProviderAdapterCapabilities,
         calls: Arc<Mutex<Vec<String>>>,
-        stop_all_error: Option<String>,
     }
 
     impl MockAdapter {
@@ -244,13 +227,7 @@ mod tests {
                     history,
                 },
                 calls,
-                stop_all_error: None,
             }
-        }
-
-        fn with_stop_all_error(mut self, error: &str) -> Self {
-            self.stop_all_error = Some(error.to_string());
-            self
         }
 
         fn record(&self, call: impl Into<String>) {
@@ -258,7 +235,15 @@ mod tests {
         }
     }
 
-    impl ProviderCommandAdapter for MockAdapter {
+    impl ProviderAdapter for MockAdapter {
+        fn provider(&self) -> ProviderKind {
+            self.kind
+        }
+
+        fn capabilities(&self) -> &ProviderAdapterCapabilities {
+            &self.capabilities
+        }
+
         fn create_session(
             &self,
             _app_handle: &tauri::AppHandle,
@@ -285,17 +270,6 @@ mod tests {
         fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
             self.record(format!("close:{session_id}"));
             Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl ProviderAdapter for MockAdapter {
-        fn provider(&self) -> ProviderKind {
-            self.kind
-        }
-
-        fn capabilities(&self) -> &ProviderAdapterCapabilities {
-            &self.capabilities
         }
 
         fn history_truncate(
@@ -331,104 +305,6 @@ mod tests {
             self.record(format!("history-delete:{req}"));
             Ok(json!({ "status": "applied", "method": "deleted", "operation": "delete" }))
         }
-
-        async fn start_session(
-            &self,
-            input: ProviderSessionStartInput,
-        ) -> Result<ProviderSession, ProviderAdapterError> {
-            self.record(format!("start:{input}"));
-            Ok(json!({ "id": "thread-1", "provider": format!("{:?}", self.kind) }))
-        }
-
-        async fn send_turn(
-            &self,
-            input: ProviderSendTurnInput,
-        ) -> Result<ProviderTurnStartResult, ProviderAdapterError> {
-            self.record(format!("turn:{input}"));
-            Ok(json!({ "turnId": "turn-1" }))
-        }
-
-        async fn interrupt_turn(
-            &self,
-            thread_id: &str,
-            _turn_id: Option<&str>,
-        ) -> Result<(), ProviderAdapterError> {
-            self.record(format!("interrupt:{thread_id}"));
-            Ok(())
-        }
-
-        async fn respond_to_request(
-            &self,
-            thread_id: &str,
-            request_id: &str,
-            _decision: ProviderApprovalDecision,
-        ) -> Result<(), ProviderAdapterError> {
-            self.record(format!("request:{thread_id}:{request_id}"));
-            Ok(())
-        }
-
-        async fn respond_to_user_input(
-            &self,
-            thread_id: &str,
-            request_id: &str,
-            _answers: ProviderUserInputAnswers,
-        ) -> Result<(), ProviderAdapterError> {
-            self.record(format!("user-input:{thread_id}:{request_id}"));
-            Ok(())
-        }
-
-        async fn stop_session(&self, thread_id: &str) -> Result<(), ProviderAdapterError> {
-            self.record(format!("stop:{thread_id}"));
-            Ok(())
-        }
-
-        async fn list_sessions(&self) -> Vec<ProviderSession> {
-            vec![json!({ "id": "thread-1" })]
-        }
-
-        async fn has_session(&self, thread_id: &str) -> bool {
-            thread_id == "thread-1"
-        }
-
-        async fn read_thread(
-            &self,
-            thread_id: &str,
-        ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
-            Ok(ProviderThreadSnapshot {
-                thread_id: thread_id.to_string(),
-                provider: self.kind,
-                turns: vec![ProviderThreadTurnSnapshot {
-                    turn_id: "turn-1".to_string(),
-                    items: Vec::new(),
-                    usage: None,
-                    metadata: None,
-                }],
-                metadata: None,
-            })
-        }
-
-        async fn rollback_thread(
-            &self,
-            thread_id: &str,
-            num_turns: u32,
-        ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
-            self.record(format!("rollback:{thread_id}:{num_turns}"));
-            self.read_thread(thread_id).await
-        }
-
-        async fn stop_all(&self) -> Result<(), ProviderAdapterError> {
-            self.record(format!("stop-all:{:?}", self.kind));
-            if let Some(error) = &self.stop_all_error {
-                Err(error.clone())
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn stream_events(&self) -> mpsc::Receiver<ProviderEvent> {
-            let (_tx, rx) = mpsc::channel(1);
-            rx
-        }
     }
 
     #[test]
@@ -444,6 +320,54 @@ mod tests {
         assert!(full.fork);
         assert!(full.rewind);
         assert!(full.delete);
+    }
+
+    fn assert_provider_adapter<T: ProviderAdapter + Send + Sync + 'static>() {}
+
+    #[test]
+    fn concrete_provider_adapters_implement_common_contract() {
+        assert_provider_adapter::<ClaudeAdapter>();
+        assert_provider_adapter::<CodexAdapter>();
+        assert_provider_adapter::<CursorAdapter>();
+
+        let providers: Vec<(ProviderKind, Arc<dyn ProviderAdapter>)> = vec![
+            (ProviderKind::ClaudeAgent, Arc::new(ClaudeAdapter::new())),
+            (ProviderKind::Codex, Arc::new(CodexAdapter::new())),
+            (ProviderKind::Cursor, Arc::new(CursorAdapter::new())),
+        ];
+
+        for (expected, adapter) in providers {
+            assert_eq!(adapter.provider(), expected);
+            let history = adapter.capabilities().history;
+            match expected {
+                ProviderKind::ClaudeAgent | ProviderKind::Codex => {
+                    assert!(history.hydrate);
+                    assert!(history.fork);
+                    assert!(history.rewind);
+                    assert!(history.delete);
+                }
+                ProviderKind::Cursor => {
+                    assert!(!history.hydrate);
+                    assert!(!history.fork);
+                    assert!(!history.rewind);
+                    assert!(!history.delete);
+                }
+                ProviderKind::OpenCode => unreachable!("OpenCode has no adapter yet"),
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "provider registry key must match adapter provider")]
+    fn registry_rejects_mismatched_provider_key() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(MockAdapter::new(
+            ProviderKind::Codex,
+            ProviderHistoryCapabilities::NONE,
+            calls,
+        ));
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::ClaudeAgent, adapter);
     }
 
     #[test]
@@ -576,37 +500,5 @@ mod tests {
             calls,
             vec!["history-hydrate:{\"session_id\":\"session-1\"}".to_string()]
         );
-    }
-
-    #[tokio::test]
-    async fn registry_stop_all_collects_provider_errors() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = ProviderRegistry::new();
-        registry.register(
-            ProviderKind::ClaudeAgent,
-            Arc::new(MockAdapter::new(
-                ProviderKind::ClaudeAgent,
-                ProviderHistoryCapabilities::FULL,
-                calls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderKind::Codex,
-            Arc::new(
-                MockAdapter::new(
-                    ProviderKind::Codex,
-                    ProviderHistoryCapabilities::FULL,
-                    calls.clone(),
-                )
-                .with_stop_all_error("codex stop failed"),
-            ),
-        );
-
-        let errors = registry.stop_all().await.unwrap_err();
-        assert_eq!(errors, vec!["codex stop failed".to_string()]);
-
-        let calls = calls.lock().unwrap().clone();
-        assert!(calls.iter().any(|call| call == "stop-all:ClaudeAgent"));
-        assert!(calls.iter().any(|call| call == "stop-all:Codex"));
     }
 }

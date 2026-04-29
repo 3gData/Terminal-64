@@ -2375,6 +2375,339 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-28T20:24:14+02:00"
+    },
+    {
+      "id": "bug-123",
+      "timestamp": "2026-04-29T18:57:00+02:00",
+      "error_message": "Cursor provider showed thinking but no assistant output because headless cursor-agent exited at the workspace trust prompt.",
+      "file": "src-tauri/src/providers/cursor.rs",
+      "root_cause": "The new Cursor adapter launched `cursor-agent -p --output-format stream-json` without `--trust`. In headless print mode Cursor exits with `Workspace Trust Required` unless `--trust`, `--yolo`, or `--force` is passed.",
+      "fix": "Added `--trust` and `--approve-mcps` to the Cursor CLI command builder, mapped Terminal 64 plan mode to Cursor `--mode plan`, and logged no-stdout Cursor exits before emitting the provider error event.",
+      "tags": [
+        "cursor",
+        "provider",
+        "workspace-trust",
+        "mcp"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T18:57:00+02:00"
+    },
+    {
+      "id": "bug-124",
+      "timestamp": "2026-04-29T19:08:00+02:00",
+      "error_message": "Fast provider turns could show thinking and then finish with no assistant message.",
+      "file": "src/hooks/useClaudeEvents.ts",
+      "root_cause": "On `turn_completed`, the provider event handler called `flushBeforeFinalization()` but then read `session.streamingText` from the stale Zustand state object captured before the flush. Cursor emits assistant text and result back-to-back, so the freshly flushed streaming text was cleared instead of finalized.",
+      "fix": "After flushing pending text, read a fresh store snapshot before finalizing assistant text. Also made the Cursor decoder render the final `result` text when no assistant text event was observed.",
+      "tags": [
+        "provider-events",
+        "cursor",
+        "zustand",
+        "streaming-text"
+      ],
+      "related_bugs": [
+        "bug-123"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T19:08:00+02:00"
+    },
+    {
+      "id": "bug-125",
+      "timestamp": "2026-04-29T19:24:00+02:00",
+      "error_message": "Cursor agents did not get Terminal 64 MCP/delegation tools reliably.",
+      "file": "src-tauri/src/lib.rs, mcp/delegation-common.mjs",
+      "root_cause": "Cursor runs MCP servers from `.cursor/mcp.json` and expects the Cursor-owned MCP process to receive delegation env through that config. `/delegate` also depended on a fragile assistant-formatted text block. A later smoke test showed that setting content-length response framing was wrong for Cursor CLI and made the server fail to load.",
+      "fix": "Updated Cursor MCP config to use `${env:...}` delegation env placeholders, added the `StartDelegation` MCP tool for parent agents, made the Cursor adapter run `cursor-agent mcp enable terminal-64` before turns, changed `/delegate` to ask the agent to call that tool instead of writing a block, added a tagged JSON fallback, and later migrated Cursor MCP response framing back to newline in bug-127.",
+      "tags": [
+        "cursor",
+        "mcp",
+        "delegation",
+        "tool-calling"
+      ],
+      "related_bugs": [
+        "bug-123",
+        "bug-124"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T20:52:20+02:00"
+    },
+    {
+      "id": "bug-126",
+      "timestamp": "2026-04-29T20:33:53+02:00",
+      "error_message": "User reported that chat disappears after app reload because there is no chat persistence.",
+      "file": "src/stores/claudeStore.ts",
+      "root_cause": "Cursor sessions do not yet hydrate from provider-owned history like Claude JSONL or Codex rollout files, and the shared store previously persisted only lightweight metadata plus seed transcripts. Normal user/assistant/tool message mutations therefore were not written to localStorage for Cursor.",
+      "fix": "Added bounded `localTranscript` persistence for Cursor sessions, hydrated it during session creation, saved metadata after Cursor user/assistant/tool/truncate mutations, and added a typechecked provider verification fixture for Cursor transcript hydrate/writeback.",
+      "tags": [
+        "cursor",
+        "persistence",
+        "localStorage",
+        "provider-store"
+      ],
+      "related_bugs": [
+        "bug-123",
+        "bug-124"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T20:33:53+02:00"
+    },
+    {
+      "id": "bug-127",
+      "timestamp": "2026-04-29T20:52:20+02:00",
+      "error_message": "User reported Cursor MCPs still were not loading.",
+      "file": "src-tauri/src/lib.rs, src/lib/providerRuntimes/cursor.ts, src/components/claude/ClaudeChat.tsx, mcp/delegation-common.mjs",
+      "root_cause": "Terminal 64 wrote `.cursor/mcp.json` with `T64_MCP_OUTPUT_FRAMING=content-length`. Cursor CLI spawned the MCP server, but hung during handshake and eventually reported `terminal-64: Error: Connection failed`. Direct server smoke tests hid this because they used content-length framing intentionally. Separately, Cursor default mode rejects MCP tool calls unless the turn runs with `--force`.",
+      "fix": "Changed Cursor MCP config generation to `T64_MCP_OUTPUT_FRAMING=newline`, made the Cursor runtime call `ensureCursorMcp` on every turn so existing bad configs migrate, kept `StartDelegation` exposed as an MCP tool, marked read-only tools with annotations, and forced only the Cursor `/delegate` orchestrator turn through `bypass_all` so the MCP call can execute.",
+      "tags": [
+        "cursor",
+        "mcp",
+        "stdio-framing",
+        "delegation"
+      ],
+      "related_bugs": [
+        "bug-125"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T20:52:20+02:00"
+    },
+    {
+      "id": "bug-128",
+      "timestamp": "2026-04-29T20:57:29+02:00",
+      "error_message": "Cursor successfully called terminal-64-StartDelegation, but Terminal 64 did not spawn the delegation team chat.",
+      "file": "src/lib/cursorEventDecoder.ts, src/components/claude/ClaudeChat.tsx",
+      "root_cause": "Cursor emits MCP tool calls with provider-prefixed names like `terminal-64-StartDelegation` and nests the real tool payload under `tool_call.mcpToolCall.args.args`. The frontend delegation detector only matched an exact normalized `StartDelegation` name and parsed top-level `context`/`tasks`, so it ignored the successful tool call.",
+      "fix": "Updated the Cursor event decoder to unwrap nested `args.args` into provider tool input, updated the delegation detector to accept provider-prefixed names ending in `StartDelegation`, and added a provider event normalization fixture for the Cursor MCP shape.",
+      "tags": [
+        "cursor",
+        "mcp",
+        "delegation",
+        "tool-decoder"
+      ],
+      "related_bugs": [
+        "bug-127"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T20:57:29+02:00"
+    },
+    {
+      "id": "bug-129",
+      "timestamp": "2026-04-29T20:59:51+02:00",
+      "error_message": "User reported Cursor sessions did not show MCP status like the other providers.",
+      "file": "src-tauri/src/providers/cursor.rs, src/lib/cursorEventDecoder.ts",
+      "root_cause": "Cursor's stream-json turn output does not provide Claude/Codex-style MCP startup status events. Terminal 64 had configured and approved the MCP server, but no provider-neutral `mcp_status` event was emitted for the UI to render.",
+      "fix": "Added synthetic Cursor `mcp_status` provider events after MCP approval, including ready/error state, stdio transport, and the expected tool list for parent vs delegation-child sessions. Updated the Cursor decoder and provider verification fixture to normalize that event.",
+      "tags": [
+        "cursor",
+        "mcp",
+        "status",
+        "provider-events"
+      ],
+      "related_bugs": [
+        "bug-127",
+        "bug-128"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T20:59:51+02:00"
+    },
+    {
+      "id": "bug-130",
+      "timestamp": "2026-04-29T21:55:39+02:00",
+      "error_message": "A provider-session-store import rewrite in App.tsx left an extra closing import line, producing invalid TypeScript syntax.",
+      "file": "src/App.tsx",
+      "root_cause": "The patch changed the provider store import path by adding a new `} from` line instead of replacing the existing line.",
+      "fix": "Replaced the full import terminator with `} from \"./stores/providerSessionStore\";` so the import block is syntactically valid.",
+      "tags": [
+        "typescript",
+        "import",
+        "provider-naming"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T21:55:39+02:00"
+    },
+    {
+      "id": "bug-131",
+      "timestamp": "2026-04-29T21:56:32+02:00",
+      "error_message": "`npx tsc --noEmit` failed with provider permission/control and provider modularity verification type errors during parallel agent work.",
+      "file": "src/hooks/useProviderPermissionControls.ts, src/lib/providerModularity.verification.ts",
+      "root_cause": "Concurrent provider-permission edits introduced temporarily inconsistent source discriminants, providerPermissions requirements, and manifest controls requirements while Agent 1 was verifying naming-entrypoint changes.",
+      "fix": "Not fixed by Agent 1; reported the exact failing files and ownership to the team so the permission-control owner can finish the in-flight migration.",
+      "tags": [
+        "typescript",
+        "parallel-work",
+        "provider-permissions",
+        "verification"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T21:56:32+02:00"
+    },
+    {
+      "id": "bug-132",
+      "timestamp": "2026-04-29T21:57:14+02:00",
+      "error_message": "`npm run typecheck` failed during Agent 6 history-source work with the same in-flight provider permission/control and provider modularity verification errors.",
+      "file": "src/hooks/useProviderPermissionControls.ts, src/lib/providerModularity.verification.ts",
+      "root_cause": "Parallel provider-permission/control edits temporarily require `providerPermissions` and manifest `controls` while some verification fixtures and permission-control comparisons still use the older shape.",
+      "fix": "Not fixed by Agent 6; errors are owned by the concurrent permission-control migration. Agent 6 verified the failure set did not point to the new history-source fields directly.",
+      "tags": [
+        "typescript",
+        "parallel-work",
+        "provider-permissions",
+        "verification",
+        "history-source"
+      ],
+      "related_bugs": [
+        "bug-131"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T21:57:14+02:00"
+    },
+    {
+      "id": "bug-133",
+      "timestamp": "2026-04-29T21:59:56+02:00",
+      "error_message": "`cargo fmt --check` failed during Agent 7 backend adapter verification because `src-tauri/src/lib.rs` had unformatted new `ensure_*_mcp_impl` wrapper signatures.",
+      "file": "src-tauri/src/lib.rs",
+      "root_cause": "Parallel backend lifecycle edits added long single-line function signatures after Agent 7 had intentionally avoided modifying `src-tauri/src/lib.rs`.",
+      "fix": "Agent 3 ran cargo fmt after completing the backend lifecycle helper edits; cargo fmt --check now passes.",
+      "tags": [
+        "rustfmt",
+        "parallel-work",
+        "backend",
+        "provider-lifecycle"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:02:21+02:00"
+    },
+    {
+      "id": "bug-134",
+      "timestamp": "2026-04-29T22:00:15+02:00",
+      "error_message": "`npm run typecheck` failed during Agent 5 event-semantics verification with in-flight provider permission/control and provider modularity verification errors.",
+      "file": "src/stores/claudeStore.ts, src/lib/providerModularity.verification.ts",
+      "root_cause": "Parallel provider-permission/control and delegation verification edits temporarily disagree on providerPermissions, manifest controls, and parseDelegationStartFromMessage fixture shapes while Agent 5 was verifying event semantics.",
+      "fix": "Not fixed by Agent 5; the failing files are owned by concurrent permission/delegation work. The failure output did not reference src/lib/providerEventSemantics.ts or src/hooks/useClaudeEvents.ts.",
+      "tags": [
+        "typescript",
+        "parallel-work",
+        "provider-events",
+        "provider-permissions",
+        "verification"
+      ],
+      "related_bugs": [
+        "bug-131",
+        "bug-132"
+      ],
+      "occurrences": 2,
+      "last_seen": "2026-04-29T22:02:12+02:00"
+    },
+    {
+      "id": "bug-135",
+      "timestamp": "2026-04-29T22:01:29+02:00",
+      "error_message": "Agent 7 ran an `rg` shell command with unescaped Markdown backticks, causing zsh to try executing `ProviderAdapter`.",
+      "file": ".wolf/cerebrum.md",
+      "root_cause": "The search pattern was wrapped in double quotes, so shell command substitution interpreted the backticked term before `rg` ran.",
+      "fix": "Reran the search with the pattern in single quotes so backticks were treated literally.",
+      "tags": [
+        "shell",
+        "verification",
+        "openwolf"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:01:29+02:00"
+    },
+    {
+      "id": "bug-136",
+      "timestamp": "2026-04-29T22:04:50+02:00",
+      "error_message": "`npm run typecheck` failed during Agent 4 delegation workflow extraction with provider modularity fixture shape errors and in-flight providerPermissions patch errors.",
+      "file": "src/lib/providerModularity.verification.ts, src/stores/claudeStore.ts",
+      "root_cause": "The new delegation workflow fixtures passed full ChatMessage objects to a helper typed as a content/toolCalls pick, while concurrent provider-control edits made the future-provider fixture require manifest controls and providerPermissions.",
+      "fix": "Trimmed delegation parser fixtures to the helper input shape, added controls/providerPermissions to the future-provider verification stub, and kept the concurrent store providerPermissions patch shape aligned. `npm run typecheck` now passes.",
+      "tags": [
+        "typescript",
+        "delegation",
+        "verification",
+        "parallel-work",
+        "provider-permissions"
+      ],
+      "related_bugs": [
+        "bug-131",
+        "bug-132",
+        "bug-134"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:04:50+02:00"
+    },
+    {
+      "id": "bug-137",
+      "timestamp": "2026-04-29T22:06:00+02:00",
+      "error_message": "`npm run build -- --noEmit` failed with Vite `Unknown option --noEmit` during Agent 2 verification.",
+      "file": "package.json",
+      "root_cause": "`npm run build` invokes `vite build`, not the TypeScript compiler, so forwarding `--noEmit` passes an unsupported flag to Vite.",
+      "fix": "Ran the correct verification command, `npx tsc --noEmit`, which passed after the provider permission/control migration.",
+      "tags": [
+        "verification",
+        "typescript",
+        "vite",
+        "provider-permissions"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:06:00+02:00"
+    },
+    {
+      "id": "bug-138",
+      "timestamp": "2026-04-29T22:07:00+02:00",
+      "error_message": "`rg` failed with `the literal \"\\n\" is not allowed in a regex` during Agent 2 cleanup search.",
+      "file": "terminal command",
+      "root_cause": "A multiline regex was passed to ripgrep without `--multiline`; ripgrep rejects literal newline matching by default.",
+      "fix": "Split the cleanup search into two single-line ripgrep commands, which returned no remaining non-compatibility matches.",
+      "tags": [
+        "verification",
+        "shell",
+        "ripgrep",
+        "provider-permissions"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:07:00+02:00"
+    },
+    {
+      "id": "bug-139",
+      "timestamp": "2026-04-29T22:10:31+02:00",
+      "error_message": "`git status --short --ignored=.wolf/hooks/_session.json .wolf/token-ledger.json` failed with `fatal: Invalid ignored mode '.wolf/hooks/_session.json'`.",
+      "file": "terminal command",
+      "root_cause": "`git status --ignored` accepts ignored-mode values such as traditional/matching/no, not file paths. I passed a path as the option value while trying to inspect OpenWolf runtime-state files.",
+      "fix": "Dropped the invalid status form and continued verification with normal `git status --short`, `git diff --stat`, and targeted file scans.",
+      "tags": [
+        "verification",
+        "git",
+        "shell",
+        "openwolf"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:10:31+02:00"
+    },
+    {
+      "id": "bug-140",
+      "timestamp": "2026-04-29T22:10:31+02:00",
+      "error_message": "`rg -n \"... Backend `ProviderAdapter` ...\" .wolf/cerebrum.md` caused zsh command substitution and printed `zsh:1: command not found: ProviderAdapter`.",
+      "file": "terminal command",
+      "root_cause": "I repeated the known shell gotcha from bug-135 by putting a search pattern containing Markdown backticks inside double quotes.",
+      "fix": "Reran the ripgrep search with the pattern in single quotes so backticks were treated literally.",
+      "tags": [
+        "verification",
+        "shell",
+        "ripgrep",
+        "openwolf"
+      ],
+      "related_bugs": [
+        "bug-135"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-29T22:10:31+02:00"
     }
   ]
 }

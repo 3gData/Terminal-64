@@ -1,4 +1,41 @@
 import http from "http";
+import fs from "fs";
+
+export const START_DELEGATION_TOOLS = [
+  {
+    name: "StartDelegation",
+    description: "Start a Terminal 64 delegation group by providing shared context and a list of independent agent tasks. Use this instead of writing a delegation block.",
+    annotations: {
+      readOnlyHint: true,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        context: {
+          type: "string",
+          description: "Shared context every delegated agent needs, including project constraints and the overall goal.",
+        },
+        tasks: {
+          type: "array",
+          description: "Independent tasks for parallel agents.",
+          items: {
+            type: "object",
+            properties: {
+              description: {
+                type: "string",
+                description: "Specific, independently completable task for one agent.",
+              },
+            },
+            required: ["description"],
+          },
+          minItems: 2,
+          maxItems: 8,
+        },
+      },
+      required: ["context", "tasks"],
+    },
+  },
+];
 
 export const DELEGATION_TOOLS = [
   {
@@ -15,6 +52,9 @@ export const DELEGATION_TOOLS = [
   {
     name: "read_team",
     description: "Read recent messages from the delegation team chat to see what other agents have posted.",
+    annotations: {
+      readOnlyHint: true,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -52,6 +92,12 @@ function readDelegationContext(env) {
 
 function writeStderr(prefix, message) {
   process.stderr.write(`[${prefix}] ${message}\n`);
+}
+
+function writeDebug(message) {
+  const path = process.env.T64_MCP_DEBUG_FILE;
+  if (!path) return;
+  fs.appendFile(path, `${new Date().toISOString()} ${message}\n`, () => {});
 }
 
 function createHttpRequest(context) {
@@ -113,6 +159,20 @@ function createDelegationToolHandler(context) {
   const httpRequest = createHttpRequest(context);
 
   return async function handleToolCall(name, args) {
+    if (name === "StartDelegation") {
+      const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            status: "received",
+            context: args.context || "",
+            taskCount: tasks.length,
+          }),
+        }],
+      };
+    }
+
     if (!context.active) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -167,6 +227,7 @@ function startJsonRpcServer({ serverName, stderrPrefix, getTools, handleToolCall
 
   function handleMessage(message) {
     const { id, method, params } = message;
+    writeDebug(`method=${method || ""} id=${id ?? ""}`);
 
     switch (method) {
       case "initialize":
@@ -275,7 +336,7 @@ export function startDelegationMcpServer({
   startJsonRpcServer({
     serverName,
     stderrPrefix,
-    getTools: () => (context.active ? DELEGATION_TOOLS : []),
+    getTools: () => (context.active ? DELEGATION_TOOLS : START_DELEGATION_TOOLS),
     handleToolCall: createDelegationToolHandler(context),
     outputFraming,
   });

@@ -31,6 +31,7 @@ import { invokePlugin, onPluginEvent, type PluginStreamHandle } from "../../lib/
 import { startVoice as startVoiceCapture, stopVoice as stopVoiceCapture, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
 import {
   getOpenAiProviderSessionMetadata,
+  getProviderPermissionId,
   resolveSessionProviderState,
   useClaudeStore,
   type ClaudeSession,
@@ -183,7 +184,9 @@ function providerTurnForSession(
     threadId: openaiMetadata?.codexThreadId ?? null,
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
-    selectedCodexPermission: openaiMetadata?.selectedCodexPermission ?? opts?.defaultCodexPermission ?? "full-auto",
+    providerPermissionId: providerState.providerPermissions[providerState.provider]
+      ?? opts?.defaultCodexPermission
+      ?? getProviderPermissionId(providerState, providerState.provider),
     permissionMode: "auto",
     skipOpenwolf: session.skipOpenwolf,
     seedTranscript: providerState.seedTranscript,

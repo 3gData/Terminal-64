@@ -9,6 +9,10 @@ import {
   prepareDelegationChildProviderTurnInput,
   resolveDelegationChildRuntimeSettings,
 } from "../lib/delegationChildRuntime";
+import {
+  buildDelegationChildSpawnPlan,
+  resolveDelegationChildCwd,
+} from "../lib/delegationWorkflow";
 import { useCanvasStore } from "../stores/canvasStore";
 import { useClaudeStore } from "../stores/claudeStore";
 import { useDelegationStore } from "../stores/delegationStore";
@@ -20,7 +24,7 @@ interface UseDelegationSpawnOptions {
   permissionMode: PermissionMode;
   selectedModel: string;
   selectedEffort: string;
-  selectedCodexPermission: string;
+  selectedProviderPermissionId: string;
   addUserMessage: (sessionId: string, text: string) => void;
 }
 
@@ -31,7 +35,7 @@ export function useDelegationSpawn({
   permissionMode,
   selectedModel,
   selectedEffort,
-  selectedCodexPermission,
+  selectedProviderPermissionId,
   addUserMessage,
 }: UseDelegationSpawnOptions) {
   return useCallback(
@@ -61,24 +65,27 @@ export function useDelegationSpawn({
       }
 
       const parentSess = useClaudeStore.getState().sessions[sessionId];
-      const sessCwd = parentSess?.cwd;
-      const appDir = (effectiveCwd && effectiveCwd !== "." && effectiveCwd !== "/")
-        ? effectiveCwd
-        : (sessCwd && sessCwd !== "." && sessCwd !== "/")
-          ? sessCwd
-          : "";
+      const appDir = resolveDelegationChildCwd({
+        effectiveCwd,
+        sessionCwd: parentSess?.cwd,
+      });
       const childRuntime = resolveDelegationChildRuntimeSettings({
         parentSession: parentSess,
         selectedProvider,
         selectedModel,
         selectedEffort,
-        selectedCodexPermission,
+        selectedProviderPermissionId,
       });
 
       group.tasks.forEach((task, i) => {
         const childSessionId = uuidv4();
-        const childName = `[D] ${task.description.slice(0, 30)}`;
-        const agentLabel = `Agent ${i + 1}`;
+        const childSpawn = buildDelegationChildSpawnPlan({
+          sharedContext,
+          taskDescription: task.description,
+          taskIndex: i,
+          taskCount: tasks.length,
+          teamChatEnabled: delegationPort > 0,
+        });
 
         delStore.setTaskSessionId(
           group.id,
@@ -88,26 +95,9 @@ export function useDelegationSpawn({
         );
         delStore.updateTaskStatus(group.id, task.id, "running");
 
-        const channelNote = delegationPort > 0
-          ? `\n\nIMPORTANT — Team Coordination via terminal-64 MCP:
-You are part of a team of ${tasks.length} agents working in the same codebase. You MUST use the team chat to coordinate:
-
-1. send_to_team — Post a message to the shared team chat. Do this:
-   • At the START of your work (announce what you're about to do)
-   • Before modifying any shared files (to avoid conflicts)
-   • After completing major milestones
-   • If you encounter issues or blockers
-2. read_team — Check what other agents have posted. Do this BEFORE starting work and periodically during long tasks to stay aware of what others are doing.
-3. report_done — When your task is fully complete, call this with a summary of what you did and what files you changed.
-
-Coordinate actively. If another agent is working on a file you need, mention it in team chat and work around it. Communication prevents conflicts.`
-          : "";
-
-        const initialPrompt = `Context: ${sharedContext}\n\nYour task: ${task.description}\n\nYou are agent "${agentLabel}" — one of ${tasks.length} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, call report_done (if available) or state your task is complete.`;
-
         useClaudeStore.getState().createSession(
           childSessionId,
-          childName,
+          childSpawn.childName,
           true,
           childRuntime.inheritSkipOpenwolf,
           appDir,
@@ -116,10 +106,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
         );
         useClaudeStore.getState().setSelectedModel(childSessionId, childRuntime.selectedModel);
         useClaudeStore.getState().setSelectedEffort(childSessionId, childRuntime.selectedEffort);
-        if (childRuntime.provider === "openai") {
-          useClaudeStore.getState().setSelectedCodexPermission(childSessionId, childRuntime.selectedCodexPermission);
-        }
-        addUserMessage(childSessionId, initialPrompt);
+        useClaudeStore.getState().setProviderPermission(
+          childSessionId,
+          childRuntime.provider,
+          childRuntime.selectedProviderPermissionId,
+        );
+        addUserMessage(childSessionId, childSpawn.initialPrompt);
 
         setTimeout(() => {
           const startChild = async () => {
@@ -127,12 +119,12 @@ Coordinate actively. If another agent is working on a file you need, mention it 
               ...childRuntime,
               sessionId: childSessionId,
               cwd: appDir,
-              prompt: initialPrompt,
+              prompt: childSpawn.initialPrompt,
               mcp: {
                 delegationPort,
                 delegationSecret,
                 groupId: group.id,
-                agentLabel,
+                agentLabel: childSpawn.agentLabel,
               },
             });
             await runProviderTurn(turnInput);
@@ -152,7 +144,7 @@ Coordinate actively. If another agent is working on a file you need, mention it 
       permissionMode,
       selectedModel,
       selectedEffort,
-      selectedCodexPermission,
+      selectedProviderPermissionId,
       addUserMessage,
     ],
   );

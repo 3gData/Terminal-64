@@ -97,7 +97,7 @@ export interface Command {
 
 export type PermissionMode = "default" | "accept_edits" | "bypass_all" | "plan" | "auto";
 
-export interface CreateClaudeRequest {
+export interface AnthropicProviderCreateRequest {
   session_id: string;
   cwd: string;
   prompt: string;
@@ -111,7 +111,10 @@ export interface CreateClaudeRequest {
   no_session_persistence?: boolean;
 }
 
-export interface SendClaudePromptRequest {
+/** @deprecated Use AnthropicProviderCreateRequest or ProviderCreateRequest<"anthropic">. */
+export type CreateClaudeRequest = AnthropicProviderCreateRequest;
+
+export interface AnthropicProviderSendRequest {
   session_id: string;
   cwd: string;
   prompt: string;
@@ -127,14 +130,23 @@ export interface SendClaudePromptRequest {
   fork_session?: string;
 }
 
-export interface ClaudeEvent {
+/** @deprecated Use AnthropicProviderSendRequest or ProviderSendRequest<"anthropic">. */
+export type SendClaudePromptRequest = AnthropicProviderSendRequest;
+
+export interface ProviderProcessEvent {
   session_id: string;
   data: string;
 }
 
-export interface ClaudeDone {
+export interface ProviderProcessDone {
   session_id: string;
 }
+
+/** @deprecated Use ProviderProcessEvent. */
+export type ClaudeEvent = ProviderProcessEvent;
+
+/** @deprecated Use ProviderProcessDone. */
+export type ClaudeDone = ProviderProcessDone;
 
 export interface ProviderEventEnvelope {
   provider: string;
@@ -159,14 +171,11 @@ export type {
   SendCodexPromptRequest,
 } from "../contracts/providerIpc";
 
-export interface CodexEvent {
-  session_id: string;
-  data: string;
-}
+/** @deprecated Use ProviderProcessEvent. */
+export type CodexEvent = ProviderProcessEvent;
 
-export interface CodexDone {
-  session_id: string;
-}
+/** @deprecated Use ProviderProcessDone. */
+export type CodexDone = ProviderProcessDone;
 
 export interface SlashCommand {
   name: string;

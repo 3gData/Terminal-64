@@ -100,8 +100,8 @@ use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
 use providers::{
-    ClaudeAdapter, CodexAdapter, ProviderCommandContext, ProviderCommandRequest, ProviderKind,
-    ProviderRegistry,
+    ClaudeAdapter, CodexAdapter, CursorAdapter, ProviderCommandContext, ProviderCommandRequest,
+    ProviderKind, ProviderRegistry,
 };
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
@@ -3611,6 +3611,83 @@ fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Strin
     Ok(())
 }
 
+pub(crate) fn ensure_cursor_mcp_impl(
+    app_handle: &tauri::AppHandle,
+    cwd: &str,
+) -> Result<(), String> {
+    let app_dir = get_app_dir(app_handle.clone())?;
+    let script_path = t64_mcp_script_path(&app_dir);
+    let node_path = resolve_node_path();
+    let cursor_dir = std::path::Path::new(cwd).join(".cursor");
+    std::fs::create_dir_all(&cursor_dir).map_err(|e| {
+        format!(
+            "create Cursor MCP config dir {}: {}",
+            cursor_dir.display(),
+            e
+        )
+    })?;
+    let mcp_path = cursor_dir.join("mcp.json");
+
+    let mut config: serde_json::Value = std::fs::read_to_string(&mcp_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let servers = config
+        .as_object_mut()
+        .ok_or("Invalid .cursor/mcp.json")?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+
+    if let Some(existing) = servers.get("terminal-64") {
+        if existing.get("command").and_then(|v| v.as_str()) == Some(node_path)
+            && existing
+                .get("args")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str())
+                == Some(script_path.as_str())
+            && existing
+                .get("env")
+                .and_then(|v| v.get("T64_MCP_OUTPUT_FRAMING"))
+                .and_then(|v| v.as_str())
+                == Some("newline")
+        {
+            return Ok(());
+        }
+    }
+
+    servers.as_object_mut().ok_or("Invalid mcpServers")?.insert(
+        "terminal-64".to_string(),
+        serde_json::json!({
+            "command": node_path,
+            "args": [script_path],
+            "env": {
+                "T64_MCP_OUTPUT_FRAMING": "newline",
+                "T64_DELEGATION_PORT": "${env:T64_DELEGATION_PORT}",
+                "T64_DELEGATION_SECRET": "${env:T64_DELEGATION_SECRET}",
+                "T64_GROUP_ID": "${env:T64_GROUP_ID}",
+                "T64_AGENT_LABEL": "${env:T64_AGENT_LABEL}"
+            }
+        }),
+    );
+
+    std::fs::write(
+        &mcp_path,
+        serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    safe_eprintln!(
+        "[cursor:mcp] Updated {} with terminal-64 MCP",
+        mcp_path.display()
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn ensure_cursor_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
+    ensure_cursor_mcp_impl(&app_handle, &cwd)
+}
+
 fn read_toml_document(path: &std::path::Path) -> Result<toml_edit::DocumentMut, String> {
     match std::fs::read_to_string(path) {
         Ok(s) => s
@@ -3679,12 +3756,14 @@ fn configure_codex_t64_mcp(
     write_toml_document(path, &doc)
 }
 
-#[tauri::command]
-fn ensure_codex_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
-    let app_dir = get_app_dir(app_handle)?;
+pub(crate) fn ensure_codex_mcp_impl(
+    app_handle: &tauri::AppHandle,
+    cwd: &str,
+) -> Result<(), String> {
+    let app_dir = get_app_dir(app_handle.clone())?;
     let script_path = t64_mcp_script_path(&app_dir);
     let node_path = resolve_node_path();
-    let project_dir = std::path::Path::new(&cwd).join(".codex");
+    let project_dir = std::path::Path::new(cwd).join(".codex");
     let config_path = project_dir.join("config.toml");
     configure_codex_t64_mcp(&config_path, node_path, &script_path)?;
     safe_eprintln!(
@@ -3692,6 +3771,11 @@ fn ensure_codex_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Str
         config_path.display()
     );
     Ok(())
+}
+
+#[tauri::command]
+fn ensure_codex_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
+    ensure_codex_mcp_impl(&app_handle, &cwd)
 }
 
 #[tauri::command]
@@ -5913,6 +5997,7 @@ pub fn run() {
             let voice_mgr = VoiceManager::new(Arc::clone(&mic_mgr));
             let claude_adapter = Arc::new(ClaudeAdapter::new());
             let codex_adapter = Arc::new(CodexAdapter::new());
+            let cursor_adapter = Arc::new(CursorAdapter::new());
             let mut registry = ProviderRegistry::new();
             registry.register(
                 ProviderKind::ClaudeAgent,
@@ -5921,6 +6006,10 @@ pub fn run() {
             registry.register(
                 ProviderKind::Codex,
                 codex_adapter.clone() as Arc<dyn providers::ProviderAdapter>,
+            );
+            registry.register(
+                ProviderKind::Cursor,
+                cursor_adapter as Arc<dyn providers::ProviderAdapter>,
             );
             app.manage(AppState {
                 pty_manager: PtyManager::new(),
@@ -6051,6 +6140,7 @@ pub fn run() {
             get_app_dir,
             get_node_path,
             ensure_t64_mcp,
+            ensure_cursor_mcp,
             ensure_codex_mcp,
             create_mcp_config_file,
             create_widget_folder,

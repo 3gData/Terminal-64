@@ -21,7 +21,6 @@
 //! keeps that thread alive through JSON-RPC; the legacy exec transport
 //! re-attaches with `codex exec resume <thread_id>`.
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
@@ -30,17 +29,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
 
 use crate::providers::emit_provider_event;
-use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
-    ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
-    ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
-    ProviderSendTurnInput, ProviderSession, ProviderSessionModelSwitchMode,
-    ProviderSessionStartInput, ProviderThreadSnapshot, ProviderTurnStartResult,
-    ProviderUserInputAnswers,
+    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError,
+    ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
+    ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
+    ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
 use crate::types::{
@@ -1775,7 +1770,6 @@ fn resolve_session_id(provided: &str) -> String {
 
 pub struct CodexAdapter {
     instances: Arc<Mutex<HashMap<String, CodexInstance>>>,
-    #[allow(dead_code)]
     capabilities: ProviderAdapterCapabilities,
 }
 
@@ -1823,6 +1817,9 @@ impl CodexAdapter {
         app_handle: &AppHandle,
         req: CreateCodexRequest,
     ) -> Result<String, String> {
+        if let Err(e) = crate::ensure_codex_mcp_impl(app_handle, &req.cwd) {
+            safe_eprintln!("[codex:mcp] setup failed before create: {}", e);
+        }
         let resolved_id = resolve_session_id(&req.session_id);
         safe_eprintln!(
             "[codex] Creating session id={} cwd={} model={:?} sandbox={:?}",
@@ -1876,6 +1873,9 @@ impl CodexAdapter {
         app_handle: &AppHandle,
         req: SendCodexPromptRequest,
     ) -> Result<(), String> {
+        if let Err(e) = crate::ensure_codex_mcp_impl(app_handle, &req.cwd) {
+            safe_eprintln!("[codex:mcp] setup failed before send: {}", e);
+        }
         if req.session_id.trim().is_empty() {
             return Err("send_prompt: session_id is required".to_string());
         }
@@ -2050,7 +2050,7 @@ impl Default for CodexAdapter {
     }
 }
 
-impl ProviderCommandAdapter for CodexAdapter {
+impl ProviderAdapter for CodexAdapter {
     fn create_session(
         &self,
         app_handle: &AppHandle,
@@ -2078,12 +2078,7 @@ impl ProviderCommandAdapter for CodexAdapter {
     fn close_session(&self, session_id: &str) -> Result<(), ProviderAdapterError> {
         self.close(session_id)
     }
-}
 
-// ── ProviderAdapter trait impl ─────────────────────────────
-
-#[async_trait]
-impl ProviderAdapter for CodexAdapter {
     fn provider(&self) -> ProviderKind {
         ProviderKind::Codex
     }
@@ -2208,107 +2203,6 @@ impl ProviderAdapter for CodexAdapter {
             "method": "skipped",
             "reason": reason,
         }))
-    }
-
-    async fn start_session(
-        &self,
-        _input: ProviderSessionStartInput,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        Err("CodexAdapter::start_session not wired into normalized provider surface; call create_session through ProviderCommandAdapter".to_string())
-    }
-
-    async fn send_turn(
-        &self,
-        _input: ProviderSendTurnInput,
-    ) -> Result<ProviderTurnStartResult, ProviderAdapterError> {
-        Err("CodexAdapter::send_turn not wired into normalized provider surface; call send_prompt through ProviderCommandAdapter".to_string())
-    }
-
-    async fn interrupt_turn(
-        &self,
-        thread_id: &str,
-        _turn_id: Option<&str>,
-    ) -> Result<(), ProviderAdapterError> {
-        self.cancel(thread_id)
-    }
-
-    async fn respond_to_request(
-        &self,
-        _thread_id: &str,
-        _request_id: &str,
-        _decision: ProviderApprovalDecision,
-    ) -> Result<(), ProviderAdapterError> {
-        // Codex approval requests are surfaced through provider events, but
-        // the normalized approval-response trait is not wired to the current
-        // command adapter. Sandbox/approval behavior is configured at turn
-        // start through the selected Codex permission preset.
-        Err("CodexAdapter::respond_to_request not wired into normalized provider approval surface; set approval policy at turn start".to_string())
-    }
-
-    async fn respond_to_user_input(
-        &self,
-        _thread_id: &str,
-        _request_id: &str,
-        _answers: ProviderUserInputAnswers,
-    ) -> Result<(), ProviderAdapterError> {
-        Err("CodexAdapter::respond_to_user_input not implemented".to_string())
-    }
-
-    async fn stop_session(&self, thread_id: &str) -> Result<(), ProviderAdapterError> {
-        self.close(thread_id)
-    }
-
-    async fn list_sessions(&self) -> Vec<ProviderSession> {
-        let Ok(instances) = self.instances.lock() else {
-            return Vec::new();
-        };
-        instances
-            .keys()
-            .map(|sid| {
-                serde_json::json!({
-                    "provider": "codex",
-                    "threadId": sid,
-                })
-            })
-            .collect()
-    }
-
-    async fn has_session(&self, thread_id: &str) -> bool {
-        self.instances
-            .lock()
-            .map(|m| m.contains_key(thread_id))
-            .unwrap_or(false)
-    }
-
-    async fn read_thread(
-        &self,
-        _thread_id: &str,
-    ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
-        Err("CodexAdapter::read_thread not implemented".to_string())
-    }
-
-    async fn rollback_thread(
-        &self,
-        _thread_id: &str,
-        _num_turns: u32,
-    ) -> Result<ProviderThreadSnapshot, ProviderAdapterError> {
-        Err("CodexAdapter::rollback_thread not implemented".to_string())
-    }
-
-    async fn stop_all(&self) -> Result<(), ProviderAdapterError> {
-        let ids: Vec<String> = match self.instances.lock() {
-            Ok(m) => m.keys().cloned().collect(),
-            Err(_) => return Ok(()),
-        };
-        for sid in ids {
-            let _ = self.cancel(&sid);
-        }
-        Ok(())
-    }
-
-    async fn stream_events(&self) -> mpsc::Receiver<ProviderEvent> {
-        let (_tx, rx) = mpsc::channel(1);
-        rx
     }
 }
 

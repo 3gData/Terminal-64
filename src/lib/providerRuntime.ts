@@ -1,5 +1,6 @@
-import type { ProviderId } from "./providers";
+import type { ProviderHistorySource, ProviderId } from "./providers";
 import { anthropicRuntime } from "./providerRuntimes/anthropic";
+import { cursorRuntime } from "./providerRuntimes/cursor";
 import {
   codexPermissionForOverride,
   openaiRuntime,
@@ -25,6 +26,7 @@ export { codexPermissionForOverride, promptWithCodexSeed };
 const PROVIDER_RUNTIMES = {
   anthropic: anthropicRuntime,
   openai: openaiRuntime,
+  cursor: cursorRuntime,
 } satisfies Record<ProviderId, ProviderRuntime>;
 
 export function getProviderRuntime(provider: ProviderId): ProviderRuntime {
@@ -35,12 +37,18 @@ export function providerTurnOperation(input: ProviderTurnInput): "create" | "sen
   return input.started || input.threadId || input.forkParentSessionId ? "send" : "create";
 }
 
-export async function runProviderTurn(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+export async function prepareProviderTurnInput(input: ProviderTurnInput): Promise<ProviderTurnInput> {
   const runtime = getProviderRuntime(input.provider);
-  if (providerTurnOperation(input) === "send") {
-    return runtime.send(input);
+  return runtime.prepareTurn ? runtime.prepareTurn(input) : input;
+}
+
+export async function runProviderTurn(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+  const preparedInput = await prepareProviderTurnInput(input);
+  const runtime = getProviderRuntime(preparedInput.provider);
+  if (providerTurnOperation(preparedInput) === "send") {
+    return runtime.send(preparedInput);
   }
-  return runtime.create(input);
+  return runtime.create(preparedInput);
 }
 
 export function cancelProviderSession(sessionId: string, provider: ProviderId): Promise<void> {
@@ -57,6 +65,10 @@ function unsupportedHistoryReason(provider: ProviderId, capability: ProviderHist
 
 export function providerHistorySupports(provider: ProviderId, capability: ProviderHistoryCapability): boolean {
   return getProviderRuntime(provider).history.capabilities[capability];
+}
+
+export function providerHistorySource(provider: ProviderId): ProviderHistorySource {
+  return getProviderRuntime(provider).history.source;
 }
 
 export function truncateProviderHistory(
