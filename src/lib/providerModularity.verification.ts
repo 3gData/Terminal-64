@@ -3,8 +3,15 @@ import {
   getProviderToolDiff,
   getProviderToolFilePath,
   getProviderToolPaths,
+  isProviderRuntimeEvent,
+  providerRuntimeEventToNormalized,
 } from "../contracts/providerEvents";
-import type { ProviderHistoryCapability, ProviderRuntime, ProviderTurnInput } from "../contracts/providerRuntime";
+import type {
+  ProviderHistoryCapability,
+  ProviderRuntime,
+  ProviderSessionRuntimeMetadata,
+  ProviderTurnInput,
+} from "../contracts/providerRuntime";
 import {
   claudeBlockToProviderToolCall,
   claudeBlockToProviderToolResult,
@@ -44,6 +51,7 @@ import {
 import {
   decodeCodexPermission,
   defineProviderManifest,
+  getProviderDefaultControlValues,
   getProviderDefaultEffort,
   getProviderDefaultModel,
   getProviderDefaultPermission,
@@ -53,10 +61,14 @@ import {
   getProviderModelOptions,
   getProviderPermissionOptions,
   isProviderId,
+  listProviderControls,
   PROVIDER_IDS,
+  providerControlOptionValue,
   providerPersistsLocalTranscript,
   providerSupports,
   type PermissionOption,
+  type ProviderControlKind,
+  type ProviderControlValue,
   type ProviderId,
   type ProviderManifest,
   type ProviderManifestDefinition,
@@ -83,12 +95,15 @@ import {
   isProviderPermissionId,
   permissionModeFromProviderPermission,
 } from "./providerPermissions";
-import { buildSpawnProviderTurnInput } from "./tauriApi";
+import { buildSpawnProviderTurnInput, mapHistoryMessages } from "./tauriApi";
 import {
   getProviderSessionMetadata,
+  getProviderSessionRuntimeMetadata,
   getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
+  getProviderRuntimeResumeId,
   resolveSessionProviderState,
+  resolveProviderRuntimeResumeId,
   resolveProviderSessionMetadata,
   STORAGE_KEY,
   flushSave,
@@ -100,6 +115,12 @@ import {
   listAvailableProviderIds,
   useSettingsStore,
 } from "../stores/settingsStore";
+import {
+  isGroupableToolCall,
+  toolGroupItem,
+  toolGroupLabel,
+  toolHeader,
+} from "../components/provider-chat/toolPresentation";
 import type { CreateCodexRequest, ProviderCreateRequest, ProviderSendRequest } from "../contracts/providerIpc";
 import type { ChatMessage } from "./types";
 
@@ -122,11 +143,18 @@ type FutureProviderRuntime = {
 };
 type FutureProviderSessionState = Omit<
   ProviderSessionState,
-  "provider" | "providerMetadata" | "providerPermissions" | "selectedControls"
+  "provider" | "runtimeMetadata" | "providerMetadata" | "providerPermissions" | "selectedControls"
 > & {
   provider: FutureProviderId;
+  runtimeMetadata: ProviderSessionState["runtimeMetadata"] & {
+    opencode?: {
+      historySource: "none";
+      resume: { id: string | null };
+      runtimePayload: Record<string, unknown>;
+    };
+  };
   selectedControls: ProviderSessionState["selectedControls"] & {
-    opencode?: Record<string, string | null>;
+    opencode?: Record<string, ProviderControlValue>;
   };
   providerMetadata: ProviderSessionState["providerMetadata"] & {
     opencode?: {
@@ -164,6 +192,13 @@ function assertNoUndefinedOwnValues(value: Record<string, unknown>, label: strin
   for (const [key, entry] of Object.entries(value)) {
     assert(entry !== undefined, `${label}.${key} should be omitted instead of set to undefined`);
   }
+}
+
+function assertNoLegacyProviderTurnFields(input: ProviderTurnInput, label: string): void {
+  assert(!Object.prototype.hasOwnProperty.call(input, "selectedModel"), `${label} omits legacy selectedModel`);
+  assert(!Object.prototype.hasOwnProperty.call(input, "selectedEffort"), `${label} omits legacy selectedEffort`);
+  assert(!Object.prototype.hasOwnProperty.call(input, "threadId"), `${label} omits legacy threadId`);
+  assert(!Object.prototype.hasOwnProperty.call(input, "codexThreadId"), `${label} omits legacy codexThreadId`);
 }
 
 const transcriptFixture: ChatMessage[] = [
@@ -225,31 +260,34 @@ const futureProviderStubManifestDefinition = {
     hydrateFailureLabel: "OpenCode",
   },
   controls: [
-    {
-      id: "model",
-      label: "Model",
-      options: [{ id: "stub-model", label: "Stub Model" }],
-      defaultValue: "stub-model",
-      placement: "topbar",
-      legacySlot: "model",
-    },
-    {
-      id: "effort",
-      label: "Effort",
-      options: [{ id: "stub-effort", label: "Stub Effort" }],
-      defaultValue: "stub-effort",
-      placement: "topbar",
-      legacySlot: "effort",
-    },
-    {
-      id: "permission",
-      label: "Profile",
-      options: futureProviderStubPermissions,
-      defaultValue: "stub",
-      placement: "input-permission",
-      inputSuffix: "profile",
-      legacySlot: "permission",
-    },
+      {
+        id: "model",
+        label: "Model",
+        kind: "select",
+        scope: "topbar",
+        defaultValue: "stub-model",
+        options: [{ id: "stub-model", label: "Stub Model" }],
+        legacySlot: "model",
+      },
+      {
+        id: "effort",
+        label: "Effort",
+        kind: "select",
+        scope: "topbar",
+        defaultValue: "stub-effort",
+        options: [{ id: "stub-effort", label: "Stub Effort" }],
+        legacySlot: "effort",
+      },
+      {
+        id: "permission",
+        label: "Profile",
+        kind: "select",
+        scope: "composer",
+        defaultValue: "stub",
+        options: futureProviderStubPermissions,
+        inputSuffix: "profile",
+        legacySlot: "permission",
+      },
   ],
 } satisfies FutureProviderManifestDefinition;
 
@@ -304,8 +342,17 @@ function providerInput<TProvider extends ProviderId = "openai">(
   };
 }
 
+function providerTurnRuntimeMetadata(provider: ProviderId, resumeId: string | null): ProviderSessionRuntimeMetadata {
+  return {
+    historySource: getProviderHistoryPolicy(provider).source,
+    resume: { id: resumeId },
+    runtimePayload: {},
+  };
+}
+
 const providerLifecycleOperations = ["create", "send", "cancel", "close"] as const;
 const providerHistoryCapabilities: ProviderHistoryCapability[] = ["hydrate", "fork", "rewind", "delete"];
+const providerControlKinds: readonly ProviderControlKind[] = ["select", "boolean", "text", "number"];
 type ProviderHistoryHandlerName = "hydrate" | "fork" | "rewind" | "deleteHistory";
 const providerHistoryHandlerNames = {
   hydrate: "hydrate",
@@ -324,12 +371,39 @@ function assertProviderManifestCompatibilityFieldsAreDerived(provider: ProviderI
   assertEqual(manifest.defaultPermission, getProviderDefaultPermission(provider), `${provider} compatibility default permission is derived`);
 }
 
+function assertProviderControlDescriptorsAreGeneric(provider: ProviderId): void {
+  const controls = listProviderControls(provider);
+  const defaults = getProviderDefaultControlValues(provider);
+  assert(controls.length > 0, `${provider} exposes generic provider controls`);
+  for (const control of controls) {
+    assert(typeof control.id === "string" && control.id.length > 0, `${provider} control has an id`);
+    assert(typeof control.label === "string" && control.label.length > 0, `${provider} control ${control.id} has a label`);
+    assert(providerControlKinds.includes(control.kind), `${provider} control ${control.id} declares a generic kind`);
+    assert(control.scope === "topbar" || control.scope === "composer", `${provider} control ${control.id} declares a generic scope`);
+    assert(
+      typeof control.defaultValue === "string"
+        || typeof control.defaultValue === "boolean"
+        || typeof control.defaultValue === "number",
+      `${provider} control ${control.id} has a typed default value`,
+    );
+    assert(defaults[control.id] === control.defaultValue, `${provider} default control values derive from descriptors`);
+    if (control.kind === "select") {
+      assert(control.options.some((option) => providerControlOptionValue(option) === control.defaultValue), `${provider} control ${control.id} default is listed`);
+    }
+    for (const option of control.options) {
+      assert(typeof option.id === "string" && option.id.length > 0, `${provider} control ${control.id} option has an id`);
+      assert(typeof option.label === "string" && option.label.length > 0, `${provider} control ${control.id} option has a label`);
+    }
+  }
+}
+
 export function verifyProviderManifestDefaults(): VerificationResult {
   const anthropic = getProviderManifest("anthropic");
   const openai = getProviderManifest("openai");
   const cursor = getProviderManifest("cursor");
 
   assertProviderManifestCompatibilityFieldsAreDerived("anthropic");
+  assertProviderControlDescriptorsAreGeneric("anthropic");
   assertEqual(getProviderDefaultModel("anthropic"), "sonnet", "Anthropic default model");
   assertEqual(getProviderDefaultEffort("anthropic"), "high", "Anthropic default effort");
   assertEqual(getProviderDefaultPermission("anthropic"), "default", "Anthropic default permission");
@@ -355,6 +429,7 @@ export function verifyProviderManifestDefaults(): VerificationResult {
   assert(!providerPersistsLocalTranscript("anthropic"), "Anthropic does not persist local transcripts");
 
   assertProviderManifestCompatibilityFieldsAreDerived("openai");
+  assertProviderControlDescriptorsAreGeneric("openai");
   assertEqual(getProviderDefaultModel("openai"), "gpt-5.5", "OpenAI default model");
   assertEqual(getProviderDefaultEffort("openai"), "medium", "OpenAI default effort");
   assertEqual(getProviderDefaultPermission("openai"), "workspace", "OpenAI default permission");
@@ -377,6 +452,7 @@ export function verifyProviderManifestDefaults(): VerificationResult {
   assert(!providerSupports("openai", "hookLog"), "OpenAI manifest does not expose Claude hook log");
 
   assertProviderManifestCompatibilityFieldsAreDerived("cursor");
+  assertProviderControlDescriptorsAreGeneric("cursor");
   assertEqual(getProviderDefaultModel("cursor"), "composer-2-fast", "Cursor default model");
   assertEqual(getProviderDefaultEffort("cursor"), "default", "Cursor default effort");
   assertEqual(getProviderDefaultPermission("cursor"), "default", "Cursor default permission");
@@ -435,6 +511,15 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
           selectedModel: "gpt-5.5",
           selectedEffort: "medium",
           seedTranscript: null,
+          runtimeMetadata: {
+            openai: {
+              historySource: "codex-rollout",
+              resume: { id: "thread-provider-runtime" },
+              runtimePayload: {
+                codexThreadId: "thread-provider-runtime",
+              },
+            },
+          },
           providerMetadata: {
             openai: {
               codexThreadId: "thread-provider-state",
@@ -463,11 +548,20 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
           selectedModel: "composer-2-fast",
           selectedEffort: "default",
           seedTranscript: null,
+          runtimeMetadata: {
+            cursor: {
+              historySource: "local-transcript",
+              resume: { id: "cursor-chat-runtime" },
+              runtimePayload: {
+                cursorChatId: "cursor-chat-runtime",
+                localTranscript: transcriptFixture.slice(0, 2),
+              },
+            },
+          },
           providerMetadata: {},
         },
         provider: "cursor",
         providerLocked: true,
-        localTranscript: transcriptFixture.slice(0, 2),
       },
       [recoveredOpenAiSessionId]: {
         sessionId: recoveredOpenAiSessionId,
@@ -482,6 +576,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
           selectedModel: "sonnet",
           selectedEffort: "high",
           seedTranscript: null,
+          runtimeMetadata: {},
           providerMetadata: {
             openai: {
               codexThreadId: "thread-recovered",
@@ -513,6 +608,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
           selectedModel: "sonnet",
           selectedEffort: "high",
           seedTranscript: null,
+          runtimeMetadata: {},
           providerMetadata: {},
           providerPermissions: {
             cursor: "default",
@@ -562,16 +658,18 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(stateBacked.providerState.providerLocked, true, "providerState lock flag wins over saved metadata");
     assertEqual(stateBacked.providerLocked, true, "provider lock mirror follows providerState");
     const stateBackedOpenAi = getOpenAiProviderSessionMetadata(stateBacked.providerState);
-    assertEqual(stateBackedOpenAi?.codexThreadId, "thread-provider-state", "providerState thread id wins over stale flat mirror");
+    assertEqual(stateBackedOpenAi?.codexThreadId, "thread-provider-runtime", "runtime metadata thread id wins over stale flat mirror");
+    assertEqual(getProviderRuntimeResumeId(stateBacked.providerState, "openai"), "thread-provider-runtime", "OpenAI runtime metadata stores resume id");
     assertEqual(getProviderPermissionId(stateBacked.providerState, "openai"), "workspace", "providerState permission wins from providerPermissions over stale flat mirror");
     assertEqual(stateBacked.providerState.selectedModel, "gpt-5.5", "providerState selected model wins over stale flat mirror");
 
     assert(cursorBacked, "Cursor local transcript metadata creates a session");
     assertEqual(cursorBacked.providerState.provider, "cursor", "Cursor provider state hydrates from metadata");
     assertEqual(cursorBacked.provider, "cursor", "Cursor provider survives mount-time default provider after refresh");
+    assertEqual(getProviderRuntimeResumeId(cursorBacked.providerState, "cursor"), "cursor-chat-runtime", "Cursor runtime metadata stores chat resume id");
     assertEqual(cursorBacked.providerState.selectedControls.cursor?.mode, "default", "legacy Cursor selected effort migrates to provider-owned mode control");
     assertEqual(cursorBacked.providerState.selectedEffort, null, "Cursor mode is not mirrored as selectedEffort");
-    assertEqual(cursorBacked.messages.length, 2, "Cursor local transcript hydrates into visible messages");
+    assertEqual(cursorBacked.messages.length, 2, "Cursor runtime local transcript hydrates into visible messages");
 
     assert(recoveredOpenAi, "corrupted OpenAI metadata creates a session");
     assertEqual(recoveredOpenAi.providerState.provider, "openai", "OpenAI thread metadata recovers provider after bad Anthropic refresh save");
@@ -593,16 +691,27 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
       selectedCodexPermission?: string | null;
       providerPermissions?: Record<string, string | null>;
       providerState?: {
+        runtimeMetadata?: {
+          openai?: { resume?: { id?: string | null }; runtimePayload?: { codexThreadId?: string | null } };
+          cursor?: { resume?: { id?: string | null }; runtimePayload?: { localTranscript?: ChatMessage[] } };
+        };
         providerMetadata?: {
           openai?: { selectedCodexPermission?: string | null };
         };
       };
     }>;
-    const savedCursorTranscript = saved[cursorSessionId]?.localTranscript ?? [];
+    const savedCursorTranscript =
+      saved[cursorSessionId]?.providerState?.runtimeMetadata?.cursor?.runtimePayload?.localTranscript ?? [];
     assertEqual(savedCursorTranscript.length, 4, "Cursor transcript writes back to metadata");
     assertEqual(savedCursorTranscript[3]?.content, "persisted", "Cursor assistant message persists locally");
+    assertEqual(saved[cursorSessionId]?.localTranscript, undefined, "Cursor save drops legacy flat local transcript");
     assertEqual(saved[sessionId]?.localTranscript, undefined, "OpenAI transcript stays provider-owned after metadata save");
     assertEqual(saved[stateSessionId]?.localTranscript, undefined, "Provider-state OpenAI transcript stays out of local metadata");
+    assertEqual(
+      saved[stateSessionId]?.providerState?.runtimeMetadata?.openai?.runtimePayload?.codexThreadId,
+      "thread-provider-runtime",
+      "OpenAI save keeps Codex thread id in runtime payload",
+    );
     assertEqual(saved[sessionId]?.providerPermissions?.openai, "yolo", "OpenAI permission writes through providerPermissions");
     assertEqual(saved[sessionId]?.selectedCodexPermission, undefined, "OpenAI save drops legacy flat Codex permission");
     assertEqual(
@@ -624,6 +733,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(hotReloadFallback.providerLocked, true, "hot-reloaded flat provider lock falls back into providerState");
     const hotReloadFallbackOpenAi = getOpenAiProviderSessionMetadata(hotReloadFallback);
     assertEqual(hotReloadFallbackOpenAi?.codexThreadId, "thread-hot-reload", "hot-reloaded flat thread id falls back into providerState");
+    assertEqual(getProviderRuntimeResumeId(hotReloadFallback, "openai"), "thread-hot-reload", "hot-reloaded flat thread id migrates into runtime metadata");
     assertEqual(getProviderPermissionId(hotReloadFallback, "openai"), "full-auto", "hot-reloaded flat permission falls back into providerState");
 
     return { name: "providerState legacy migration", ok: true };
@@ -774,21 +884,29 @@ export function verifyProviderPickerLockFixtures(): VerificationResult {
 export function verifyProviderRuntimeFixtures(): VerificationResult {
   assertEqual(providerTurnOperation(providerInput()), "create", "fresh provider turn creates");
   assertEqual(providerTurnOperation(providerInput({ started: true })), "send", "started provider turn sends");
-  assertEqual(providerTurnOperation(providerInput({ threadId: "thread-1" })), "send", "thread-backed provider turn sends");
+  assertEqual(
+    providerTurnOperation(providerInput({ runtimeMetadata: providerTurnRuntimeMetadata("openai", "thread-1") })),
+    "send",
+    "runtime-metadata-backed provider turn sends",
+  );
+  assertEqual(providerTurnOperation(providerInput({ threadId: "thread-legacy" })), "send", "legacy thread-backed provider turn sends");
   assertEqual(
     providerTurnOperation(providerInput({ forkParentSessionId: "parent-1" })),
     "send",
     "forked provider turn sends through runtime fork path",
   );
 
-  const createReq = buildCodexCreateRequest(providerInput({
+  const controlsOnlyCodexInput = providerInput({
+    runtimeMetadata: providerTurnRuntimeMetadata("openai", "thread-1"),
     selectedControls: {
       model: "gpt-5.4",
       effort: "xhigh",
     },
     providerPermissionId: "workspace",
     providerOptions: { openai: { collaborationMode: "plan" } },
-  }));
+  });
+  assertNoLegacyProviderTurnFields(controlsOnlyCodexInput, "controls-only Codex turn input");
+  const createReq = buildCodexCreateRequest(controlsOnlyCodexInput);
   assertEqual(createReq.session_id, "session-1", "Codex create keeps local session id");
   assertEqual(createReq.model, "gpt-5.4", "Codex create includes selected model");
   assertEqual(createReq.effort, "xhigh", "Codex create includes selected effort");
@@ -818,7 +936,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
 
   const cursorForceReq = buildCursorRequest(providerInput({
     provider: "cursor",
-    threadId: "cursor-thread",
+    runtimeMetadata: providerTurnRuntimeMetadata("cursor", "cursor-thread"),
     selectedControls: { model: "gpt-5.3-codex", mode: "ask" },
     providerPermissionId: "bypass_all",
   }));
@@ -829,7 +947,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   assertNoUndefinedOwnValues(cursorForceReq as unknown as Record<string, unknown>, "cursorForceReq");
 
   const sendReq = buildCodexSendRequest(
-    providerInput({ threadId: "thread-1" }),
+    controlsOnlyCodexInput,
     createReq,
   );
   assertEqual(sendReq.thread_id, "thread-1", "Codex send includes external app-server thread id");
@@ -1027,6 +1145,7 @@ export function verifyProviderPromptSpawnFixtures(): VerificationResult {
     !Object.prototype.hasOwnProperty.call(openaiSpawn, "skipOpenwolf"),
     "prompt spawn omits undefined skipOpenwolf",
   );
+  assertNoLegacyProviderTurnFields(openaiSpawn, "OpenAI prompt spawn");
 
   const cursorSpawn = buildSpawnProviderTurnInput({
     provider: "cursor",
@@ -1042,6 +1161,7 @@ export function verifyProviderPromptSpawnFixtures(): VerificationResult {
     !Object.prototype.hasOwnProperty.call(cursorSpawn, "permissionMode"),
     "Cursor prompt spawn omits permissionMode even when the provider default id overlaps Claude",
   );
+  assertNoLegacyProviderTurnFields(cursorSpawn, "Cursor prompt spawn");
   assertNoUndefinedOwnValues(openaiSpawn as unknown as Record<string, unknown>, "openaiSpawn");
   assertNoUndefinedOwnValues(cursorSpawn as unknown as Record<string, unknown>, "cursorSpawn");
 
@@ -1051,6 +1171,15 @@ export function verifyProviderPromptSpawnFixtures(): VerificationResult {
 export function verifyProviderMetadataHelperFixtures(): VerificationResult {
   const openaiState = resolveSessionProviderState({
     provider: "openai",
+    runtimeMetadata: {
+      openai: {
+        historySource: "codex-rollout",
+        resume: { id: "thread-runtime-metadata" },
+        runtimePayload: {
+          codexThreadId: "thread-runtime-metadata",
+        },
+      },
+    },
     providerMetadata: {
       openai: {
         codexThreadId: "thread-provider-metadata",
@@ -1064,9 +1193,19 @@ export function verifyProviderMetadataHelperFixtures(): VerificationResult {
   });
   assertEqual(openaiState.provider, "openai", "metadata helper fixture resolves OpenAI provider");
   assertEqual(
+    getProviderSessionRuntimeMetadata(openaiState, "openai")?.runtimePayload.codexThreadId,
+    "thread-runtime-metadata",
+    "generic runtime metadata helper reads provider-owned OpenAI payload",
+  );
+  assertEqual(
+    resolveProviderRuntimeResumeId({ providerState: openaiState }, "openai"),
+    "thread-runtime-metadata",
+    "runtime metadata resume helper resolves provider-owned thread id",
+  );
+  assertEqual(
     getProviderSessionMetadata(openaiState, "openai")?.codexThreadId,
-    "thread-provider-metadata",
-    "generic metadata helper reads provider-owned OpenAI thread id",
+    "thread-runtime-metadata",
+    "legacy metadata helper reads OpenAI thread id through runtime metadata",
   );
   assertEqual(
     getProviderPermissionId(resolveSessionProviderState({
@@ -1120,6 +1259,15 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
           openai: "full-auto",
         },
         seedTranscript: null,
+        runtimeMetadata: {
+          openai: {
+            historySource: "codex-rollout",
+            resume: { id: "thread-parent" },
+            runtimePayload: {
+              codexThreadId: "thread-parent",
+            },
+          },
+        },
         providerMetadata: {
           openai: {
             codexThreadId: "thread-parent",
@@ -1130,18 +1278,16 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     },
     selectedProvider: "anthropic",
     selectedControls: { model: "sonnet", effort: "high" },
-    selectedModel: "sonnet",
-    selectedEffort: "high",
     selectedProviderPermissionId: "workspace",
   });
   assertEqual(inheritedRuntime.provider, "openai", "delegation child inherits parent provider");
   assertEqual(inheritedRuntime.selectedControls.model, "gpt-5.4", "delegation child inherits parent model control");
   assertEqual(inheritedRuntime.selectedControls.effort, "medium", "delegation child inherits parent effort control");
-  assertEqual(inheritedRuntime.selectedModel, "gpt-5.4", "delegation child inherits parent model");
-  assertEqual(inheritedRuntime.selectedEffort, "medium", "delegation child inherits parent effort");
   assertEqual(inheritedRuntime.selectedProviderPermissionId, "full-auto", "delegation child inherits parent provider permission");
   assertEqual(inheritedRuntime.inheritSkipOpenwolf, true, "delegation child inherits parent OpenWolf skip preference");
   const inheritedMetadata = buildDelegationChildRuntimeMetadata(inheritedRuntime, "/repo");
+  assertEqual(inheritedMetadata.model, "gpt-5.4", "delegation child metadata derives model from selected controls");
+  assertEqual(inheritedMetadata.effort, "medium", "delegation child metadata derives effort from selected controls");
   assertEqual(inheritedMetadata.providerPermissionId, "full-auto", "delegation child metadata stores provider permission id");
   assert(!Object.prototype.hasOwnProperty.call(inheritedMetadata, "permissionPreset"), "delegation child metadata omits legacy permissionPreset");
 
@@ -1158,8 +1304,6 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     cwd: "/repo",
     prompt: "do the task",
     selectedControls: { model: "gpt-5.5", effort: "high" },
-    selectedModel: "gpt-5.5",
-    selectedEffort: "high",
     selectedProviderPermissionId: "workspace",
     inheritSkipOpenwolf: false,
     mcpEnv,
@@ -1172,6 +1316,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
   assertEqual(openaiChild.skipOpenwolf, true, "delegation OpenAI child skips OpenWolf bootstrap");
   assertEqual(openaiChild.providerOptions?.openai?.skipGitRepoCheck, true, "delegation OpenAI child skips git repo check");
   assertEqual(openaiChild.providerOptions?.openai?.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation OpenAI child receives MCP env");
+  assertNoLegacyProviderTurnFields(openaiChild, "delegation OpenAI child turn");
   assert(!Object.prototype.hasOwnProperty.call(openaiChild.providerOptions ?? {}, "anthropic"), "delegation OpenAI child does not receive Anthropic options");
   assert(!Object.prototype.hasOwnProperty.call(openaiChild.providerOptions ?? {}, "cursor"), "delegation OpenAI child does not receive Cursor options");
   const openaiChildReq = buildCodexCreateRequest(openaiChild as ProviderTurnInput<"openai">);
@@ -1185,8 +1330,6 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     cwd: "/repo",
     prompt: "do the task",
     selectedControls: { model: "auto", mode: "ask" },
-    selectedModel: "auto",
-    selectedEffort: "",
     selectedProviderPermissionId: "default",
     inheritSkipOpenwolf: false,
     mcpEnv,
@@ -1200,6 +1343,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
   assertEqual(cursorChild.providerOptions?.cursor?.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Cursor child receives MCP env");
   assert(!Object.prototype.hasOwnProperty.call(cursorChild.providerOptions ?? {}, "anthropic"), "delegation Cursor child does not receive Anthropic options");
   assert(!Object.prototype.hasOwnProperty.call(cursorChild.providerOptions ?? {}, "openai"), "delegation Cursor child does not receive OpenAI options");
+  assertNoLegacyProviderTurnFields(cursorChild, "delegation Cursor child turn");
   const cursorChildReq = buildCursorRequest(cursorChild as ProviderTurnInput<"cursor">);
   assert(!Object.prototype.hasOwnProperty.call(cursorChildReq, "force"), "delegation Cursor selected default permission does not force writes");
   assertNoUndefinedOwnValues(cursorChild as unknown as Record<string, unknown>, "cursorChild");
@@ -1210,8 +1354,6 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     cwd: "/repo",
     prompt: "do the task",
     selectedControls: { model: "sonnet", effort: "high" },
-    selectedModel: "sonnet",
-    selectedEffort: "high",
     selectedProviderPermissionId: "workspace",
     inheritSkipOpenwolf: true,
     mcpEnv,
@@ -1226,6 +1368,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
   assert(!Object.prototype.hasOwnProperty.call(anthropicChild.providerOptions?.anthropic ?? {}, "mcpConfig"), "delegation Anthropic child defers temp MCP config creation to runtime prep");
   assert(!Object.prototype.hasOwnProperty.call(anthropicChild.providerOptions ?? {}, "openai"), "delegation Anthropic child does not receive OpenAI options");
   assert(!Object.prototype.hasOwnProperty.call(anthropicChild.providerOptions ?? {}, "cursor"), "delegation Anthropic child does not receive Cursor options");
+  assertNoLegacyProviderTurnFields(anthropicChild, "delegation Anthropic child turn");
   assertNoUndefinedOwnValues(anthropicChild as unknown as Record<string, unknown>, "anthropicChild");
 
   return { name: "delegation child provider turn fixtures", ok: true };
@@ -1310,7 +1453,10 @@ export function verifyProviderIpcRequestTypingFixtures(): VerificationResult {
   } satisfies ProviderCreateRequest<"openai">;
   const openaiSend = {
     provider: "openai",
-    req: buildCodexSendRequest(providerInput({ threadId: "thread-1" }), openaiCreate.req),
+    req: buildCodexSendRequest(
+      providerInput({ runtimeMetadata: providerTurnRuntimeMetadata("openai", "thread-1") }),
+      openaiCreate.req,
+    ),
   } satisfies ProviderSendRequest<"openai">;
   const anthropicCreate = {
     provider: "anthropic",
@@ -1425,6 +1571,15 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
       },
     },
     seedTranscript: null,
+    runtimeMetadata: {
+      opencode: {
+        historySource: "none",
+        resume: { id: null },
+        runtimePayload: {
+          threadId: null,
+        },
+      },
+    },
     providerMetadata: {
       opencode: {
         threadId: null,
@@ -1538,6 +1693,10 @@ export function verifyProviderEventNormalizationFixtures(): VerificationResult {
   const toolCall = buildProviderToolCall({ id: "tool-1", name: "Edit", input: { file_path: "src/a.ts" } });
   assertEqual(getProviderToolFilePath(toolCall.input), "src/a.ts", "provider tool path reads file_path");
 
+  const aliasedToolCall = buildProviderToolCall({ id: "tool-alias", name: "read_file", input: { file: "src/alias.ts" } });
+  assertEqual(aliasedToolCall.name, "Read", "provider tool aliases normalize to Claude tool names");
+  assertEqual(getProviderToolFilePath(aliasedToolCall.input), "src/alias.ts", "provider tool alias input normalizes file path");
+
   const fileChangeItem = {
     id: "codex-file",
     item_type: "file_change",
@@ -1565,6 +1724,16 @@ export function verifyProviderEventNormalizationFixtures(): VerificationResult {
   assert(shellCall, "Codex exec_command normalizes into a provider tool call");
   assertEqual(shellCall.name, "Bash", "Codex raw shell tool displays as Bash");
   assertEqual(codexItemInput(shellItem).command, "npm run typecheck", "Codex shell command maps to command input");
+
+  const codexMcpCall = codexItemToProviderToolCall({
+    id: "codex-mcp",
+    item_type: "mcp_tool_call",
+    server: "terminal-64",
+    tool_name: "send_to_team",
+    arguments: { message: "heads up" },
+  });
+  assert(codexMcpCall, "Codex MCP tool call normalizes into a provider tool call");
+  assertEqual(codexMcpCall.name, "mcp__terminal-64__send_to_team", "Codex MCP tool call uses Claude MCP naming");
 
   const failedResult = codexItemToProviderToolResult({
     id: "codex-failed",
@@ -1617,9 +1786,84 @@ export function verifyProviderEventNormalizationFixtures(): VerificationResult {
   }));
   const cursorToolEvent = cursorToolEvents.find((event) => event.kind === "tool_call");
   assert(cursorToolEvent?.kind === "tool_call", "Cursor MCP tool_call normalizes into a provider tool call");
-  assertEqual(cursorToolEvent.toolCall.name, "terminal-64-StartDelegation", "Cursor MCP tool name keeps provider-prefixed name");
+  assertEqual(cursorToolEvent.toolCall.name, "mcp__terminal-64__StartDelegation", "Cursor MCP tool name normalizes to Claude MCP naming");
   assertEqual(cursorToolEvent.toolCall.input.context, "shared context", "Cursor MCP nested args unwrap into provider input");
   assert(Array.isArray(cursorToolEvent.toolCall.input.tasks), "Cursor MCP nested task array is visible to delegation parser");
+
+  const cursorRuntimeToolEnvelope = {
+    type: "provider.tool",
+    provider: "cursor",
+    sessionId: "cursor-session",
+    eventId: "cursor-runtime-tool",
+    createdAt: "2026-04-30T00:00:00Z",
+    itemId: "cursor-runtime-tool-id",
+    nativeType: "tool_call:started",
+    phase: "started",
+    id: "cursor-runtime-tool-id",
+    name: "terminal-64-StartDelegation",
+    input: { context: "runtime context", tasks: [{ description: "runtime task" }] },
+  };
+  assert(isProviderRuntimeEvent(cursorRuntimeToolEnvelope), "canonical Cursor provider.tool envelope is recognized");
+  const cursorRuntimeNormalized = providerRuntimeEventToNormalized(cursorRuntimeToolEnvelope);
+  const cursorRuntimeTool = cursorRuntimeNormalized.find((event) => event.kind === "tool_call");
+  assert(cursorRuntimeTool?.kind === "tool_call", "canonical Cursor provider.tool envelope normalizes into a tool call");
+  assertEqual(cursorRuntimeTool.toolCall.name, "mcp__terminal-64__StartDelegation", "canonical Cursor tool envelope keeps normalized MCP naming");
+  assertEqual(cursorRuntimeTool.toolCall.input.context, "runtime context", "canonical Cursor tool envelope preserves input");
+
+  const cursorRuntimeContent = cursorDecoder.decode("cursor-session", JSON.stringify({
+    type: "provider.content",
+    provider: "cursor",
+    sessionId: "cursor-session",
+    eventId: "cursor-runtime-content",
+    createdAt: "2026-04-30T00:00:01Z",
+    phase: "delta",
+    text: "streamed",
+  }));
+  assertEqual(cursorRuntimeContent[0]?.kind, "assistant_delta", "Cursor decoder ingests canonical provider.content envelopes");
+
+  const cursorRuntimeTurn = cursorDecoder.decode("cursor-runtime-fallback", JSON.stringify({
+    type: "provider.turn",
+    provider: "cursor",
+    sessionId: "cursor-runtime-fallback",
+    eventId: "cursor-runtime-turn",
+    createdAt: "2026-04-30T00:00:02Z",
+    phase: "completed",
+    result: "final fallback",
+    isError: false,
+  }));
+  assertEqual(cursorRuntimeTurn[0]?.kind, "assistant_message", "Cursor canonical turn result still backfills assistant text when no content streamed");
+  assertEqual(cursorRuntimeTurn[1]?.kind, "turn_completed", "Cursor canonical turn result still completes the turn");
+
+  const historyMessages = mapHistoryMessages([{
+    id: "history-message",
+    role: "assistant",
+    content: "",
+    timestamp: 1,
+    tool_calls: [
+      { id: "history-read", name: "read_file", input: { filePath: "src/history.ts" } },
+      { id: "history-search", name: "web_search", input: { q: "Terminal 64" } },
+      { id: "history-mcp", name: "terminal-64/report_done", input: { summary: "done" } },
+    ],
+  }]);
+  const historyTools = historyMessages[0]?.toolCalls ?? [];
+  assertEqual(historyTools[0]?.name, "Read", "history tool aliases normalize to Claude tool names");
+  assertEqual(getProviderToolFilePath(historyTools[0]?.input ?? {}), "src/history.ts", "history tool input normalizes filePath");
+  assertEqual(historyTools[1]?.name, "WebSearch", "history web search aliases normalize to Claude tool names");
+  assertEqual(historyTools[1]?.input.query, "Terminal 64", "history web search query normalizes");
+  assertEqual(historyTools[2]?.name, "mcp__terminal-64__report_done", "history MCP slash names normalize to Claude MCP names");
+
+  const lsTool = buildProviderToolCall({ id: "presentation-ls", name: "list_dir", input: { directory: "src/components/provider-chat" } });
+  assertEqual(lsTool.name, "LS", "presentation fixture uses normalized Claude LS tool name");
+  assert(isGroupableToolCall(lsTool), "presentation grouping is centralized for normalized LS tools");
+  assertEqual(toolHeader(lsTool).title, "LS", "presentation headers come from centralized tool metadata");
+  const lsGroup = toolGroupLabel([
+    lsTool,
+    buildProviderToolCall({ id: "presentation-ls-2", name: "ls", input: { path: "src/lib" } }),
+  ]);
+  assertEqual(lsGroup.name, "Listed 2 dirs", "presentation group labels come from centralized tool metadata");
+  const shellPresentation = toolGroupItem(shellCall);
+  assertEqual(shellPresentation.status, "done", "presentation expanded group items expose tool status metadata");
+  assertEqual(shellPresentation.resultSummary, "2 chars", "presentation expanded group items expose output summary metadata");
 
   const cursorMcpStatus = cursorDecoder.decode("cursor-session", JSON.stringify({
     type: "mcp_status",

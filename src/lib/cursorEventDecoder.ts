@@ -1,7 +1,10 @@
 import {
   buildProviderToolCall,
   buildProviderToolResult,
+  isProviderRuntimeEvent,
   type NormalizedProviderEvent,
+  providerRuntimeEventToNormalized,
+  type ProviderRuntimeEvent,
   type ProviderToolCall,
   type ProviderToolInput,
 } from "../contracts/providerEvents";
@@ -121,15 +124,53 @@ export class CursorLiveEventDecoder {
     this.sessionsWithAssistantText.delete(sessionId);
   }
 
+  private decodeRuntimeEvent(sessionId: string, event: ProviderRuntimeEvent): NormalizedProviderEvent[] {
+    const normalized = providerRuntimeEventToNormalized(event);
+
+    if (
+      (event.type === "provider.session" && event.phase === "started")
+      || (event.type === "provider.turn" && event.phase === "started")
+    ) {
+      this.sessionsWithAssistantText.delete(sessionId);
+      return normalized;
+    }
+
+    if (event.type === "provider.content" && event.text) {
+      this.sessionsWithAssistantText.add(sessionId);
+      return normalized;
+    }
+
+    if (event.type === "provider.turn" && event.phase === "completed") {
+      const events: NormalizedProviderEvent[] = [];
+      if (event.isError) {
+        const message = stringifyToolResult(event.error ?? event.message ?? event.result)
+          || "Cursor reported an error.";
+        events.push({ kind: "error", message });
+      } else if (event.result !== undefined && !this.sessionsWithAssistantText.has(sessionId)) {
+        const text = stringifyToolResult(event.result);
+        if (text) events.push({ kind: "assistant_message", text });
+      }
+      events.push(...normalized);
+      return events;
+    }
+
+    return normalized;
+  }
+
   decode(sessionId: string, data: string): NormalizedProviderEvent[] {
-    let parsed: CursorStreamEvent;
+    let parsedUnknown: unknown;
     try {
-      parsed = JSON.parse(data) as CursorStreamEvent;
+      parsedUnknown = JSON.parse(data) as unknown;
     } catch (err) {
       console.warn("[cursor] Dropped malformed stream event:", data.slice(0, 200), err);
       return [];
     }
 
+    if (isProviderRuntimeEvent(parsedUnknown)) {
+      return this.decodeRuntimeEvent(sessionId, parsedUnknown);
+    }
+
+    const parsed = parsedUnknown as CursorStreamEvent;
     const type = parsed.type ?? "";
     if (!type) return [];
 

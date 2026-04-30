@@ -20,6 +20,7 @@ import type {
   ProviderHistoryTruncateRequest,
   ProviderSendRequest,
   ProviderEventEnvelope,
+  ProviderSnapshot,
   CodexEvent,
   CodexDone,
   SlashCommand,
@@ -40,8 +41,9 @@ import type {
   PermissionMode,
 } from "./types";
 import { joinPath } from "./platform";
-import { isClaudePermissionId, listProviderControls, type ProviderId } from "./providers";
+import { getProviderDefaultControlValues, isClaudePermissionId, type ProviderId } from "./providers";
 import { getDefaultProviderPermissionId } from "./providerPermissions";
+import { normalizeProviderToolCall } from "../contracts/providerEvents";
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
 
 // PTY terminal commands
@@ -263,6 +265,10 @@ export async function providerClose(provider: ProviderId, sessionId: string): Pr
   return invoke("provider_close", { provider, sessionId });
 }
 
+export async function listProviderSnapshots(): Promise<ProviderSnapshot[]> {
+  return invoke<ProviderSnapshot[]>("provider_snapshots");
+}
+
 export interface ProviderHistoryHydrateIpcResponse {
   status?: "messages" | "empty" | "skipped" | "unsupported";
   reason?: string;
@@ -424,7 +430,7 @@ export async function loadSessionMetadata(sessionId: string, cwd: string): Promi
 export function mapHistoryMessages(history: HistoryMessage[]): ChatMessage[] {
   const byId = new Map<string, ChatMessage>();
   for (const m of history) {
-    const toolCalls: ToolCall[] | undefined = m.tool_calls?.map((tc) => ({
+    const toolCalls: ToolCall[] | undefined = m.tool_calls?.map((tc) => normalizeProviderToolCall({
       id: tc.id,
       name: tc.name,
       input: tc.input,
@@ -1044,9 +1050,7 @@ export function buildSpawnProviderTurnInput({
   skipOpenwolf,
 }: SpawnProviderTurnInputArgs): ProviderTurnInput {
   const providerPermissionId = getDefaultProviderPermissionId(provider);
-  const selectedControls = Object.fromEntries(
-    listProviderControls(provider).map((control) => [control.id, control.defaultValue]),
-  );
+  const selectedControls = getProviderDefaultControlValues(provider);
   const turnInput: ProviderTurnInput = {
     provider,
     sessionId,

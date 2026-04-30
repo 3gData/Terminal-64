@@ -389,9 +389,7 @@ function rustAdapterTemplate() {
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use tauri::AppHandle;
-use tokio::sync::mpsc;
 
-use crate::providers::events::ProviderEvent;
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderApprovalDecision,
     ProviderCommandAdapter, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
@@ -450,6 +448,8 @@ impl ProviderCommandAdapter for ${adapterName} {
         req: ProviderSendPromptRequest,
     ) -> Result<(), ProviderAdapterError> {
         let _session_id = request_session_id(&req.payload)?;
+        // Live provider streams should construct ProviderRuntimeEvent values and
+        // emit them with crate::providers::emit_provider_runtime_event().
         Err(not_implemented("send_prompt"))
     }
 
@@ -543,10 +543,6 @@ impl ProviderAdapter for ${adapterName} {
         Ok(())
     }
 
-    async fn stream_events(&self) -> mpsc::Receiver<ProviderEvent> {
-        let (_tx, rx) = mpsc::channel(1);
-        rx
-    }
 }
 `;
 }
@@ -641,17 +637,36 @@ ${providerId}: {
     source: "none",
     hydrateFailureLabel: "${label}",
   },
-  controls: {
-    model: { id: "model", label: "Model" },
-    effort: { id: "effort", label: "Effort" },
-    permission: { id: "permission", label: "Permissions", inputSuffix: "permissions" },
-  },
-  models: ${providerId.toUpperCase()}_MODELS,
-  efforts: ${providerId.toUpperCase()}_EFFORTS,
-  permissions: ${providerId.toUpperCase()}_PERMISSIONS,
-  defaultModel: "default",
-  defaultEffort: "medium",
-  defaultPermission: "default",
+  controls: [
+    {
+      id: "model",
+      label: "Model",
+      kind: "select",
+      scope: "topbar",
+      defaultValue: "default",
+      options: ${providerId.toUpperCase()}_MODELS,
+      legacySlot: "model",
+    },
+    {
+      id: "effort",
+      label: "Effort",
+      kind: "select",
+      scope: "topbar",
+      defaultValue: "medium",
+      options: ${providerId.toUpperCase()}_EFFORTS,
+      legacySlot: "effort",
+    },
+    {
+      id: "permission",
+      label: "Permissions",
+      kind: "select",
+      scope: "composer",
+      defaultValue: "default",
+      options: ${providerId.toUpperCase()}_PERMISSIONS,
+      inputSuffix: "permissions",
+      legacySlot: "permission",
+    },
+  ],
 },
 \`\`\`
 
@@ -680,10 +695,12 @@ that operation.
 Files: \`src/lib/providerEventIngestion.ts\` and, for backend payload typing,
 \`src/lib/tauriApi.ts\` / \`src/lib/types.ts\`.
 
-Preferred path: emit the shared backend \`provider-event\` envelope with
-\`provider: "${providerId}"\`, \`sessionId\`, and raw \`data\`. The frontend
-\`subscribeProviderEventIngestion()\` already listens to \`onProviderEvent\`;
-new providers should add only the decoder/context-window entries there.
+Preferred path: construct the Rust \`ProviderRuntimeEvent\` envelope and emit it
+with \`crate::providers::emit_provider_runtime_event()\`. That helper sends the
+shared backend \`provider-event\` payload with \`provider\`, \`sessionId\`, raw
+\`data\`, and typed \`event\`. The frontend \`subscribeProviderEventIngestion()\`
+already listens to \`onProviderEvent\`; new providers should add only the
+decoder/context-window entries there.
 
 Legacy fallback topics, only if the provider cannot emit \`provider-event\` yet:
 

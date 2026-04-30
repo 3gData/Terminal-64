@@ -38,7 +38,8 @@ contains snippets for `src/lib/providers.ts`, `src/lib/providerRuntime.ts`,
 2. Register the frontend runtime in `src/lib/providerRuntime.ts`.
 3. Add provider IPC request map augmentation in the runtime stub.
 4. Wire the decoder in `src/lib/providerEventIngestion.ts`, preferably through
-   the shared backend `provider-event` envelope.
+   the shared backend `provider-event` envelope emitted from Rust
+   `ProviderRuntimeEvent` values.
 5. Add provider-owned metadata under `ProviderSessionMetadataRegistry`.
 6. Register the backend adapter and `ProviderKind`.
 7. Extend `src/lib/providerModularity.verification.ts` so `tsc --noEmit`
@@ -58,8 +59,10 @@ or Codex behavior.
   should only apply generic source policies like local transcript persistence.
 - Create/send request shaping belongs in `src/lib/providerRuntimes/<provider>.ts`.
 - Raw provider event drift belongs in `src/lib/<provider>EventDecoder.ts`;
-  backend providers should emit the shared `provider-event` envelope and keep
-  per-provider legacy topics only as a compatibility fallback.
+  backend providers should emit `ProviderRuntimeEvent` via
+  `emit_provider_runtime_event()` and keep per-provider legacy topics only as a
+  compatibility fallback. The experimental Rust `ProviderEvent` matrix is
+  reference-only, not an adapter target.
 - Provider session details belong under
   `providerState.providerMetadata[provider]`.
 - Backend CLI/process details belong in `src-tauri/src/providers/<provider>.rs`.

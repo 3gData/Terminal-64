@@ -73,6 +73,144 @@ pub struct ProviderEventEnvelope {
     #[serde(rename = "sessionId")]
     pub session_id: String,
     pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshot {
+    pub id: String,
+    pub display: ProviderSnapshotDisplay,
+    pub auth: ProviderSnapshotAuth,
+    pub install: ProviderSnapshotInstall,
+    pub status: ProviderSnapshotStatus,
+    pub models: Vec<ProviderSnapshotOptionValue>,
+    pub options: Vec<ProviderSnapshotOptionDescriptor>,
+    pub capabilities: ProviderSnapshotCapabilities,
+    pub slash_commands: Vec<ProviderSnapshotSlashCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotDisplay {
+    pub label: String,
+    pub short_label: String,
+    pub brand_title: String,
+    pub empty_state_label: String,
+    pub default_session_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotAuth {
+    pub status: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotInstall {
+    pub status: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotStatus {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProviderSnapshotControlValue {
+    String(String),
+    Boolean(bool),
+    Number(f64),
+}
+
+impl From<&str> for ProviderSnapshotControlValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl From<String> for ProviderSnapshotControlValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotOptionValue {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<ProviderSnapshotControlValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotOptionDescriptor {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub scope: String,
+    pub default_value: ProviderSnapshotControlValue,
+    pub options: Vec<ProviderSnapshotOptionValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_slot: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotCapabilities {
+    pub mcp: bool,
+    pub plan: bool,
+    pub fork: bool,
+    pub rewind: bool,
+    pub images: bool,
+    pub hook_log: bool,
+    pub native_slash_commands: bool,
+    pub compact: bool,
+    pub session_model_switch: String,
+    pub history: ProviderSnapshotHistoryCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotHistoryCapabilities {
+    pub hydrate: bool,
+    pub fork: bool,
+    pub rewind: bool,
+    pub delete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSnapshotSlashCommand {
+    pub name: String,
+    pub description: String,
+    pub source: String,
 }
 
 // Codex session types

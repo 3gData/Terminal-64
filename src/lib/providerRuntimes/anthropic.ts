@@ -21,6 +21,10 @@ import type {
 } from "../../contracts/providerRuntime";
 import type { CreateClaudeRequest, SendClaudePromptRequest } from "../types";
 
+function stringControlValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
 declare module "../../contracts/providerIpc" {
   interface ProviderCreateRequestMap {
     anthropic: CreateClaudeRequest;
@@ -65,8 +69,8 @@ declare module "../../contracts/providerIpc" {
 
 function buildClaudeRequest(input: ProviderTurnInput<"anthropic">): CreateClaudeRequest {
   const options = input.providerOptions?.anthropic;
-  const selectedModel = input.selectedControls?.model ?? input.selectedModel;
-  const selectedEffort = input.selectedControls?.effort ?? input.selectedEffort;
+  const selectedModel = stringControlValue(input.selectedControls?.model);
+  const selectedEffort = stringControlValue(input.selectedControls?.effort);
   return {
     session_id: input.sessionId,
     cwd: input.cwd,

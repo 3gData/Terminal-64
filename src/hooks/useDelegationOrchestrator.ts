@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import {
-  getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
+  getProviderSessionRuntimeMetadata,
   resolveSessionProviderState,
   useProviderSessionStore,
   type ClaudeSession,
@@ -136,17 +136,14 @@ function providerTurnForSession({
   defaultCodexPermission?: string;
   }): ProviderTurnInput {
     const providerState = resolveSessionProviderState(session);
-    const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
     const input: ProviderTurnInput = {
       provider: providerState.provider,
     sessionId,
-    cwd: session.cwd || ".",
-    prompt,
+      cwd: session.cwd || ".",
+      prompt,
       started: session.hasBeenStarted,
-      threadId: openaiMetadata?.codexThreadId ?? null,
+      runtimeMetadata: getProviderSessionRuntimeMetadata(providerState, providerState.provider),
       selectedControls: providerState.selectedControls[providerState.provider] ?? {},
-      selectedModel: providerState.selectedModel,
-      selectedEffort: providerState.selectedEffort,
       providerPermissionId: providerState.providerPermissions[providerState.provider]
         ?? defaultCodexPermission
         ?? getProviderPermissionId(providerState, providerState.provider),

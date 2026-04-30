@@ -16,6 +16,15 @@ export interface ProviderPermissionInputPresentation {
   color: string;
 }
 
+function fallbackPermissionOption(id: string): PermissionOption {
+  return {
+    id,
+    label: id === "default" ? "Default" : id,
+    color: "#89b4fa",
+    desc: "Provider default",
+  };
+}
+
 export function getDefaultProviderPermissionId(provider: ProviderId): string {
   return getProviderDefaultPermission(provider) || getProviderPermissionOptions(provider)[0]?.id || "default";
 }
@@ -30,12 +39,14 @@ export function getProviderPermissionOption(provider: ProviderId, id: string | n
   return (
     permissions.find((permission) => permission.id === id) ??
     permissions.find((permission) => permission.id === defaultId) ??
-    permissions[0]!
+    permissions[0] ??
+    fallbackPermissionOption(defaultId)
   );
 }
 
 export function getNextProviderPermissionId(provider: ProviderId, currentId: string): string {
   const permissions = getProviderPermissionOptions(provider);
+  if (permissions.length === 0) return getDefaultProviderPermissionId(provider);
   const currentIndex = permissions.findIndex((permission) => permission.id === currentId);
   return permissions[(currentIndex + 1) % permissions.length]?.id ?? getDefaultProviderPermissionId(provider);
 }

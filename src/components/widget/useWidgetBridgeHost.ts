@@ -30,8 +30,8 @@ import { widgetBus } from "../../lib/widgetBus";
 import { invokePlugin, onPluginEvent, type PluginStreamHandle } from "../../lib/pluginApi";
 import { startVoice as startVoiceCapture, stopVoice as stopVoiceCapture, onVoiceIntent, onVoicePartial, onVoiceFinal } from "../../lib/voiceApi";
 import {
-  getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
+  getProviderSessionRuntimeMetadata,
   resolveSessionProviderState,
   useProviderSessionStore,
   type ClaudeSession,
@@ -174,17 +174,14 @@ function providerTurnForSession(
   opts?: { started?: boolean; defaultCodexPermission?: string },
 ): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
-  const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
   return {
     provider: providerState.provider,
     sessionId,
     cwd: session.cwd || ".",
     prompt,
     started: opts?.started ?? session.hasBeenStarted,
-    threadId: openaiMetadata?.codexThreadId ?? null,
+    runtimeMetadata: getProviderSessionRuntimeMetadata(providerState, providerState.provider),
     selectedControls: providerState.selectedControls[providerState.provider] ?? {},
-    selectedModel: providerState.selectedModel,
-    selectedEffort: providerState.selectedEffort,
     providerPermissionId: providerState.providerPermissions[providerState.provider]
       ?? opts?.defaultCodexPermission
       ?? getProviderPermissionId(providerState, providerState.provider),

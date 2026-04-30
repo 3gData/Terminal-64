@@ -12,7 +12,12 @@ import {
   type WheelEventHandler,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { getProviderManifest, listProviderManifests, type ProviderId } from "../../lib/providers";
+import type { ProviderId } from "../../lib/providers";
+import {
+  getProviderSnapshotDisplay,
+  listProviderSnapshotDisplays,
+  useProviderSnapshots,
+} from "../../lib/providerSnapshots";
 import { isProviderAvailable, useSettingsStore } from "../../stores/settingsStore";
 import { useProviderSessionStore } from "../../stores/providerSessionStore";
 import { formatDuration } from "../../lib/constants";
@@ -114,10 +119,11 @@ function EmptyProviderState({
   unlocked: boolean;
   onSelectProvider?: ((provider: ProviderId) => void) | undefined;
 }) {
-  const providerCfg = getProviderManifest(provider);
+  const snapshots = useProviderSnapshots();
+  const providerDisplay = getProviderSnapshotDisplay(provider, snapshots);
   const providerAvailability = useSettingsStore((s) => s.providerAvailability);
-  const providerOptions = listProviderManifests().filter((manifest) =>
-    isProviderAvailable(manifest.id, providerAvailability)
+  const providerOptions = listProviderSnapshotDisplays(snapshots).filter((display) =>
+    isProviderAvailable(display.provider, providerAvailability)
   );
 
   return (
@@ -130,27 +136,28 @@ function EmptyProviderState({
           <DropdownMenuTrigger asChild>
             <button className="cc-empty-provider-trigger" aria-label="Choose provider">
               <ProviderLogo provider={provider} size={14} />
-              <span>{providerCfg.ui.emptyStateLabel}</span>
+              <span>{providerDisplay.emptyStateLabel}</span>
               <span className="cc-empty-provider-chev">▾</span>
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="center" className="cc-provider-picker-menu">
             <DropdownMenuLabel>Provider</DropdownMenuLabel>
-            {providerOptions.map((manifest) => (
+            {providerOptions.map((display) => (
               <DropdownMenuItem
-                key={manifest.id}
-                active={manifest.id === provider}
-                onSelect={() => onSelectProvider(manifest.id)}
+                key={display.provider}
+                active={display.provider === provider}
+                onSelect={() => onSelectProvider(display.provider)}
               >
-                <ProviderLogo provider={manifest.id} size={14} className="shadcn-menu-icon" />
-                <span className="shadcn-menu-text">{manifest.ui.emptyStateLabel}</span>
-                <span className="shadcn-menu-check">{manifest.id === provider ? "✓" : ""}</span>
+                <ProviderLogo provider={display.provider} size={14} className="shadcn-menu-icon" />
+                <span className="shadcn-menu-text">{display.emptyStateLabel}</span>
+                {display.statusLabel && <span className="shadcn-menu-meta">{display.statusLabel}</span>}
+                <span className="shadcn-menu-check">{display.provider === provider ? "✓" : ""}</span>
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : (
-        <span className="cc-empty-text">{providerCfg.ui.emptyStateLabel}</span>
+        <span className="cc-empty-text">{providerDisplay.emptyStateLabel}</span>
       )}
       <span className="cc-empty-sub">Send a message, type / for commands, or drop files</span>
     </div>

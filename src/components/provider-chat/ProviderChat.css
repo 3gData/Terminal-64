@@ -1288,18 +1288,46 @@
   border-left: 2px solid rgba(166, 227, 161, 0.4);
 }
 
-/* Grouped Read files */
 .cc-tc-group-item {
-  padding: 3px 12px;
+  display: grid;
+  grid-template-columns: 12px 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
 }
 
 .cc-tc-group-item:last-child { border-bottom: none; }
 
+.cc-tc-group-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cc-tc-group-title {
+  color: #89b4fa;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
 .cc-tc-group-file {
   font-family: 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
   color: var(--fg-muted, #6c7086);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc-tc-group-meta {
+  color: var(--fg-muted, #6c7086);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.75;
 }
 
 /* ---- Permission request card ---- */

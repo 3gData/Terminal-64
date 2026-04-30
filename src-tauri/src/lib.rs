@@ -488,6 +488,11 @@ fn provider_close(
 }
 
 #[tauri::command]
+fn provider_snapshots(state: tauri::State<'_, AppState>) -> Result<Vec<ProviderSnapshot>, String> {
+    Ok(state.providers.snapshots())
+}
+
+#[tauri::command]
 fn provider_history_truncate(
     state: tauri::State<'_, AppState>,
     provider: String,
@@ -6010,6 +6015,7 @@ pub fn run() {
             provider_send,
             provider_cancel,
             provider_close,
+            provider_snapshots,
             provider_history_truncate,
             provider_history_fork,
             provider_history_hydrate,

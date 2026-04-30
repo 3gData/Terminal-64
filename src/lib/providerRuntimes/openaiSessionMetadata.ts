@@ -1,11 +1,11 @@
 import {
-  resolveOpenAiProviderSessionMetadata,
+  resolveProviderRuntimeResumeId,
   useProviderSessionStore,
 } from "../../stores/providerSessionStore";
 
 export function getOpenAiThreadIdForSession(sessionId: string): string | null {
   const session = useProviderSessionStore.getState().sessions[sessionId];
-  return resolveOpenAiProviderSessionMetadata(session)?.codexThreadId ?? session?.codexThreadId ?? null;
+  return resolveProviderRuntimeResumeId(session, "openai") ?? session?.codexThreadId ?? null;
 }
 
 export function setOpenAiThreadIdForSession(sessionId: string, threadId: string | null): void {

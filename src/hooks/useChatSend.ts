@@ -3,14 +3,13 @@ import { createCheckpoint, readFile } from "../lib/tauriApi";
 import { runProviderTurn } from "../lib/providerRuntime";
 import { isAbsolutePath, joinPath } from "../lib/platform";
 import {
-  getOpenAiProviderSessionMetadata,
+  getProviderSessionRuntimeMetadata,
   resolveSessionProviderState,
   useProviderSessionStore,
   type ProviderControlValueMap,
 } from "../stores/providerSessionStore";
 import type { PermissionMode } from "../lib/types";
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
-import { getProviderLegacyControl } from "../lib/providers";
 
 interface UseChatSendOptions {
   sessionId: string;
@@ -40,8 +39,6 @@ export function useChatSend({
       const started = (sess?.hasBeenStarted ?? false) && (sess?.promptCount ?? 0) > 0;
       const providerState = resolveSessionProviderState(sess);
       const provider = providerState.provider;
-      const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
-      const codexThreadId = openAiMetadata?.codexThreadId ?? null;
       const seedTranscript = providerState.seedTranscript;
       try {
         if (!started && (!effectiveCwd || effectiveCwd === ".")) {
@@ -77,18 +74,14 @@ export function useChatSend({
           }
         }
 
-        const modelControl = getProviderLegacyControl(provider, "model");
-        const effortControl = getProviderLegacyControl(provider, "effort");
         const turnInput: ProviderTurnInput = {
           provider,
           sessionId,
           cwd: effectiveCwd,
           prompt: providerPrompt,
           started,
-          threadId: codexThreadId,
+          runtimeMetadata: getProviderSessionRuntimeMetadata(providerState, provider),
           selectedControls,
-          selectedModel: modelControl ? selectedControls[modelControl.id] ?? null : providerState.selectedModel,
-          selectedEffort: effortControl ? selectedControls[effortControl.id] ?? null : providerState.selectedEffort,
           providerPermissionId: selectedProviderPermissionId,
           permissionMode,
           skipOpenwolf: sess?.skipOpenwolf || false,

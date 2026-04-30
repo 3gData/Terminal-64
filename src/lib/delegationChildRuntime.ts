@@ -13,6 +13,7 @@ import type { ChatMessage, DelegationChildRuntimeMetadata, PermissionMode } from
 import {
   getProviderDefaultPermission,
   getProviderDelegationPolicy,
+  getProviderLegacyControl,
   getProviderPermissionOptions,
   type ProviderId,
 } from "./providers";
@@ -23,19 +24,17 @@ export type { DelegationMcpTransport } from "./providers";
 interface DelegationParentSessionSource {
   providerState?: ProviderSessionState | undefined;
   provider?: ProviderId | undefined;
+  runtimeMetadata?: ProviderSessionState["runtimeMetadata"] | undefined;
+  /** @deprecated Legacy OpenAI fallback; runtimeMetadata is canonical. */
   codexThreadId?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
   selectedControls?: ProviderSelectedControlsMap | undefined;
-  selectedModel?: string | null | undefined;
-  selectedEffort?: string | null | undefined;
   skipOpenwolf?: boolean | undefined;
 }
 
 export interface DelegationChildRuntimeSettings {
   provider: ProviderId;
   selectedControls: ProviderControlValueMap;
-  selectedModel: string;
-  selectedEffort: string;
   selectedProviderPermissionId: string;
   inheritSkipOpenwolf: boolean;
 }
@@ -44,8 +43,6 @@ export interface ResolveDelegationChildRuntimeSettingsOptions {
   parentSession?: DelegationParentSessionSource | undefined;
   selectedProvider: ProviderId;
   selectedControls?: ProviderControlValueMap | undefined;
-  selectedModel: string;
-  selectedEffort: string;
   selectedProviderPermissionId: string;
 }
 
@@ -108,8 +105,6 @@ export function resolveDelegationChildRuntimeSettings({
   parentSession,
   selectedProvider,
   selectedControls,
-  selectedModel,
-  selectedEffort,
   selectedProviderPermissionId,
 }: ResolveDelegationChildRuntimeSettingsOptions): DelegationChildRuntimeSettings {
   const parentProviderState = resolveSessionProviderState(parentSession);
@@ -121,8 +116,6 @@ export function resolveDelegationChildRuntimeSettings({
   return {
     provider,
     selectedControls: inheritedControls,
-    selectedModel: parentProviderState.selectedModel ?? selectedModel,
-    selectedEffort: parentProviderState.selectedEffort ?? selectedEffort,
     selectedProviderPermissionId: parentSession
       ? getProviderPermissionId(parentProviderState, provider)
       : selectedProviderPermissionId ?? getProviderDefaultPermission(provider),
@@ -150,8 +143,6 @@ export function buildDelegationChildProviderTurnInput({
   sessionId,
   cwd,
   prompt,
-  selectedModel,
-  selectedEffort,
   selectedControls,
   selectedProviderPermissionId,
   inheritSkipOpenwolf,
@@ -187,13 +178,22 @@ export function buildDelegationChildProviderTurnInput({
     prompt,
     started: false,
     selectedControls,
-    selectedModel,
-    selectedEffort,
     providerPermissionId: permission.providerPermissionId,
     ...(permission.permissionOverride ? { permissionOverride: permission.permissionOverride } : {}),
     skipOpenwolf: policy.skipOpenwolf === "always" ? true : inheritSkipOpenwolf,
     ...(Object.keys(providerOptions).length > 0 ? { providerOptions } : {}),
   };
+}
+
+function legacyControlValue(
+  provider: ProviderId,
+  selectedControls: ProviderControlValueMap,
+  legacySlot: "model" | "effort",
+): string | undefined {
+  const control = getProviderLegacyControl(provider, legacySlot);
+  if (!control) return undefined;
+  const value = selectedControls[control.id];
+  return typeof value === "string" ? value : undefined;
 }
 
 export function buildDelegationChildRuntimeMetadata(
@@ -204,10 +204,12 @@ export function buildDelegationChildRuntimeMetadata(
     settings.provider,
     settings.selectedProviderPermissionId,
   );
+  const model = legacyControlValue(settings.provider, settings.selectedControls, "model");
+  const effort = legacyControlValue(settings.provider, settings.selectedControls, "effort");
   return {
     providerId: settings.provider,
-    model: settings.selectedModel,
-    effort: settings.selectedEffort,
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     providerPermissionId: permission.providerPermissionId,
     cwd,
     cleanupState: "active",

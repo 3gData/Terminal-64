@@ -1,5 +1,5 @@
 import type { ChatMessage, PermissionMode } from "../lib/types";
-import type { ProviderHistorySource, ProviderId } from "../lib/providers";
+import type { ProviderControlValue, ProviderHistorySource, ProviderId } from "../lib/providers";
 
 export type ProviderCollaborationMode = "plan" | "default";
 
@@ -35,9 +35,13 @@ export interface ProviderTurnInput<TProvider extends ProviderId = ProviderId> {
   cwd: string;
   prompt: string;
   started: boolean;
+  runtimeMetadata?: ProviderSessionRuntimeMetadata | undefined;
+  /** @deprecated Use runtimeMetadata.resume.id for provider-owned resume/thread ids. */
   threadId?: string | null;
-  selectedControls?: Record<string, string | null> | undefined;
+  selectedControls?: Record<string, ProviderControlValue> | undefined;
+  /** @deprecated Use selectedControls and provider control descriptors. */
   selectedModel?: string | null | undefined;
+  /** @deprecated Use selectedControls and provider control descriptors. */
   selectedEffort?: string | null | undefined;
   providerPermissionId?: string | null | undefined;
   permissionMode?: PermissionMode | undefined;
@@ -53,6 +57,34 @@ export interface ProviderTurnResult {
   clearSeedTranscript?: boolean;
   clearResumeAtUuid?: boolean;
   clearForkParentSessionId?: boolean;
+}
+
+export interface ProviderSessionResumeMetadata {
+  id: string | null;
+}
+
+export interface ProviderSessionRuntimeMetadata {
+  historySource: ProviderHistorySource;
+  resume: ProviderSessionResumeMetadata;
+  runtimePayload: Record<string, unknown>;
+}
+
+export type ProviderSessionRuntimeMetadataMap = Partial<Record<ProviderId, ProviderSessionRuntimeMetadata>>;
+
+export function getProviderTurnResumeId(input: Pick<ProviderTurnInput, "runtimeMetadata" | "threadId">): string | null {
+  const runtimeResumeId = input.runtimeMetadata?.resume.id;
+  if (runtimeResumeId) return runtimeResumeId;
+  return input.threadId ?? null;
+}
+
+export function hasProviderTurnResumeId(input: Pick<ProviderTurnInput, "runtimeMetadata" | "threadId">): boolean {
+  return getProviderTurnResumeId(input) !== null;
+}
+
+export interface ProviderSessionRuntimeMetadataPatch {
+  historySource?: ProviderHistorySource | undefined;
+  resume?: ProviderSessionResumeMetadata | null | undefined;
+  runtimePayload?: Record<string, unknown> | undefined;
 }
 
 export type ProviderHistoryCapability = "hydrate" | "fork" | "rewind" | "delete";

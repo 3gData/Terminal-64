@@ -20,8 +20,13 @@ import type {
   ProviderTurnInput,
   ProviderTurnResult,
 } from "../../contracts/providerRuntime";
+import { getProviderTurnResumeId } from "../../contracts/providerRuntime";
 import { decodeCodexPermission } from "../providers";
 import { getOpenAiThreadIdForSession, setOpenAiThreadIdForSession } from "./openaiSessionMetadata";
+
+function stringControlValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
 
 declare module "../../contracts/providerIpc" {
   interface ProviderCreateRequestMap {
@@ -176,8 +181,8 @@ async function ensureCodexRuntime(input: ProviderTurnInput<"openai">) {
 
 export function buildCodexCreateRequest(input: ProviderTurnInput<"openai">): CreateCodexRequest {
   const options = input.providerOptions?.openai;
-  const selectedModel = input.selectedControls?.model ?? input.selectedModel;
-  const selectedEffort = input.selectedControls?.effort ?? input.selectedEffort;
+  const selectedModel = stringControlValue(input.selectedControls?.model);
+  const selectedEffort = stringControlValue(input.selectedControls?.effort);
   const prompt = promptWithCodexSeed(input.prompt, input.seedTranscript);
   const codexPerm = codexPermissionForOverride(
     input.providerPermissionId ?? "workspace",
@@ -200,9 +205,10 @@ export function buildCodexSendRequest(
   input: ProviderTurnInput<"openai">,
   createReq: CreateCodexRequest,
 ): SendCodexPromptRequest {
+  const threadId = getProviderTurnResumeId(input);
   return {
     ...createReq,
-    ...(input.threadId ? { thread_id: input.threadId } : {}),
+    ...(threadId ? { thread_id: threadId } : {}),
   };
 }
 
@@ -240,7 +246,7 @@ async function create(input: ProviderTurnInput<"openai">): Promise<ProviderTurnR
 async function send(input: ProviderTurnInput<"openai">): Promise<ProviderTurnResult> {
   const createReq = buildCodexCreateRequest(input);
   const sendReq = buildCodexSendRequest(input, createReq);
-  if (!input.threadId) {
+  if (!getProviderTurnResumeId(input)) {
     try {
       await providerCreate({ provider: "openai", req: createReq }, input.skipOpenwolf);
     } catch {

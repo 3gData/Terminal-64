@@ -7,6 +7,10 @@ should consume normalized events and tool calls.
 
 - `src/lib/providerEventIngestion.ts` owns raw provider IPC subscriptions and
   routes each provider's stream through its decoder.
+- Backend adapters should emit the canonical Rust `ProviderRuntimeEvent`
+  envelope with `emit_provider_runtime_event()`, which publishes the shared
+  `provider-event` topic. Cursor uses this first; Claude/OpenAI raw provider
+  streams remain supported by their legacy decoders.
 - Provider decoders translate raw shapes into `NormalizedProviderEvent` and
   `ProviderToolCall`/`ProviderToolResult` objects from
   `src/contracts/providerEvents.ts`.
@@ -36,6 +40,16 @@ Decoders should preserve visible card behavior by mapping provider-native names
 onto the existing display names instead of introducing new UI-only branches.
 
 ## Event Shape
+
+`ProviderRuntimeEvent` is the backend/provider wire envelope. Its `type` is one
+of `provider.session`, `provider.turn`, `provider.content`, `provider.tool`,
+`provider.mcp`, or `provider.error`; every envelope also carries `provider`,
+`sessionId`, `eventId`, `createdAt`, and optional provider references such as
+`threadId`, `turnId`, `itemId`, and `nativeType`.
+
+Rust also contains `src-tauri/src/providers/events.rs::experimental::ProviderEvent`,
+a larger t3code-style event matrix kept as reference material. It is not the
+live Terminal 64 contract and new adapters should not emit it.
 
 `NormalizedProviderEvent` covers the live stream lifecycle:
 

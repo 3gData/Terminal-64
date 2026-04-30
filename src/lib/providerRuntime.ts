@@ -20,6 +20,7 @@ import type {
   ProviderTurnInput,
   ProviderTurnResult,
 } from "../contracts/providerRuntime";
+import { hasProviderTurnResumeId } from "../contracts/providerRuntime";
 
 export { codexPermissionForOverride, promptWithCodexSeed };
 
@@ -34,7 +35,7 @@ export function getProviderRuntime<TProvider extends ProviderId>(provider: TProv
 }
 
 export function providerTurnOperation(input: ProviderTurnInput): "create" | "send" {
-  return input.started || input.threadId || input.forkParentSessionId ? "send" : "create";
+  return input.started || hasProviderTurnResumeId(input) || input.forkParentSessionId ? "send" : "create";
 }
 
 export async function prepareProviderTurnInput<TProvider extends ProviderId>(

@@ -9,7 +9,12 @@ import {
   getProviderToolPaths,
 } from "../../contracts/providerEvents";
 import { readFileBase64 } from "../../lib/tauriApi";
-import { GROUPABLE_TOOLS } from "./toolGrouping";
+import {
+  shortPath,
+  toolGroupItem,
+  toolGroupLabel,
+  toolHeader,
+} from "./toolPresentation";
 
 const DELEGATION_BLOCK_RE = /\[DELEGATION_START\][\s\S]*?\[DELEGATION_END\]/;
 const MERGE_PREFIX = "All delegated tasks have finished. Here are the results:";
@@ -388,60 +393,6 @@ export function renderContent(text: string) {
   return elements;
 }
 
-export function toolHeader(tc: ToolCall): { icon: string; title: string; detail: string } {
-  const i = tc.input;
-  switch (tc.name) {
-    case "Bash":
-      return { icon: "$", title: "Bash", detail: String(i.command || "").slice(0, 80) };
-    case "Read":
-      return { icon: "◉", title: "Read", detail: shortPath(getProviderToolFilePath(i)) };
-    case "Edit":
-      return { icon: "✎", title: "Edit", detail: shortPath(getProviderToolFilePath(i)) };
-    case "Write":
-      return { icon: "+", title: "Write", detail: shortPath(getProviderToolFilePath(i)) };
-    case "MultiEdit":
-      return { icon: "✎", title: "MultiEdit", detail: shortPath(getProviderToolFilePath(i)) };
-    case "Glob":
-      return { icon: "⊛", title: "Glob", detail: String(i.pattern || "") };
-    case "Grep":
-      return { icon: "⊛", title: "Grep", detail: `/${String(i.pattern || "")}/` };
-    case "WebSearch":
-      return { icon: "⌕", title: "Search", detail: String(i.query || "").slice(0, 60) };
-    case "WebFetch":
-      return { icon: "↓", title: "Fetch", detail: String(i.url || "").slice(0, 60) };
-    case "Agent":
-      return { icon: "◈", title: "Agent", detail: String(i.description || i.prompt || "").slice(0, 60) };
-    case "Skill":
-      return { icon: "/", title: String(i.skill || "Skill"), detail: String(i.args || "") };
-    case "NotebookEdit":
-      return { icon: "✎", title: "Notebook", detail: shortPath(getProviderToolFilePath(i)) };
-    case "AskUserQuestion":
-      return { icon: "?", title: "Question", detail: "" };
-    default:
-      if (tc.name === "local_shell" || tc.name === "local_shell_call") {
-        return { icon: "$", title: "Bash", detail: String(i.command || "").slice(0, 80) };
-      }
-      if (tc.name.includes("/") || tc.name.includes("__") || i.server || i.tool_name) {
-        const title = tc.name.includes("__") ? tc.name.replace("__", "/") : tc.name;
-        const args = i.arguments && typeof i.arguments === "object"
-          ? summarizeFallback(i.arguments as Record<string, unknown>)
-          : summarizeFallback(i);
-        return { icon: "⊛", title, detail: args };
-      }
-      return { icon: "⚙", title: tc.name, detail: summarizeFallback(i) };
-  }
-}
-
-function shortPath(fp: unknown): string {
-  if (!fp) return "";
-  return String(fp).split(/[/\\]/).slice(-2).join("/");
-}
-
-function summarizeFallback(input: Record<string, unknown>): string {
-  const first = Object.values(input)[0];
-  return typeof first === "string" ? first.slice(0, 50) : "";
-}
-
 function diffLines(diff: unknown): { text: string; kind: "add" | "del" }[] {
   if (typeof diff !== "string" || !diff.trim()) return [];
   return diff
@@ -620,40 +571,11 @@ function ToolCallCard({ tc, onEditClick }: { tc: ToolCall; onEditClick?: (tcId: 
   );
 }
 
-function groupLabel(tcs: ToolCall[]): { icon: string; name: string; details: string } {
-  const first = tcs[0]?.name;
-  if (tcs.every((tc) => tc.name === first)) {
-    switch (first) {
-      case "Bash": {
-        const commands = tcs
-          .map((tc) => String(tc.input.command || "").trim())
-          .filter(Boolean);
-        return {
-          icon: "$",
-          name: `Ran ${tcs.length} commands`,
-          details: commands.slice(0, 2).map((cmd) => cmd.slice(0, 40)).join(", "),
-        };
-      }
-      case "Read":
-        return { icon: "◉", name: `Read ${tcs.length} files`, details: tcs.map((tc) => shortPath(getProviderToolFilePath(tc.input))).join(", ") };
-      case "Grep":
-        return { icon: "⊛", name: `${tcs.length} searches`, details: tcs.map((tc) => `/${tc.input.pattern || ""}/`).join(", ") };
-      case "Glob":
-        return { icon: "⊛", name: `${tcs.length} globs`, details: tcs.map((tc) => String(tc.input.pattern || "")).join(", ") };
-      case "WebSearch":
-        return { icon: "⌕", name: `${tcs.length} web searches`, details: tcs.map((tc) => String(tc.input.query || "")).join(", ") };
-      case "WebFetch":
-        return { icon: "↓", name: `Fetch ${tcs.length} URLs`, details: tcs.map((tc) => String(tc.input.url || "").slice(0, 40)).join(", ") };
-    }
-  }
-  return { icon: "⊛", name: `${tcs.length} lookups`, details: "" };
-}
-
 export function ToolGroupCard({ tcs }: { tcs: ToolCall[] }) {
   const [expanded, setExpanded] = useState(false);
   const allDone = tcs.every((tc) => tc.result !== undefined);
   const anyError = tcs.some((tc) => tc.isError);
-  const lbl = groupLabel(tcs);
+  const lbl = toolGroupLabel(tcs);
 
   return (
     <div className={`cc-tc ${anyError ? "cc-tc--error" : ""}`}>
@@ -669,10 +591,18 @@ export function ToolGroupCard({ tcs }: { tcs: ToolCall[] }) {
       {expanded && (
         <div className="cc-tc-body">
           {tcs.map((tc) => {
-            const hdr = toolHeader(tc);
+            const item = toolGroupItem(tc);
             return (
-              <div key={tc.id} className="cc-tc-group-item">
-                <div className="cc-tc-group-file">{hdr.detail}</div>
+              <div key={tc.id} className={`cc-tc-group-item cc-tc-group-item--${item.status}`}>
+                <span className={`cc-tc-status ${item.status === "error" ? "cc-tc-status--err" : item.status === "done" ? "cc-tc-status--ok" : "cc-tc-status--pending"}`}>
+                  {item.status === "pending" ? "⋯" : item.status === "error" ? "✕" : "✓"}
+                </span>
+                <span className="cc-tc-icon">{item.icon}</span>
+                <span className="cc-tc-group-main">
+                  <span className="cc-tc-group-title">{item.title}</span>
+                  <span className="cc-tc-group-file">{item.detail || item.statusLabel}</span>
+                </span>
+                <span className="cc-tc-group-meta">{item.resultSummary}</span>
               </div>
             );
           })}

@@ -1,7 +1,7 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-04-29T22:00:00.498Z
-> Files: 519 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-04-30T04:00:00.896Z
+> Files: 521 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ./
 
@@ -16,6 +16,8 @@
 - `package.json` — Node.js package manifest (~390 tok)
 - `README.md` — Project documentation (~1204 tok)
 - `SECURITY.md` — Security Policy (~445 tok)
+- `terminal64-delegation-2026-04-30T02-59-53-683Z-ac9b6cf8.md` — Terminal 64 Delegation Team Chat (~5087 tok)
+- `terminal64-delegation-2026-04-30T03-36-58-239Z-94e817c3.md` — Terminal 64 Delegation Team Chat (~5725 tok)
 - `tsconfig.json` — TypeScript configuration (~216 tok)
 - `tsconfig.node.json` (~67 tok)
 - `vite.config.ts` — Vite build configuration (~140 tok)
@@ -51,33 +53,11 @@
 ## docs/
 
 - `delegation-mcp-limitations.md` — Delegation MCP Limitations (~370 tok)
-- `provider-events.md` — Provider Event Contract (~684 tok)
+- `provider-events.md` — Provider Event Contract (~901 tok)
 - `provider-picker-verification.md` — Empty Chat Provider Picker Verification (~1374 tok)
-- `provider-scaffold.md` — Provider Scaffold Guide (~794 tok)
+- `provider-scaffold.md` — Provider Scaffold Guide (~835 tok)
 - `wake-training.md` — Training a Custom Wake Word ("T Six Four") (~2432 tok)
 - `widget-isolation-research.md` — Widget Isolation Research (~1086 tok)
-
-## src/components/provider-chat/
-
-- `ChatMessageList.tsx` — Provider-neutral chat message list and provider picker rendering. (~1390 tok)
-- `ProviderChat.tsx` — Provider-neutral chat shell, send flow, controls, plan/delegation UI wiring. (~23000 tok)
-- `ProviderControls.tsx` — Provider control toolbar rendering manifest-driven model/effort/permission controls. (~900 tok)
-
-## src/hooks/
-
-- `useProviderEvents.ts` — Provider-neutral event listener hook normalizing provider runtime events into session store state. (~4200 tok)
-
-## src/lib/
-
-- `delegationChildRuntime.ts` — Builds provider-aware child delegation settings from parent session/provider state. (~1600 tok)
-- `providerModularity.verification.ts` — Static verification harness covering provider-neutral manifest/runtime/store invariants. (~24000 tok)
-- `providerPermissions.ts` — Provider permission helper APIs for default/current permission options and input presentation. (~900 tok)
-- `providers.ts` — Provider manifests, canonical controls/capabilities/history/delegation policies, and provider helper APIs. (~7600 tok)
-- `tauriApi.ts` — Frontend Tauri IPC wrapper layer for provider/session/files/widget/native APIs. (~18000 tok)
-
-## src/stores/
-
-- `providerSessionStore.ts` — Provider-neutral Zustand session store with saved-session migration shims and selected control helpers. (~28000 tok)
 
 ## mcp/
 
@@ -94,7 +74,7 @@
 
 - `record_samples.py` — Record real-voice wake-phrase samples with proper silence trimming. (~2128 tok)
 - `record_samples.sh` — Record real-voice samples of the wake phrase so the next training run (~300 tok)
-- `scaffold-provider.mjs` — Zustand store (~6152 tok)
+- `scaffold-provider.mjs` — Zustand store (~6250 tok)
 - `train_wake.py` — Local wake-word trainer for Terminal 64. (~7479 tok)
 - `train_wake.sh` — Train a custom wake word locally on your Mac (M1/M2/M3/M4/M5). (~1043 tok)
 
@@ -777,93 +757,7 @@
 - `__init__.py` (~34 tok)
 - `_build_config.py` — _build_config.py.in is converted into _build_config.py during the meson build process. (~569 tok)
 - `bokeh_renderer.py` — BokehRenderer: filled, grid, lines, mask + 5 more (~3954 tok)
-## src/contracts/
-
-- `providerRuntime.ts` — Provider-neutral runtime contract types for create/send/history/hydration/rewind/fork/delete operations. (~477 tok)
 
 ## src/lib/
 
-- `providerRuntime.ts` — Re-export compatibility entrypoint for provider runtime contracts. (~345 tok)
-- `providerModularity.verification.ts` — TypeScript compile-time verification fixtures for provider modularity contracts and call shapes. (~5073 tok)
-- `providerHistoryContracts.verification.ts` — TypeScript fixture proving common provider history inputs do not require or accept Codex thread fields. (~220 tok)
-
-## src/lib/providerRuntimes/
-
-- `openai.ts` — OpenAI/Codex frontend provider runtime: request shaping, metadata lookup, hydration/fork/rewind/delete calls. (~1282 tok)
-- `openaiSessionMetadata.ts` — OpenAI-owned runtime helper for reading/writing Codex thread metadata from the provider session store. (~120 tok)
-- `anthropic.ts` — Anthropic/Claude frontend provider runtime: request shaping and history operations. (~752 tok)
-- `cursor.ts` — Cursor frontend provider runtime: request shaping and unsupported history operations. (~297 tok)
-
-## src/stores/
-
-- `providerSessionStore.ts` — Zustand provider session store with persistence, migrations, provider metadata, saved-session history helpers, and compatibility aliases. (~7999 tok)
-
-## src/components/provider-chat/
-
-- `ProviderChat.tsx` — Provider-neutral chat UI shell, send/rewind/fork/hydrate orchestration, controls, and transcript rendering. (~8137 tok)
-
-## src/hooks/
-
-- `useProviderEvents.ts` — Provider-neutral Tauri event listener hook and live event normalization into provider session store. (~1564 tok)
-- `useChatFork.ts` — Provider-chat fork hook that creates a fork panel and delegates provider-owned fork work to runtime history helpers. (~350 tok)
-- `useChatRewind.ts` — Provider-chat rewind hook wrapper around provider-owned history truncation. (~142 tok)
-- `useChatSend.ts` — Provider-chat send hook that builds provider turn input from current session state and store metadata. (~431 tok)
-- `useDelegationOrchestrator.ts` — Delegation completion/merge orchestrator that reads child provider metadata and cleanup state. (~1726 tok)
-
-## src/components/widget/
-
-- `useWidgetBridgeHost.ts` — Widget bridge host hook that handles iframe/native widget requests including provider session creation and turn routing. (~3617 tok)
-
-## src/components/provider-chat/
-
-- `DelegationBadge.tsx` — Provider chat delegation badge component showing child status and provider session metadata. (~368 tok)
-
-## src/components/canvas/
-
-- `ProviderSessionDialog.tsx` — Provider-neutral session browser/dialog for saved and active provider sessions. (~902 tok)
-
-## src/components/canvas/
-
-- `ProviderSessionDialog.tsx` — Dialog for opening/reopening provider chat sessions, browsing saved provider history, and starting blank/new sessions. (~1850 tok)
-
-## src/components/provider-chat/
-
-- `ProviderControls.tsx` — Provider topbar control rendering, including provider picker and manifest-declared controls. (~563 tok)
-- `ChatMessageList.tsx` — Provider chat message list and empty-state provider picker integration. (~1067 tok)
-
-## src/components/settings/
-
-- `SettingsPanel.tsx` — Main settings UI with persisted preferences, diagnostic sections, provider defaults, and localStorage maintenance actions. (~9200 tok)
-- `SettingsPanel.css` — Settings panel layout and section styling. (~5920 tok)
-
-## src/stores/
-
-- `settingsStore.ts` — Zustand settings store, localStorage persistence, settings normalization, and provider control defaults. (~969 tok)
-
-## src/lib/
-
-- `providers.ts` — Provider manifest registry, provider ids, provider capability/control helper APIs, and compatibility helpers. (~2036 tok)
-
-## src/
-
-- `App.tsx` — Root application shell, command registration, global dialogs, and provider-session dialog wiring into canvas/session stores. (~5010 tok)
-- `tauriApi.ts` — Tauri IPC wrappers plus compatibility helpers for spawning provider-backed sessions from UI workflows. (~8300 tok)
-- `providerPermissions.ts` — Provider permission defaults, validation, presentation, and Claude-permission compatibility helpers. (~220 tok)
-- `providerRuntime.ts` — Provider runtime dispatcher for create/send/cancel/close and history operations. (~640 tok)
-- `providerModularity.verification.ts` — Typechecked provider modularity fixtures covering manifests, runtimes, IPC shapes, permissions, delegation, and event normalization. (~7600 tok)
-- `delegationChildRuntime.ts` — Pure delegation child runtime helpers for inheriting provider controls/permissions, MCP env transport, provider turn input shaping, and child runtime metadata. (~770 tok)
-- `delegationWorkflow.ts` — Delegation command parsing, StartDelegation fallback parsing, child prompt/label construction, and planner request shaping. (~1210 tok)
-
-## src/lib/providerRuntimes/
-
-- `anthropic.ts` — Anthropic/Claude provider runtime mapping provider turn inputs to Claude IPC requests and JSONL history operations. (~1450 tok)
-- `openai.ts` — OpenAI/Codex provider runtime mapping provider permissions to Codex sandbox/approval request fields and rollout history operations. (~1850 tok)
-- `cursor.ts` — Cursor provider runtime mapping provider turn inputs to cursor-agent IPC request fields. (~520 tok)
-
-## src/contracts/
-
-- `providerRuntime.ts` — Shared frontend provider runtime turn/history contracts and provider-owned option shapes. (~820 tok)
-
-## src/stores/
-
-- `providerSessionStore.ts` — Zustand provider-session store, provider-state migration, metadata, permission maps, and compatibility mirrors. (~6500 tok)
+- `anthropicProviderEvents.verification.ts` — TypeScript fixtures proving Anthropic ProviderRuntimeEvent ingestion hydrates existing provider UI state. (~2600 tok)

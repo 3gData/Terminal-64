@@ -1,3 +1,5 @@
+import type { ProviderRuntimeEvent } from "../contracts/providerEvents";
+
 export interface CreateTerminalRequest {
   id: string;
   shell?: string;
@@ -152,6 +154,7 @@ export interface ProviderEventEnvelope {
   provider: string;
   sessionId: string;
   data: string;
+  event?: ProviderRuntimeEvent;
 }
 
 // ── Codex (OpenAI Codex CLI) ──────────────────────────────
@@ -170,6 +173,19 @@ export type {
   ProviderSessionRequest,
   SendCodexPromptRequest,
 } from "../contracts/providerIpc";
+
+export type {
+  ProviderSnapshot,
+  ProviderSnapshotAuth,
+  ProviderSnapshotCapabilities,
+  ProviderSnapshotDisplay,
+  ProviderSnapshotHistoryCapabilities,
+  ProviderSnapshotInstall,
+  ProviderSnapshotOptionDescriptor,
+  ProviderSnapshotOptionValue,
+  ProviderSnapshotSlashCommand,
+  ProviderSnapshotStatus,
+} from "../contracts/providerSnapshot";
 
 /** @deprecated Use ProviderProcessEvent. */
 export type CodexEvent = ProviderProcessEvent;

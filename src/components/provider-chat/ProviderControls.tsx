@@ -1,11 +1,19 @@
 import { useState } from "react";
 import {
-  getProviderManifest,
-  listProviderControls,
   type ProviderControlId,
+  type ProviderControlValue,
   type ProviderId,
 } from "../../lib/providers";
 import { getProviderPermissionInputPresentation } from "../../lib/providerPermissions";
+import {
+  getProviderSnapshotPermissionInputPresentation,
+  listProviderSnapshotControls,
+  providerSnapshotOptionValue,
+  providerSnapshotSupports,
+  useProviderSnapshots,
+  type ProviderSnapshotControl,
+  type ProviderSnapshotMap,
+} from "../../lib/providerSnapshots";
 import type { McpServer } from "../../lib/types";
 import type { McpServerStatus } from "../../stores/providerSessionStore";
 import {
@@ -23,8 +31,8 @@ interface ProviderControlsProps {
   configuredMcpServers: McpServer[];
   liveMcpServers: McpServerStatus[] | undefined;
   provider: ProviderId;
-  selectedControls: Record<string, string | null>;
-  onSelectControl: (controlId: ProviderControlId, value: string) => void;
+  selectedControls: Record<string, ProviderControlValue>;
+  onSelectControl: (controlId: ProviderControlId, value: ProviderControlValue) => void;
   onMcpOpen: () => void;
 }
 
@@ -32,6 +40,7 @@ interface ProviderPermissionInputArgs {
   provider: ProviderId;
   permissionId: string;
   onCyclePermission: () => void;
+  snapshots?: ProviderSnapshotMap | undefined;
 }
 
 export interface ProviderPermissionInputProps {
@@ -44,13 +53,29 @@ export function buildProviderPermissionInputProps({
   provider,
   permissionId,
   onCyclePermission,
+  snapshots,
 }: ProviderPermissionInputArgs): ProviderPermissionInputProps {
-  const presentation = getProviderPermissionInputPresentation(provider, permissionId);
+  const presentation =
+    getProviderSnapshotPermissionInputPresentation(provider, permissionId, snapshots)
+    ?? getProviderPermissionInputPresentation(provider, permissionId);
   return {
     permLabel: presentation.label,
     permColor: presentation.color,
     onCyclePerm: onCyclePermission,
   };
+}
+
+function selectedValueForControl(
+  control: ProviderSnapshotControl,
+  selectedControls: Record<string, ProviderControlValue>,
+): ProviderControlValue {
+  return selectedControls[control.id] ?? control.defaultValue;
+}
+
+function renderControlValue(value: ProviderControlValue): string {
+  if (typeof value === "boolean") return value ? "On" : "Off";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  return value ?? "";
 }
 
 export default function ProviderControls({
@@ -62,12 +87,12 @@ export default function ProviderControls({
   onMcpOpen,
 }: ProviderControlsProps) {
   const [openMenu, setOpenMenu] = useState<TopMenu>(null);
-  const providerCfg = getProviderManifest(provider);
-  const topbarControls = listProviderControls(provider, "topbar");
+  const snapshots = useProviderSnapshots();
+  const topbarControls = listProviderSnapshotControls(provider, snapshots, "topbar");
 
   return (
     <>
-      {providerCfg.capabilities.mcp && (
+      {providerSnapshotSupports(provider, "mcp", snapshots) && (
         <McpMenu
           configuredServers={configuredMcpServers}
           liveServers={liveMcpServers}
@@ -80,9 +105,60 @@ export default function ProviderControls({
       )}
 
       {topbarControls.map((control) => {
-        const selectedValue = selectedControls[control.id] ?? control.defaultValue;
+        const selectedValue = selectedValueForControl(control, selectedControls);
+        if (control.kind === "boolean") {
+          const checked = typeof selectedValue === "boolean"
+            ? selectedValue
+            : typeof control.defaultValue === "boolean" && control.defaultValue;
+          return (
+            <button
+              key={control.id}
+              className="shadcn-trigger"
+              aria-label={control.label}
+              aria-pressed={checked}
+              onClick={() => onSelectControl(control.id, !checked)}
+            >
+              {control.label}: {checked ? "On" : "Off"}
+            </button>
+          );
+        }
+
+        if (control.kind === "text") {
+          return (
+            <input
+              key={control.id}
+              className="shadcn-trigger"
+              aria-label={control.label}
+              value={typeof selectedValue === "string" ? selectedValue : renderControlValue(control.defaultValue)}
+              onChange={(event) => onSelectControl(control.id, event.currentTarget.value)}
+            />
+          );
+        }
+
+        if (control.kind === "number") {
+          const value = typeof selectedValue === "number"
+            ? selectedValue
+            : typeof control.defaultValue === "number"
+              ? control.defaultValue
+              : 0;
+          return (
+            <input
+              key={control.id}
+              className="shadcn-trigger"
+              type="number"
+              aria-label={control.label}
+              value={Number.isFinite(value) ? value : ""}
+              onChange={(event) => {
+                const next = Number(event.currentTarget.value);
+                if (Number.isFinite(next)) onSelectControl(control.id, next);
+              }}
+            />
+          );
+        }
+
         const currentOption =
-          control.options.find((option) => option.id === selectedValue) ?? control.options[0];
+          control.options.find((option) => Object.is(providerSnapshotOptionValue(option), selectedValue))
+          ?? control.options[0];
         if (!currentOption || control.options.length === 0) return null;
         return (
           <DropdownMenu
@@ -101,11 +177,13 @@ export default function ProviderControls({
               {control.options.map((option) => (
                 <DropdownMenuItem
                   key={option.id}
-                  active={option.id === selectedValue}
-                  onSelect={() => onSelectControl(control.id, option.id)}
+                  active={Object.is(providerSnapshotOptionValue(option), selectedValue)}
+                  onSelect={() => onSelectControl(control.id, providerSnapshotOptionValue(option))}
                 >
                   <span className="shadcn-menu-text">{option.label}</span>
-                  <span className="shadcn-menu-check">{option.id === selectedValue ? "✓" : ""}</span>
+                  <span className="shadcn-menu-check">
+                    {Object.is(providerSnapshotOptionValue(option), selectedValue) ? "✓" : ""}
+                  </span>
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>

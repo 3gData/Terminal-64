@@ -1,9 +1,9 @@
 import { useDelegationStore } from "../../stores/delegationStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import {
-  getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
   getProviderSelectedControlValues,
+  getProviderSessionRuntimeMetadata,
   resolveSessionProviderState,
   useProviderSessionStore,
   type ClaudeSession,
@@ -22,17 +22,14 @@ function providerTurnForSession(
   prompt: string,
 ): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
-  const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
   return {
     provider: providerState.provider,
     sessionId,
     cwd: session.cwd || ".",
     prompt,
     started: session.hasBeenStarted,
-    threadId: openaiMetadata?.codexThreadId ?? null,
+    runtimeMetadata: getProviderSessionRuntimeMetadata(providerState, providerState.provider),
     selectedControls: getProviderSelectedControlValues(providerState, providerState.provider),
-    selectedModel: providerState.selectedModel,
-    selectedEffort: providerState.selectedEffort,
     providerPermissionId: getProviderPermissionId(providerState, providerState.provider),
     permissionMode: "auto",
     permissionOverride: "bypass_all",

@@ -17,36 +17,60 @@ export type ProviderFeature =
   | "nativeSlashCommands"
   | "compact";
 
-export interface ProviderControlOption {
+export type ProviderControlNonNullValue = string | boolean | number;
+export type ProviderControlValue = ProviderControlNonNullValue | null;
+
+export interface ProviderControlOption<TValue extends ProviderControlNonNullValue = string> {
   id: string;
   label: string;
+  value?: TValue;
 }
-export type ModelOption = ProviderControlOption;
-export type EffortOption = ProviderControlOption;
+export type AnyProviderControlOption = ProviderControlOption<ProviderControlNonNullValue>;
+export type ModelOption = ProviderControlOption<string>;
+export type EffortOption = ProviderControlOption<string>;
 // Note: PermissionMode is the Claude-shaped union ("default" | "plan" | …);
 // for Codex we use string ids that are translated at the IPC boundary.
-export interface PermissionOption extends ProviderControlOption {
+export interface PermissionOption extends ProviderControlOption<string> {
   color: string;
   desc: string;
   inputLabel?: string;
 }
 
 export type ProviderControlId = string;
+export type ProviderControlKind = "select" | "boolean" | "text" | "number";
+export type ProviderControlScope = "topbar" | "composer";
+/** @deprecated Use ProviderControlScope. */
 export type ProviderControlPlacement = "topbar" | "input-permission";
 export type ProviderLegacyControlSlot = "model" | "effort" | "permission";
 
-export interface ProviderControlMetadata {
+interface BaseProviderControlMetadata<
+  TKind extends ProviderControlKind,
+  TValue extends ProviderControlNonNullValue,
+> {
   id: ProviderControlId;
   label: string;
-  options: readonly ProviderControlOption[];
-  defaultValue: string;
-  placement: ProviderControlPlacement;
+  kind: TKind;
+  scope: ProviderControlScope;
+  defaultValue: TValue;
+  options: readonly ProviderControlOption<TValue>[];
   inputSuffix?: string;
   /** @deprecated Compatibility bridge for legacy selectedModel/selectedEffort fields. */
   legacySlot?: ProviderLegacyControlSlot;
   /** Legacy persisted field names that can seed this provider-owned control. */
   migrationAliases?: readonly string[];
+  /** @deprecated Use scope. */
+  placement?: ProviderControlPlacement;
 }
+
+export type ProviderSelectControlMetadata = BaseProviderControlMetadata<"select", string>;
+export type ProviderBooleanControlMetadata = BaseProviderControlMetadata<"boolean", boolean>;
+export type ProviderTextControlMetadata = BaseProviderControlMetadata<"text", string>;
+export type ProviderNumberControlMetadata = BaseProviderControlMetadata<"number", number>;
+export type ProviderControlMetadata =
+  | ProviderSelectControlMetadata
+  | ProviderBooleanControlMetadata
+  | ProviderTextControlMetadata
+  | ProviderNumberControlMetadata;
 
 export type ProviderControlsMetadata = readonly ProviderControlMetadata[];
 
@@ -128,19 +152,24 @@ export interface ProviderManifestCompatibilityFields {
   models: readonly ModelOption[];
   /** @deprecated Compatibility mirror derived from the canonical effort/mode control. Use getProviderEffortOptions(). */
   efforts: readonly EffortOption[];
-  /** @deprecated Compatibility mirror derived from the canonical input-permission control. Use getProviderPermissionOptions(). */
+  /** @deprecated Compatibility mirror derived from the canonical composer control. Use getProviderPermissionOptions(). */
   permissions: readonly PermissionOption[];
   /** @deprecated Compatibility mirror derived from the canonical model control default. Use getProviderDefaultModel(). */
   defaultModel: string;
   /** @deprecated Compatibility mirror derived from the canonical effort/mode control default. Use getProviderDefaultEffort(). */
   defaultEffort: string;
-  /** @deprecated Compatibility mirror derived from the canonical input-permission control default. Use getProviderDefaultPermission(). */
+  /** @deprecated Compatibility mirror derived from the canonical composer control default. Use getProviderDefaultPermission(). */
   defaultPermission: string;
 }
 
 export interface ProviderManifest<TProvider extends string = ProviderId>
   extends ProviderManifestDefinition<TProvider>, ProviderManifestCompatibilityFields {}
 
+// Intentional fallback duplication: live provider descriptors are adapter-owned
+// and loaded through `provider_snapshots`. These frontend tables stay only for
+// offline startup, failed IPC, and synchronous saved-session migration/defaults;
+// keep them in lockstep with the Rust adapter descriptors until manifests can
+// be hydrated before store initialization.
 const ANTHROPIC_MODELS: ModelOption[] = [
   { id: "sonnet", label: "Sonnet" },
   { id: "opus", label: "Opus" },
@@ -263,56 +292,58 @@ function getCompatibilityControlFromDefinition(
   );
 }
 
-function requireCompatibilityControlFromDefinition(
+function getComposerControlFromDefinition(
   manifest: ProviderManifestDefinition<string>,
-  legacySlot: "model" | "effort",
-): ProviderControlMetadata {
-  const control = getCompatibilityControlFromDefinition(manifest, legacySlot);
-  if (!control) {
-    throw new Error(`Provider ${manifest.id} is missing a ${legacySlot} compatibility control`);
-  }
-  return control;
+): ProviderControlMetadata | undefined {
+  return manifest.controls.find((candidate) => candidate.scope === "composer");
 }
 
-function requirePermissionControlFromDefinition(
-  manifest: ProviderManifestDefinition<string>,
-): ProviderControlMetadata {
-  const control = manifest.controls.find((candidate) => candidate.placement === "input-permission");
-  if (!control) {
-    throw new Error(`Provider ${manifest.id} is missing an input permission control`);
-  }
-  return control;
+export function providerControlOptionValue(option: AnyProviderControlOption): ProviderControlNonNullValue {
+  return option.value ?? option.id;
 }
 
-function isPermissionOption(option: ProviderControlOption): option is PermissionOption {
+function stringControlDefault(control: ProviderControlMetadata | undefined): string {
+  return typeof control?.defaultValue === "string" ? control.defaultValue : "";
+}
+
+function stringControlOptions(control: ProviderControlMetadata | undefined): readonly ProviderControlOption<string>[] {
+  return (control?.options ?? []) as readonly ProviderControlOption<string>[];
+}
+
+function permissionOptionFromControlOption(option: AnyProviderControlOption): PermissionOption {
   const candidate = option as Partial<PermissionOption>;
-  return typeof candidate.color === "string" && typeof candidate.desc === "string";
+  return {
+    id: option.id,
+    label: option.label,
+    ...(typeof option.value === "string" ? { value: option.value } : {}),
+    color: candidate.color ?? "#89b4fa",
+    desc: candidate.desc ?? "",
+    ...(candidate.inputLabel !== undefined ? { inputLabel: candidate.inputLabel } : {}),
+  };
 }
 
 function getPermissionOptionsFromControl(
-  manifest: ProviderManifestDefinition<string>,
-  control: ProviderControlMetadata,
+  control: ProviderControlMetadata | undefined,
 ): readonly PermissionOption[] {
-  if (!control.options.every(isPermissionOption)) {
-    throw new Error(`Provider ${manifest.id} permission control options must include permission metadata`);
-  }
-  return control.options;
+  if (!control) return [];
+  return (control.options as readonly AnyProviderControlOption[]).map(permissionOptionFromControlOption);
 }
 
 export function defineProviderManifest<TProvider extends string>(
   definition: ProviderManifestDefinition<TProvider>,
 ): ProviderManifest<TProvider> {
-  const modelControl = requireCompatibilityControlFromDefinition(definition, "model");
-  const effortControl = requireCompatibilityControlFromDefinition(definition, "effort");
-  const permissionControl = requirePermissionControlFromDefinition(definition);
+  const modelControl = getCompatibilityControlFromDefinition(definition, "model");
+  const effortControl = getCompatibilityControlFromDefinition(definition, "effort");
+  const permissionControl = getComposerControlFromDefinition(definition);
+  const permissionOptions = getPermissionOptionsFromControl(permissionControl);
   return {
     ...definition,
-    models: modelControl.options,
-    efforts: effortControl.options,
-    permissions: getPermissionOptionsFromControl(definition, permissionControl),
-    defaultModel: modelControl.defaultValue,
-    defaultEffort: effortControl.defaultValue,
-    defaultPermission: permissionControl.defaultValue,
+    models: stringControlOptions(modelControl),
+    efforts: stringControlOptions(effortControl),
+    permissions: permissionOptions,
+    defaultModel: stringControlDefault(modelControl),
+    defaultEffort: stringControlDefault(effortControl),
+    defaultPermission: stringControlDefault(permissionControl) || permissionOptions[0]?.id || "default",
   };
 }
 
@@ -363,25 +394,28 @@ const PROVIDER_MANIFEST_DEFINITIONS = {
       {
         id: "model",
         label: "Model",
-        options: ANTHROPIC_MODELS,
+        kind: "select",
+        scope: "topbar",
         defaultValue: "sonnet",
-        placement: "topbar",
+        options: ANTHROPIC_MODELS,
         legacySlot: "model",
       },
       {
         id: "effort",
         label: "Effort",
-        options: ANTHROPIC_EFFORTS,
+        kind: "select",
+        scope: "topbar",
         defaultValue: "high",
-        placement: "topbar",
+        options: ANTHROPIC_EFFORTS,
         legacySlot: "effort",
       },
       {
         id: "tool-permission",
         label: "Permissions",
-        options: ANTHROPIC_PERMISSIONS,
+        kind: "select",
+        scope: "composer",
         defaultValue: "default",
-        placement: "input-permission",
+        options: ANTHROPIC_PERMISSIONS,
         inputSuffix: "on",
         legacySlot: "permission",
       },
@@ -432,25 +466,28 @@ const PROVIDER_MANIFEST_DEFINITIONS = {
       {
         id: "model",
         label: "Model",
-        options: OPENAI_MODELS,
+        kind: "select",
+        scope: "topbar",
         defaultValue: "gpt-5.5",
-        placement: "topbar",
+        options: OPENAI_MODELS,
         legacySlot: "model",
       },
       {
         id: "effort",
         label: "Effort",
-        options: OPENAI_EFFORTS,
+        kind: "select",
+        scope: "topbar",
         defaultValue: "medium",
-        placement: "topbar",
+        options: OPENAI_EFFORTS,
         legacySlot: "effort",
       },
       {
         id: "sandbox",
         label: "Sandbox",
-        options: OPENAI_PERMISSIONS,
+        kind: "select",
+        scope: "composer",
         defaultValue: "workspace",
-        placement: "input-permission",
+        options: OPENAI_PERMISSIONS,
         inputSuffix: "sandbox",
         legacySlot: "permission",
       },
@@ -502,25 +539,28 @@ const PROVIDER_MANIFEST_DEFINITIONS = {
       {
         id: "model",
         label: "Model",
-        options: CURSOR_MODELS,
+        kind: "select",
+        scope: "topbar",
         defaultValue: "composer-2-fast",
-        placement: "topbar",
+        options: CURSOR_MODELS,
         legacySlot: "model",
       },
       {
         id: "mode",
         label: "Mode",
-        options: CURSOR_EFFORTS,
+        kind: "select",
+        scope: "topbar",
         defaultValue: "default",
-        placement: "topbar",
+        options: CURSOR_EFFORTS,
         migrationAliases: ["effort"],
       },
       {
         id: "apply-mode",
         label: "Mode",
-        options: CURSOR_PERMISSIONS,
+        kind: "select",
+        scope: "composer",
         defaultValue: "default",
-        placement: "input-permission",
+        options: CURSOR_PERMISSIONS,
         inputSuffix: "mode",
         legacySlot: "permission",
       },
@@ -542,36 +582,37 @@ export function getProviderManifest(provider: ProviderId): ProviderManifest {
   return PROVIDER_REGISTRY[provider];
 }
 
-function requireProviderCompatibilityControl(
+function getProviderCompatibilityControl(
   provider: ProviderId,
   legacySlot: "model" | "effort",
-): ProviderControlMetadata {
-  return requireCompatibilityControlFromDefinition(PROVIDER_REGISTRY[provider], legacySlot);
+): ProviderControlMetadata | undefined {
+  return getCompatibilityControlFromDefinition(PROVIDER_REGISTRY[provider], legacySlot);
 }
 
 export function getProviderModelOptions(provider: ProviderId): readonly ModelOption[] {
-  return requireProviderCompatibilityControl(provider, "model").options;
+  return stringControlOptions(getProviderCompatibilityControl(provider, "model"));
 }
 
 export function getProviderEffortOptions(provider: ProviderId): readonly EffortOption[] {
-  return requireProviderCompatibilityControl(provider, "effort").options;
+  return stringControlOptions(getProviderCompatibilityControl(provider, "effort"));
 }
 
 export function getProviderPermissionOptions(provider: ProviderId): readonly PermissionOption[] {
-  const control = requirePermissionControlFromDefinition(PROVIDER_REGISTRY[provider]);
-  return getPermissionOptionsFromControl(PROVIDER_REGISTRY[provider], control);
+  const control = getComposerControlFromDefinition(PROVIDER_REGISTRY[provider]);
+  return getPermissionOptionsFromControl(control);
 }
 
 export function getProviderDefaultModel(provider: ProviderId): string {
-  return requireProviderCompatibilityControl(provider, "model").defaultValue;
+  return stringControlDefault(getProviderCompatibilityControl(provider, "model"));
 }
 
 export function getProviderDefaultEffort(provider: ProviderId): string {
-  return requireProviderCompatibilityControl(provider, "effort").defaultValue;
+  return stringControlDefault(getProviderCompatibilityControl(provider, "effort"));
 }
 
 export function getProviderDefaultPermission(provider: ProviderId): string {
-  return requirePermissionControlFromDefinition(PROVIDER_REGISTRY[provider]).defaultValue;
+  const control = getComposerControlFromDefinition(PROVIDER_REGISTRY[provider]);
+  return stringControlDefault(control) || getProviderPermissionOptions(provider)[0]?.id || "default";
 }
 
 export function isProviderPermissionValue(provider: ProviderId, id: unknown): id is string {
@@ -588,14 +629,32 @@ export function getProviderPermissionControlPolicy(provider: ProviderId): Provid
 
 export function listProviderControls(
   provider: ProviderId,
-  placement?: ProviderControlPlacement,
+  scope?: ProviderControlScope | ProviderControlPlacement,
 ): ProviderControlMetadata[] {
   const controls = PROVIDER_REGISTRY[provider].controls;
-  return placement ? controls.filter((control) => control.placement === placement) : [...controls];
+  if (!scope) return [...controls];
+  const normalizedScope: ProviderControlScope = scope === "input-permission" ? "composer" : scope;
+  return controls.filter((control) => control.scope === normalizedScope);
 }
 
 export function getProviderControl(provider: ProviderId, controlId: ProviderControlId): ProviderControlMetadata | undefined {
   return PROVIDER_REGISTRY[provider].controls.find((control) => control.id === controlId);
+}
+
+export function getProviderControlOptions(
+  provider: ProviderId,
+  controlId: ProviderControlId,
+): readonly AnyProviderControlOption[] {
+  return getProviderControl(provider, controlId)?.options ?? [];
+}
+
+export function getProviderDefaultControlValues(
+  provider: ProviderId,
+  scope?: ProviderControlScope | ProviderControlPlacement,
+): Record<ProviderControlId, ProviderControlValue> {
+  return Object.fromEntries(
+    listProviderControls(provider, scope).map((control) => [control.id, control.defaultValue]),
+  );
 }
 
 export function providerHasControl(provider: ProviderId, controlId: ProviderControlId): boolean {
@@ -610,30 +669,44 @@ export function getProviderLegacyControl(
 }
 
 export function getProviderInputPermissionControl(provider: ProviderId): ProviderControlMetadata | undefined {
-  return PROVIDER_REGISTRY[provider].controls.find((control) => control.placement === "input-permission");
+  return PROVIDER_REGISTRY[provider].controls.find((control) => control.scope === "composer");
 }
 
 export function isProviderControlValue(
   provider: ProviderId,
   controlId: ProviderControlId,
   value: unknown,
-): value is string {
+): value is ProviderControlNonNullValue {
   const control = getProviderControl(provider, controlId);
-  return typeof value === "string" && !!control?.options.some((option) => option.id === value);
+  if (!control) return false;
+  switch (control.kind) {
+    case "select":
+      return typeof value === "string"
+        && control.options.some((option) => {
+          const optionValue = providerControlOptionValue(option);
+          return option.id === value || optionValue === value;
+        });
+    case "boolean":
+      return typeof value === "boolean";
+    case "text":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+  }
 }
 
 export function getProviderControlDefaultValue(
   provider: ProviderId,
   controlId: ProviderControlId,
-): string | null {
+): ProviderControlValue {
   return getProviderControl(provider, controlId)?.defaultValue ?? null;
 }
 
 export function coerceProviderControlValue(
   provider: ProviderId,
   controlId: ProviderControlId,
-  value: string | null | undefined,
-): string | null {
+  value: unknown,
+): ProviderControlValue {
   if (isProviderControlValue(provider, controlId, value)) return value;
   return getProviderControlDefaultValue(provider, controlId);
 }

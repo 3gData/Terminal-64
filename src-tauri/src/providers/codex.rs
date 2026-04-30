@@ -2,7 +2,8 @@
 //!
 //! The primary path uses `codex app-server --listen stdio://`, speaks the
 //! JSON-RPC app-server protocol, and translates rich app-server notifications
-//! back into Terminal 64's existing `codex-event` surface. The legacy
+//! into Terminal 64's shared `ProviderRuntimeEvent` surface while preserving
+//! the existing `codex-event` compatibility stream. The legacy
 //! `codex exec --json` adapter is retained as a fallback via
 //! `T64_CODEX_TRANSPORT=exec`.
 //!
@@ -30,7 +31,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-use crate::providers::emit_provider_event;
+use crate::providers::snapshots::{
+    snapshot_from_descriptor, SnapshotControlDescriptor, SnapshotDescriptor,
+    SnapshotDisplayDescriptor, SnapshotInstallDescriptor, SnapshotOptionDescriptor,
+};
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandLifecycle,
     ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
@@ -38,9 +42,107 @@ use crate::providers::traits::{
     ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
+use crate::providers::{
+    emit_provider_event, emit_provider_runtime_event, ProviderRuntimeEvent,
+    ProviderRuntimeEventType,
+};
 use crate::types::{
     CodexDone, CodexEvent, CreateCodexRequest, DiskSession, HistoryMessage, HistoryToolCall,
-    SendCodexPromptRequest,
+    ProviderSnapshot, SendCodexPromptRequest,
+};
+
+const OPENAI_MODEL_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::basic("gpt-5.5", "GPT-5.5"),
+    SnapshotOptionDescriptor::basic("gpt-5.4", "GPT-5.4"),
+    SnapshotOptionDescriptor::basic("gpt-5.4-mini", "GPT-5.4 Mini"),
+    SnapshotOptionDescriptor::basic("gpt-5.3-codex", "GPT-5.3 Codex"),
+    SnapshotOptionDescriptor::basic("gpt-5.2", "GPT-5.2"),
+];
+
+const OPENAI_EFFORT_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::basic("minimal", "Minimal"),
+    SnapshotOptionDescriptor::basic("low", "Low"),
+    SnapshotOptionDescriptor::basic("medium", "Medium"),
+    SnapshotOptionDescriptor::basic("high", "High"),
+    SnapshotOptionDescriptor::basic("xhigh", "Extra High"),
+];
+
+const OPENAI_PERMISSION_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::described(
+        "read-only",
+        "Read",
+        "No filesystem writes",
+        "#89b4fa",
+        None,
+    ),
+    SnapshotOptionDescriptor::described(
+        "workspace",
+        "Workspace",
+        "Write inside cwd",
+        "#94e2d5",
+        None,
+    ),
+    SnapshotOptionDescriptor::described(
+        "full-auto",
+        "Auto",
+        "Workspace + auto-approve all",
+        "#a6e3a1",
+        None,
+    ),
+    SnapshotOptionDescriptor::described(
+        "yolo",
+        "YOLO",
+        "No sandbox, no approvals",
+        "#f38ba8",
+        None,
+    ),
+];
+
+const OPENAI_CONTROLS: &[SnapshotControlDescriptor] = &[
+    SnapshotControlDescriptor::select(
+        "model",
+        "Model",
+        "gpt-5.5",
+        "topbar",
+        OPENAI_MODEL_OPTIONS,
+        None,
+        Some("model"),
+    ),
+    SnapshotControlDescriptor::select(
+        "effort",
+        "Effort",
+        "medium",
+        "topbar",
+        OPENAI_EFFORT_OPTIONS,
+        None,
+        Some("effort"),
+    ),
+    SnapshotControlDescriptor::select(
+        "sandbox",
+        "Sandbox",
+        "workspace",
+        "composer",
+        OPENAI_PERMISSION_OPTIONS,
+        Some("sandbox"),
+        Some("permission"),
+    ),
+];
+
+const OPENAI_SNAPSHOT_DESCRIPTOR: SnapshotDescriptor = SnapshotDescriptor {
+    id: "openai",
+    display: SnapshotDisplayDescriptor {
+        label: "OpenAI",
+        short_label: "Codex",
+        brand_title: "OpenAI Codex",
+        empty_state_label: "Codex",
+        default_session_name: "Codex",
+    },
+    auth_label: "Codex CLI",
+    install: SnapshotInstallDescriptor {
+        command: "codex",
+        status_label: "Codex",
+    },
+    controls: OPENAI_CONTROLS,
 };
 
 // ── Binary discovery ───────────────────────────────────────
@@ -531,8 +633,15 @@ fn emit_app_server_diagnostic(
 }
 
 fn emit_codex_json(app_handle: &AppHandle, session_id: &str, value: JsonValue) {
+    let runtime_events = codex_legacy_event_to_runtime_events(session_id, &value);
     let data = cap_event_size(value.to_string());
-    emit_provider_event(app_handle, "openai", session_id, &data);
+    if runtime_events.is_empty() {
+        emit_provider_event(app_handle, "openai", session_id, &data);
+    } else {
+        for event in runtime_events {
+            emit_provider_runtime_event(app_handle, event);
+        }
+    }
     if let Err(e) = app_handle.emit(
         "codex-event",
         CodexEvent {
@@ -557,6 +666,536 @@ fn emit_codex_error(app_handle: &AppHandle, session_id: &str, message: impl Into
             "message": message.into(),
         }),
     );
+}
+
+fn codex_runtime_event(
+    event_type: ProviderRuntimeEventType,
+    session_id: &str,
+    phase: &str,
+    native_type: &str,
+) -> ProviderRuntimeEvent {
+    ProviderRuntimeEvent::new(event_type, "openai", session_id)
+        .with_payload("phase", json!(phase))
+        .with_native_type(native_type)
+}
+
+fn codex_event_thread_id(value: &JsonValue) -> Option<&str> {
+    get_json_str(value, &["thread_id"]).or_else(|| get_json_str(value, &["threadId"]))
+}
+
+fn codex_event_turn_id(value: &JsonValue) -> Option<&str> {
+    get_json_str(value, &["turn_id"]).or_else(|| get_json_str(value, &["turnId"]))
+}
+
+fn codex_event_with_ids(
+    mut event: ProviderRuntimeEvent,
+    value: &JsonValue,
+) -> ProviderRuntimeEvent {
+    if let Some(thread_id) = codex_event_thread_id(value) {
+        event = event.with_thread_id(thread_id);
+    }
+    if let Some(turn_id) = codex_event_turn_id(value) {
+        event.turn_id = Some(turn_id.to_string());
+    }
+    event
+}
+
+fn codex_json_string(value: Option<&JsonValue>) -> String {
+    match value {
+        Some(JsonValue::String(text)) => text.clone(),
+        Some(JsonValue::Null) | None => String::new(),
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn codex_command_string(item: &JsonValue) -> String {
+    if let Some(command) = item.get("command") {
+        match command {
+            JsonValue::String(text) => return text.clone(),
+            JsonValue::Array(parts) => {
+                let text = parts
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+            _ => {}
+        }
+    }
+    item.get("args")
+        .and_then(JsonValue::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+fn codex_item_type(item: &JsonValue) -> &str {
+    item.get("item_type")
+        .or_else(|| item.get("type"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+}
+
+fn codex_item_id(item: &JsonValue) -> Option<String> {
+    get_json_str(item, &["id"])
+        .or_else(|| get_json_str(item, &["call_id"]))
+        .filter(|id| !id.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn codex_raw_tool_name(item: &JsonValue) -> &str {
+    item.get("name")
+        .or_else(|| item.get("tool_name"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+}
+
+fn codex_is_shell_item(item: &JsonValue) -> bool {
+    matches!(
+        codex_raw_tool_name(item),
+        "exec_command" | "write_stdin" | "local_shell" | "shell"
+    )
+}
+
+fn codex_item_is_tool(item: &JsonValue) -> bool {
+    matches!(
+        codex_item_type(item),
+        "command_execution"
+            | "local_shell_call"
+            | "file_change"
+            | "mcp_tool_call"
+            | "collab_tool_call"
+            | "custom_tool_call"
+            | "web_search"
+            | "web_search_call"
+            | "dynamic_tool_call"
+    )
+}
+
+fn codex_single_shot_tool(item: &JsonValue) -> bool {
+    matches!(
+        codex_item_type(item),
+        "mcp_tool_call" | "web_search" | "web_search_call" | "collab_tool_call"
+    )
+}
+
+fn codex_tool_display_name(item: &JsonValue) -> String {
+    let item_type = codex_item_type(item);
+    match item_type {
+        "command_execution" | "local_shell_call" => "Bash".to_string(),
+        "file_change" => {
+            let mut paths = Vec::new();
+            for field in ["path", "file_path", "filePath"] {
+                if let Some(path) = item.get(field).and_then(JsonValue::as_str) {
+                    paths.push(path.to_string());
+                }
+            }
+            if let Some(changes) = item.get("changes").and_then(JsonValue::as_array) {
+                for change in changes {
+                    for field in ["path", "file_path", "filePath"] {
+                        if let Some(path) = change.get(field).and_then(JsonValue::as_str) {
+                            paths.push(path.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            paths.sort();
+            paths.dedup();
+            if paths.len() > 1 {
+                "MultiEdit".to_string()
+            } else {
+                "Edit".to_string()
+            }
+        }
+        "mcp_tool_call" => {
+            let server = item.get("server").and_then(JsonValue::as_str).unwrap_or("");
+            let tool = item
+                .get("tool_name")
+                .or_else(|| item.get("tool"))
+                .or_else(|| item.get("name"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or("");
+            if !server.is_empty() && !tool.is_empty() {
+                format!("{server}/{tool}")
+            } else if !tool.is_empty() {
+                tool.to_string()
+            } else {
+                "mcp_tool".to_string()
+            }
+        }
+        "custom_tool_call"
+            if item.get("name").and_then(JsonValue::as_str) == Some("apply_patch") =>
+        {
+            "Edit".to_string()
+        }
+        "custom_tool_call" | "dynamic_tool_call" if codex_is_shell_item(item) => "Bash".to_string(),
+        "web_search" | "web_search_call" => "WebSearch".to_string(),
+        _ => {
+            let raw = codex_raw_tool_name(item);
+            if raw.is_empty() {
+                item_type.to_string()
+            } else {
+                raw.to_string()
+            }
+        }
+    }
+}
+
+fn codex_insert_path_fields(out: &mut serde_json::Map<String, JsonValue>, path: &str) {
+    out.insert("path".to_string(), json!(path));
+    out.insert("file_path".to_string(), json!(path));
+}
+
+fn codex_tool_input(item: &JsonValue) -> JsonValue {
+    let item_type = codex_item_type(item);
+    let mut out = serde_json::Map::new();
+    match item_type {
+        "command_execution" | "local_shell_call" => {
+            let command = codex_command_string(item);
+            if !command.is_empty() {
+                out.insert("command".to_string(), json!(command));
+            }
+        }
+        "file_change" => {
+            for field in ["path", "file_path", "filePath"] {
+                if let Some(path) = item.get(field).and_then(JsonValue::as_str) {
+                    codex_insert_path_fields(&mut out, path);
+                    break;
+                }
+            }
+            if let Some(changes) = item.get("changes").and_then(JsonValue::as_array) {
+                out.insert("changes".to_string(), JsonValue::Array(changes.clone()));
+                let paths = changes
+                    .iter()
+                    .filter_map(|change| {
+                        change
+                            .get("path")
+                            .or_else(|| change.get("file_path"))
+                            .or_else(|| change.get("filePath"))
+                            .and_then(JsonValue::as_str)
+                    })
+                    .map(|path| json!(path))
+                    .collect::<Vec<_>>();
+                if !paths.is_empty() {
+                    out.insert("paths".to_string(), JsonValue::Array(paths));
+                }
+            }
+            for field in ["change", "diff", "unified_diff", "unifiedDiff"] {
+                if let Some(value) = item.get(field) {
+                    out.insert(field.to_string(), value.clone());
+                }
+            }
+        }
+        "mcp_tool_call" => {
+            if let Some(server) = item.get("server").and_then(JsonValue::as_str) {
+                out.insert("server".to_string(), json!(server));
+            }
+            if let Some(tool) = item
+                .get("tool_name")
+                .or_else(|| item.get("tool"))
+                .and_then(JsonValue::as_str)
+            {
+                out.insert("tool_name".to_string(), json!(tool));
+            }
+            if let Some(arguments) = item.get("arguments") {
+                out.insert("arguments".to_string(), arguments.clone());
+            }
+        }
+        "web_search" | "web_search_call" => {
+            if let Some(query) = item
+                .get("action")
+                .and_then(|action| action.get("query"))
+                .or_else(|| item.get("query"))
+                .and_then(JsonValue::as_str)
+            {
+                out.insert("query".to_string(), json!(query));
+            }
+            if let Some(queries) = item.get("action").and_then(|action| action.get("queries")) {
+                out.insert("queries".to_string(), queries.clone());
+            }
+        }
+        _ => {
+            if let Some(arguments) = item.get("arguments") {
+                if let Some(object) = arguments.as_object() {
+                    out.extend(object.clone());
+                } else {
+                    out.insert("arguments".to_string(), arguments.clone());
+                }
+            }
+            let raw = codex_raw_tool_name(item);
+            if !raw.is_empty() {
+                out.insert("tool_name".to_string(), json!(raw));
+            }
+            if codex_is_shell_item(item) && !out.contains_key("command") {
+                let command = out
+                    .get("cmd")
+                    .or_else(|| out.get("command"))
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        out.get("chars").and_then(JsonValue::as_str).map(|chars| {
+                            format!("stdin: {}", chars.chars().take(80).collect::<String>())
+                        })
+                    })
+                    .unwrap_or_else(|| raw.to_string());
+                if !command.is_empty() {
+                    out.insert("command".to_string(), json!(command));
+                }
+            }
+        }
+    }
+    JsonValue::Object(out)
+}
+
+fn codex_item_result_text(item: &JsonValue) -> String {
+    if item.get("output").is_some() {
+        return codex_tool_output(item).0;
+    }
+    if let Some(result) = item.get("result") {
+        return codex_json_string(Some(result));
+    }
+    codex_json_string(item.get("text"))
+}
+
+fn codex_item_is_error(item: &JsonValue) -> bool {
+    matches!(
+        item.get("status").and_then(JsonValue::as_str),
+        Some("failed" | "error")
+    ) || item
+        .get("exit_code")
+        .and_then(JsonValue::as_i64)
+        .is_some_and(|code| code != 0)
+        || codex_tool_output(item).1
+}
+
+fn codex_tool_runtime_event(
+    session_id: &str,
+    item: &JsonValue,
+    phase: &str,
+    native_type: &str,
+) -> Option<ProviderRuntimeEvent> {
+    let id = codex_item_id(item)?;
+    let mut event = codex_runtime_event(
+        ProviderRuntimeEventType::Tool,
+        session_id,
+        phase,
+        native_type,
+    )
+    .with_item_id(id.clone())
+    .with_payload("id", json!(id))
+    .with_payload("name", json!(codex_tool_display_name(item)))
+    .with_payload("input", codex_tool_input(item));
+
+    if phase == "completed" {
+        event = event
+            .with_payload("result", json!(codex_item_result_text(item)))
+            .with_payload("isError", json!(codex_item_is_error(item)));
+    }
+
+    Some(event)
+}
+
+fn codex_completed_item_runtime_events(
+    session_id: &str,
+    item: &JsonValue,
+    native_type: &str,
+) -> Vec<ProviderRuntimeEvent> {
+    if matches!(codex_item_type(item), "agent_message" | "assistant_message") {
+        let text = codex_json_string(item.get("text"));
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut event = codex_runtime_event(
+            ProviderRuntimeEventType::Content,
+            session_id,
+            "message",
+            native_type,
+        )
+        .with_payload("role", json!("assistant"))
+        .with_payload("text", json!(text));
+        if let Some(id) = codex_item_id(item) {
+            event = event.with_item_id(id);
+        }
+        return vec![event];
+    }
+
+    if !codex_item_is_tool(item) {
+        return Vec::new();
+    }
+
+    let Some(completed) = codex_tool_runtime_event(session_id, item, "completed", native_type)
+    else {
+        return Vec::new();
+    };
+    if codex_single_shot_tool(item) {
+        if let Some(started) = codex_tool_runtime_event(session_id, item, "started", native_type) {
+            return vec![started, completed];
+        }
+    }
+    vec![completed]
+}
+
+fn codex_updated_item_runtime_event(
+    session_id: &str,
+    value: &JsonValue,
+    native_type: &str,
+) -> Option<ProviderRuntimeEvent> {
+    let item = value.get("item")?;
+    match codex_item_type(item) {
+        "agent_message" | "assistant_message" => {
+            let text = value
+                .get("delta")
+                .or_else(|| value.get("text"))
+                .or_else(|| item.get("text"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or("");
+            if text.is_empty() {
+                return None;
+            }
+            let mut event = codex_runtime_event(
+                ProviderRuntimeEventType::Content,
+                session_id,
+                "delta",
+                native_type,
+            )
+            .with_payload("role", json!("assistant"))
+            .with_payload("text", json!(text));
+            if let Some(id) = codex_item_id(item) {
+                event = event.with_item_id(id);
+            }
+            Some(event)
+        }
+        "file_change" if item.get("changes").is_some() => {
+            codex_tool_runtime_event(session_id, item, "updated", native_type)
+        }
+        _ => None,
+    }
+}
+
+fn codex_mcp_servers_from_legacy(value: &JsonValue) -> Vec<JsonValue> {
+    if let Some(servers) = value.get("servers").and_then(JsonValue::as_array) {
+        return servers.clone();
+    }
+    if let Some(servers) = value.get("mcp_servers").and_then(JsonValue::as_array) {
+        return servers.clone();
+    }
+    value
+        .get("server")
+        .cloned()
+        .map(|server| vec![server])
+        .unwrap_or_default()
+}
+
+fn codex_legacy_event_to_runtime_events(
+    session_id: &str,
+    value: &JsonValue,
+) -> Vec<ProviderRuntimeEvent> {
+    let native_type = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
+    match native_type {
+        "thread.started" => {
+            let Some(thread_id) = codex_event_thread_id(value) else {
+                return Vec::new();
+            };
+            vec![codex_runtime_event(
+                ProviderRuntimeEventType::Session,
+                session_id,
+                "started",
+                native_type,
+            )
+            .with_thread_id(thread_id)]
+        }
+        "turn.started" => vec![codex_event_with_ids(
+            codex_runtime_event(
+                ProviderRuntimeEventType::Turn,
+                session_id,
+                "started",
+                native_type,
+            ),
+            value,
+        )],
+        "turn.completed" => {
+            let mut event = codex_event_with_ids(
+                codex_runtime_event(
+                    ProviderRuntimeEventType::Turn,
+                    session_id,
+                    "completed",
+                    native_type,
+                ),
+                value,
+            );
+            if let Some(usage) = value.get("usage") {
+                event = event.with_payload("usage", usage.clone());
+            }
+            let error_message = value
+                .get("error")
+                .and_then(|error| {
+                    error
+                        .get("message")
+                        .and_then(JsonValue::as_str)
+                        .or_else(|| error.as_str())
+                })
+                .unwrap_or("");
+            if !error_message.is_empty() {
+                event = event
+                    .with_payload("isError", json!(true))
+                    .with_payload("error", json!(error_message));
+            }
+            vec![event]
+        }
+        "mcp.status.updated" => vec![codex_runtime_event(
+            ProviderRuntimeEventType::Mcp,
+            session_id,
+            "status",
+            native_type,
+        )
+        .with_payload(
+            "servers",
+            JsonValue::Array(codex_mcp_servers_from_legacy(value)),
+        )],
+        "item.started" => {
+            let Some(item) = value.get("item") else {
+                return Vec::new();
+            };
+            if !codex_item_is_tool(item) {
+                return Vec::new();
+            }
+            codex_tool_runtime_event(session_id, item, "started", native_type)
+                .into_iter()
+                .collect()
+        }
+        "item.updated" => codex_updated_item_runtime_event(session_id, value, native_type)
+            .into_iter()
+            .collect(),
+        "item.completed" => {
+            let Some(item) = value.get("item") else {
+                return Vec::new();
+            };
+            codex_completed_item_runtime_events(session_id, item, native_type)
+        }
+        "error" => {
+            let message = value
+                .get("message")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("Codex reported an error.");
+            vec![codex_runtime_event(
+                ProviderRuntimeEventType::Error,
+                session_id,
+                "error",
+                native_type,
+            )
+            .with_payload("message", json!(message))
+            .with_payload("terminal", json!(true))]
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn get_json_str<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a str> {
@@ -1185,16 +1824,24 @@ fn spawn_and_stream(
                 Ok(line) => {
                     had_output = true;
                     for event_line in codex_exec_line_to_frontend_lines(&line) {
-                        let data = cap_event_size(event_line);
-                        emit_provider_event(&handle, "openai", &sid, &data);
-                        if let Err(e) = handle.emit(
-                            "codex-event",
-                            CodexEvent {
-                                session_id: sid.clone(),
-                                data,
-                            },
-                        ) {
-                            safe_eprintln!("[codex] Failed to emit codex-event for {}: {}", sid, e);
+                        if let Ok(event_value) = serde_json::from_str::<JsonValue>(&event_line) {
+                            emit_codex_json(&handle, &sid, event_value);
+                        } else {
+                            let data = cap_event_size(event_line);
+                            emit_provider_event(&handle, "openai", &sid, &data);
+                            if let Err(e) = handle.emit(
+                                "codex-event",
+                                CodexEvent {
+                                    session_id: sid.clone(),
+                                    data,
+                                },
+                            ) {
+                                safe_eprintln!(
+                                    "[codex] Failed to emit codex-event for {}: {}",
+                                    sid,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -1217,21 +1864,14 @@ fn spawn_and_stream(
                 sid,
                 &error_msg[..error_msg.len().min(200)]
             );
-            let data = serde_json::json!({
-                "type": "error",
-                "message": error_msg,
-            })
-            .to_string();
-            emit_provider_event(&handle, "openai", &sid, &data);
-            if let Err(e) = handle.emit(
-                "codex-event",
-                CodexEvent {
-                    session_id: sid.clone(),
-                    data,
-                },
-            ) {
-                safe_eprintln!("[codex] Failed to emit error event for {}: {}", sid, e);
-            }
+            emit_codex_json(
+                &handle,
+                &sid,
+                serde_json::json!({
+                    "type": "error",
+                    "message": error_msg,
+                }),
+            );
         }
         // Wait on the child if it's still ours so we can log the exit status
         // — otherwise silent exits look identical to normal completion in
@@ -1824,6 +2464,12 @@ impl CodexAdapter {
             capabilities: ProviderAdapterCapabilities {
                 session_model_switch: ProviderSessionModelSwitchMode::InSession,
                 history: ProviderHistoryCapabilities::FULL,
+                mcp: true,
+                plan: true,
+                images: true,
+                hook_log: false,
+                native_slash_commands: false,
+                compact: false,
             },
         }
     }
@@ -2115,6 +2761,14 @@ impl ProviderAdapter for CodexAdapter {
 
     fn capabilities(&self) -> &ProviderAdapterCapabilities {
         &self.capabilities
+    }
+
+    fn snapshot(&self) -> ProviderSnapshot {
+        snapshot_from_descriptor(
+            &OPENAI_SNAPSHOT_DESCRIPTOR,
+            self.capabilities(),
+            resolve_codex_path(),
+        )
     }
 
     fn history_truncate(
@@ -3114,4 +3768,148 @@ pub fn truncate_codex_rollout_by_turns(thread_id: &str, num_turns: u32) -> Resul
     }
 
     Ok(drop as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_value(event: ProviderRuntimeEvent) -> JsonValue {
+        event.into_value()
+    }
+
+    #[test]
+    fn maps_codex_lifecycle_and_mcp_events_to_provider_runtime_events() {
+        let session_events = codex_legacy_event_to_runtime_events(
+            "session-1",
+            &json!({
+                "type": "thread.started",
+                "thread_id": "thread-1",
+            }),
+        );
+        assert_eq!(session_events.len(), 1);
+        let session = runtime_value(session_events[0].clone());
+        assert_eq!(session["type"], "provider.session");
+        assert_eq!(session["provider"], "openai");
+        assert_eq!(session["sessionId"], "session-1");
+        assert_eq!(session["threadId"], "thread-1");
+        assert_eq!(session["phase"], "started");
+
+        let turn_events = codex_legacy_event_to_runtime_events(
+            "session-1",
+            &json!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            }),
+        );
+        assert_eq!(turn_events.len(), 1);
+        let turn = runtime_value(turn_events[0].clone());
+        assert_eq!(turn["type"], "provider.turn");
+        assert_eq!(turn["phase"], "completed");
+        assert_eq!(turn["usage"]["input_tokens"], 10);
+        assert_eq!(turn["usage"]["total_tokens"], 15);
+
+        let mcp_events = codex_legacy_event_to_runtime_events(
+            "session-1",
+            &json!({
+                "type": "mcp.status.updated",
+                "server": {
+                    "name": "terminal-64",
+                    "status": "connected",
+                },
+            }),
+        );
+        assert_eq!(mcp_events.len(), 1);
+        let mcp = runtime_value(mcp_events[0].clone());
+        assert_eq!(mcp["type"], "provider.mcp");
+        assert_eq!(mcp["phase"], "status");
+        assert_eq!(mcp["servers"][0]["name"], "terminal-64");
+    }
+
+    #[test]
+    fn maps_codex_content_and_tool_events_to_provider_runtime_events() {
+        let delta_events = codex_legacy_event_to_runtime_events(
+            "session-2",
+            &json!({
+                "type": "item.updated",
+                "delta": "hello",
+                "item": {
+                    "id": "msg-1",
+                    "type": "agent_message",
+                    "text": "hello",
+                },
+            }),
+        );
+        assert_eq!(delta_events.len(), 1);
+        let delta = runtime_value(delta_events[0].clone());
+        assert_eq!(delta["type"], "provider.content");
+        assert_eq!(delta["phase"], "delta");
+        assert_eq!(delta["itemId"], "msg-1");
+        assert_eq!(delta["text"], "hello");
+
+        let tool_started = codex_legacy_event_to_runtime_events(
+            "session-2",
+            &json!({
+                "type": "item.started",
+                "item": {
+                    "id": "tool-1",
+                    "type": "command_execution",
+                    "command": "npm test",
+                },
+            }),
+        );
+        assert_eq!(tool_started.len(), 1);
+        let started = runtime_value(tool_started[0].clone());
+        assert_eq!(started["type"], "provider.tool");
+        assert_eq!(started["phase"], "started");
+        assert_eq!(started["id"], "tool-1");
+        assert_eq!(started["name"], "Bash");
+        assert_eq!(started["input"]["command"], "npm test");
+
+        let mcp_completed = codex_legacy_event_to_runtime_events(
+            "session-2",
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "mcp-1",
+                    "type": "mcp_tool_call",
+                    "server": "terminal-64",
+                    "tool_name": "read_team",
+                    "arguments": { "last": 5 },
+                    "output": "ok",
+                    "status": "completed",
+                },
+            }),
+        );
+        assert_eq!(mcp_completed.len(), 2);
+        let started = runtime_value(mcp_completed[0].clone());
+        let completed = runtime_value(mcp_completed[1].clone());
+        assert_eq!(started["phase"], "started");
+        assert_eq!(started["name"], "terminal-64/read_team");
+        assert_eq!(completed["phase"], "completed");
+        assert_eq!(completed["result"], "ok");
+        assert_eq!(completed["isError"], false);
+    }
+
+    #[test]
+    fn maps_codex_error_events_to_provider_runtime_errors() {
+        let error_events = codex_legacy_event_to_runtime_events(
+            "session-3",
+            &json!({
+                "type": "error",
+                "message": "Codex failed",
+            }),
+        );
+        assert_eq!(error_events.len(), 1);
+        let error = runtime_value(error_events[0].clone());
+        assert_eq!(error["type"], "provider.error");
+        assert_eq!(error["provider"], "openai");
+        assert_eq!(error["phase"], "error");
+        assert_eq!(error["message"], "Codex failed");
+        assert_eq!(error["terminal"], true);
+    }
 }

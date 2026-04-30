@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { ChatMessage as ChatMessageData, ToolCall } from "../../lib/types";
-import { GROUPABLE_TOOLS } from "./toolGrouping";
+import { isGroupableToolCall } from "./toolPresentation";
 
 export type VisualRow =
   | { kind: "turnDivider"; key: string; dur: number }
@@ -91,7 +91,7 @@ export function useChatRows(session: ChatRowsSession | undefined, hasStreamingTe
         msg.role === "assistant" &&
         !msg.content &&
         msg.toolCalls?.length &&
-        msg.toolCalls.every((tc) => GROUPABLE_TOOLS.has(tc.name))
+        msg.toolCalls.every(isGroupableToolCall)
       ) {
         const groupTcs: ToolCall[] = [...msg.toolCalls];
         let j = i + 1;
@@ -102,7 +102,7 @@ export function useChatRows(session: ChatRowsSession | undefined, hasStreamingTe
             next.role === "assistant" &&
             !next.content &&
             next.toolCalls?.length &&
-            next.toolCalls.every((tc) => GROUPABLE_TOOLS.has(tc.name))
+            next.toolCalls.every(isGroupableToolCall)
           ) {
             groupTcs.push(...next.toolCalls);
             j++;

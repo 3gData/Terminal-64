@@ -11,6 +11,11 @@ import type {
   ProviderTurnInput,
   ProviderTurnResult,
 } from "../../contracts/providerRuntime";
+import { getProviderTurnResumeId } from "../../contracts/providerRuntime";
+
+function stringControlValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
 
 declare module "../../contracts/providerIpc" {
   interface ProviderCreateRequestMap {
@@ -29,25 +34,26 @@ function cursorForceForPermission(permissionId: string | null | undefined, overr
 
 function cursorModeForInput(input: ProviderTurnInput<"cursor">): "ask" | "plan" | undefined {
   if (input.permissionOverride === "plan" || input.permissionMode === "plan") return "plan";
-  const selectedMode = input.selectedControls?.mode ?? input.selectedEffort;
+  const selectedMode = stringControlValue(input.selectedControls?.mode);
   if (selectedMode === "ask" || selectedMode === "plan") return selectedMode;
   return undefined;
 }
 
 export function buildCursorRequest(input: ProviderTurnInput<"cursor">): CreateCursorRequest {
   const options = input.providerOptions?.cursor;
-  const selectedModel = input.selectedControls?.model ?? input.selectedModel;
+  const selectedModel = stringControlValue(input.selectedControls?.model);
   const force = cursorForceForPermission(
     input.providerPermissionId,
     input.permissionOverride ?? input.permissionMode,
   );
   const mode = cursorModeForInput(input);
+  const threadId = getProviderTurnResumeId(input);
   return {
     session_id: input.sessionId,
     cwd: input.cwd,
     prompt: input.prompt,
     permission_mode: input.permissionOverride ?? input.permissionMode ?? "default",
-    ...(input.threadId ? { thread_id: input.threadId } : {}),
+    ...(threadId ? { thread_id: threadId } : {}),
     ...(selectedModel && selectedModel !== "auto" ? { model: selectedModel } : {}),
     ...(mode ? { mode } : {}),
     ...(force ? { force: true } : {}),

@@ -29,7 +29,13 @@ import {
   getNoisyWidgetDefault,
   type WidgetHostProtectionMode,
 } from "../../lib/widgetHostProtection";
-import { listProviderManifests, type ProviderId } from "../../lib/providers";
+import type { ProviderId } from "../../lib/providers";
+import {
+  getProviderSnapshotCapabilityLabels,
+  getProviderSnapshotModelSummary,
+  listProviderSnapshotDisplays,
+  useProviderSnapshots,
+} from "../../lib/providerSnapshots";
 import { ProviderLogo } from "../ui/BrandLogos";
 import { downloadVoiceModel, voiceModelsStatus, onVoiceDownloadProgress, setVoiceSensitivity as setVoiceSensitivityBackend, type VoiceModelKind } from "../../lib/voiceApi";
 
@@ -478,9 +484,10 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
   // Provider availability
   const providerAvailability = useSettingsStore((s) => s.providerAvailability);
-  const providerManifests = listProviderManifests();
-  const enabledProviderCount = providerManifests.filter((manifest) =>
-    isProviderAvailable(manifest.id, providerAvailability)
+  const providerSnapshots = useProviderSnapshots();
+  const providerDisplays = listProviderSnapshotDisplays(providerSnapshots);
+  const enabledProviderCount = providerDisplays.filter((display) =>
+    isProviderAvailable(display.provider, providerAvailability)
   ).length;
   const handleProviderAvailabilityChange = (providerId: ProviderId, enabled: boolean) => {
     if (!enabled && enabledProviderCount <= 1 && isProviderAvailable(providerId, providerAvailability)) return;
@@ -814,26 +821,47 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           {/* Providers */}
           <Section label="Providers" icon="◇">
             <div className="sp-provider-list">
-              {providerManifests.map((manifest) => {
-                const enabled = isProviderAvailable(manifest.id, providerAvailability);
+              {providerDisplays.map((display) => {
+                const enabled = isProviderAvailable(display.provider, providerAvailability);
                 const disableLocked = enabled && enabledProviderCount <= 1;
+                const modelSummary = getProviderSnapshotModelSummary(display.provider, providerSnapshots);
+                const capabilitySummary = getProviderSnapshotCapabilityLabels(display.provider, providerSnapshots).join(", ");
                 return (
                   <div
                     className={`sp-provider-row ${enabled ? "" : "sp-provider-row--disabled"}`}
-                    key={manifest.id}
+                    key={display.provider}
                   >
                     <div className="sp-provider-info">
-                      <ProviderLogo provider={manifest.id} size={16} />
+                      <ProviderLogo provider={display.provider} size={16} />
                       <div className="sp-provider-copy">
-                        <span className="sp-provider-name">{manifest.ui.label}</span>
-                        <span className="sp-hint-inline">{manifest.ui.defaultSessionName}</span>
+                        <span className="sp-provider-name">{display.label}</span>
+                        <span className="sp-hint-inline">{display.defaultSessionName}</span>
+                        <span className="sp-provider-meta">
+                          {modelSummary && <span>Models: {modelSummary}</span>}
+                          {capabilitySummary && <span>Capabilities: {capabilitySummary}</span>}
+                        </span>
+                        <span className="sp-provider-badges">
+                          <span className={`sp-provider-badge ${enabled ? "sp-provider-badge--ok" : "sp-provider-badge--muted"}`}>
+                            {enabled ? "Enabled" : "Hidden"}
+                          </span>
+                          {display.installed !== null && (
+                            <span className={`sp-provider-badge ${display.installed ? "sp-provider-badge--ok" : "sp-provider-badge--warn"}`}>
+                              {display.installed ? "Installed" : "Not installed"}
+                            </span>
+                          )}
+                          {display.statusLabel && (
+                            <span className={`sp-provider-badge ${display.enabled === false ? "sp-provider-badge--warn" : "sp-provider-badge--muted"}`}>
+                              {display.statusLabel}
+                            </span>
+                          )}
+                        </span>
                       </div>
                     </div>
                     <Toggle
                       checked={enabled}
                       disabled={disableLocked}
                       {...(disableLocked ? { title: "Keep at least one provider enabled" } : {})}
-                      onChange={(v) => handleProviderAvailabilityChange(manifest.id, v)}
+                      onChange={(v) => handleProviderAvailabilityChange(display.provider, v)}
                     />
                   </div>
                 );

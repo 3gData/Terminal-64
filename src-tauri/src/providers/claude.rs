@@ -13,13 +13,17 @@
 //! `sanitize_dangling_tool_uses`) live in [`crate::providers::util`].
 
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
-use crate::providers::emit_provider_event;
+use crate::providers::snapshots::{
+    snapshot_from_descriptor, SnapshotControlDescriptor, SnapshotDescriptor,
+    SnapshotDisplayDescriptor, SnapshotInstallDescriptor, SnapshotOptionDescriptor,
+};
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandContext,
     ProviderCommandLifecycle, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
@@ -30,7 +34,117 @@ use crate::providers::util::{
     cap_event_size, expanded_tool_path, find_existing_claude_session_jsonl,
     sanitize_dangling_tool_uses, shim_command,
 };
-use crate::types::{ClaudeDone, ClaudeEvent, CreateClaudeRequest, SendClaudePromptRequest};
+use crate::providers::{
+    emit_provider_event, emit_provider_runtime_event, ProviderRuntimeEvent,
+    ProviderRuntimeEventType,
+};
+use crate::types::{
+    ClaudeDone, ClaudeEvent, CreateClaudeRequest, ProviderSnapshot, SendClaudePromptRequest,
+};
+
+const ANTHROPIC_MODEL_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::basic("sonnet", "Sonnet"),
+    SnapshotOptionDescriptor::basic("opus", "Opus"),
+    SnapshotOptionDescriptor::basic("haiku", "Haiku"),
+    SnapshotOptionDescriptor::basic("opusplan", "Opus Plan"),
+    SnapshotOptionDescriptor::basic("claude-opus-4-7", "Opus 4.7"),
+    SnapshotOptionDescriptor::basic("sonnet[1m]", "Sonnet 1M"),
+    SnapshotOptionDescriptor::basic("opus[1m]", "Opus 1M"),
+    SnapshotOptionDescriptor::basic("claude-opus-4-7[1m]", "Opus 4.7 1M"),
+];
+
+const ANTHROPIC_EFFORT_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::basic("low", "Low"),
+    SnapshotOptionDescriptor::basic("medium", "Med"),
+    SnapshotOptionDescriptor::basic("high", "High"),
+    SnapshotOptionDescriptor::basic("max", "Max"),
+    SnapshotOptionDescriptor::basic("xhigh", "X-High"),
+];
+
+const ANTHROPIC_PERMISSION_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::described(
+        "default",
+        "Default",
+        "Ask before every tool",
+        "#89b4fa",
+        Some("ask permissions"),
+    ),
+    SnapshotOptionDescriptor::described(
+        "plan",
+        "Plan",
+        "Read-only, no edits",
+        "#94e2d5",
+        Some("plan mode"),
+    ),
+    SnapshotOptionDescriptor::described(
+        "auto",
+        "Auto",
+        "Auto-approve safe ops",
+        "#a6e3a1",
+        Some("auto-approve"),
+    ),
+    SnapshotOptionDescriptor::described(
+        "accept_edits",
+        "Edits",
+        "Auto-approve all edits",
+        "#cba6f7",
+        Some("auto-accept edits"),
+    ),
+    SnapshotOptionDescriptor::described(
+        "bypass_all",
+        "YOLO",
+        "Skip ALL permissions",
+        "#f38ba8",
+        Some("bypass permissions"),
+    ),
+];
+
+const ANTHROPIC_CONTROLS: &[SnapshotControlDescriptor] = &[
+    SnapshotControlDescriptor::select(
+        "model",
+        "Model",
+        "sonnet",
+        "topbar",
+        ANTHROPIC_MODEL_OPTIONS,
+        None,
+        Some("model"),
+    ),
+    SnapshotControlDescriptor::select(
+        "effort",
+        "Effort",
+        "high",
+        "topbar",
+        ANTHROPIC_EFFORT_OPTIONS,
+        None,
+        Some("effort"),
+    ),
+    SnapshotControlDescriptor::select(
+        "tool-permission",
+        "Permissions",
+        "default",
+        "composer",
+        ANTHROPIC_PERMISSION_OPTIONS,
+        Some("on"),
+        Some("permission"),
+    ),
+];
+
+const ANTHROPIC_SNAPSHOT_DESCRIPTOR: SnapshotDescriptor = SnapshotDescriptor {
+    id: "anthropic",
+    display: SnapshotDisplayDescriptor {
+        label: "Anthropic",
+        short_label: "Claude",
+        brand_title: "Anthropic Claude",
+        empty_state_label: "Claude Code",
+        default_session_name: "Claude",
+    },
+    auth_label: "Claude CLI",
+    install: SnapshotInstallDescriptor {
+        command: "claude",
+        status_label: "Claude",
+    },
+    controls: ANTHROPIC_CONTROLS,
+};
 
 // ── Binary discovery ───────────────────────────────────────
 
@@ -116,6 +230,540 @@ struct ClaudeInstance {
 }
 
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
+
+#[derive(Debug)]
+struct PendingClaudeToolUse {
+    id: String,
+    name: String,
+    input_json: String,
+    parent_tool_use_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ClaudeRuntimeEventMapper {
+    pending_blocks: Vec<PendingClaudeToolUse>,
+    assistant_finalized: bool,
+}
+
+fn claude_context_window_for_model(model: &str) -> u64 {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("-1m") || lower.contains(":1m") || lower.contains("[1m]") {
+        1_000_000
+    } else {
+        200_000
+    }
+}
+
+fn claude_native_type(event: &Value) -> String {
+    let base = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+    if subtype.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}:{subtype}")
+    }
+}
+
+fn claude_runtime_event(
+    event_type: ProviderRuntimeEventType,
+    session_id: &str,
+    phase: &str,
+    native_type: &str,
+) -> ProviderRuntimeEvent {
+    ProviderRuntimeEvent::new(event_type, ANTHROPIC_PROVIDER_ID, session_id)
+        .with_payload("phase", json!(phase))
+        .with_native_type(native_type)
+}
+
+fn json_object_or_empty(value: Option<&Value>) -> Value {
+    value
+        .and_then(Value::as_object)
+        .cloned()
+        .map(Value::Object)
+        .unwrap_or_else(|| json!({}))
+}
+
+fn stringify_claude_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn claude_tool_call_value(block: &Value, parent_tool_use_id: Option<&str>) -> Option<Value> {
+    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        return None;
+    }
+    let id = block.get("id").and_then(Value::as_str)?;
+    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+    if id.trim().is_empty() || name.trim().is_empty() {
+        return None;
+    }
+    let mut tool_call = json!({
+        "id": id,
+        "name": name,
+        "input": json_object_or_empty(block.get("input")),
+    });
+    if let Some(parent_tool_use_id) = parent_tool_use_id.filter(|id| !id.trim().is_empty()) {
+        tool_call["parentToolUseId"] = json!(parent_tool_use_id);
+    }
+    Some(tool_call)
+}
+
+fn claude_tool_result_text(block: &Value) -> String {
+    let Some(content) = block.get("content") else {
+        return String::new();
+    };
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    if let Some(items) = content.as_array() {
+        return items
+            .iter()
+            .map(|item| {
+                if item.get("type").and_then(Value::as_str) == Some("text") {
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    stringify_claude_value(Some(item))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    stringify_claude_value(Some(content))
+}
+
+fn claude_content_message_event(
+    session_id: &str,
+    native_type: &str,
+    text: String,
+    tool_calls: Vec<Value>,
+    use_buffered_text: bool,
+) -> ProviderRuntimeEvent {
+    let mut event = claude_runtime_event(
+        ProviderRuntimeEventType::Content,
+        session_id,
+        "message",
+        native_type,
+    )
+    .with_payload("role", json!("assistant"))
+    .with_payload("text", json!(text));
+    if !tool_calls.is_empty() {
+        event = event.with_payload("toolCalls", Value::Array(tool_calls));
+    }
+    if use_buffered_text {
+        event = event.with_payload("useBufferedText", json!(true));
+    }
+    event
+}
+
+fn total_claude_input_tokens(usage: Option<&Value>) -> u64 {
+    let Some(usage) = usage else {
+        return 0;
+    };
+    [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|field| usage.get(*field).and_then(Value::as_u64))
+    .sum()
+}
+
+fn claude_context_window_from_model_usage(event: &Value) -> Option<u64> {
+    event
+        .get("modelUsage")
+        .and_then(Value::as_object)?
+        .values()
+        .find_map(|model_data| {
+            model_data
+                .get("contextWindow")
+                .and_then(Value::as_u64)
+                .filter(|window| *window > 0)
+        })
+}
+
+impl ClaudeRuntimeEventMapper {
+    fn reset(&mut self) {
+        self.pending_blocks.clear();
+        self.assistant_finalized = false;
+    }
+
+    fn pending_tool_calls(&self) -> Vec<Value> {
+        self.pending_blocks
+            .iter()
+            .filter_map(|block| {
+                let input = serde_json::from_str::<Value>(&block.input_json)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+                let mut value = json!({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": input,
+                });
+                if let Some(parent_tool_use_id) = &block.parent_tool_use_id {
+                    value["parentToolUseId"] = json!(parent_tool_use_id);
+                }
+                claude_tool_call_value(&value, block.parent_tool_use_id.as_deref())
+            })
+            .collect()
+    }
+
+    fn content_array_to_event(
+        &self,
+        session_id: &str,
+        native_type: &str,
+        content: &[Value],
+    ) -> ProviderRuntimeEvent {
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        for block in content {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(block_text) = block.get("text").and_then(Value::as_str) {
+                        text.push_str(block_text);
+                    }
+                }
+                Some("tool_use") => {
+                    let parent_tool_use_id = block
+                        .get("parentToolUseId")
+                        .and_then(Value::as_str)
+                        .or_else(|| block.get("parent_tool_use_id").and_then(Value::as_str));
+                    if let Some(tool_call) = claude_tool_call_value(block, parent_tool_use_id) {
+                        tool_calls.push(tool_call);
+                    }
+                }
+                _ => {}
+            }
+        }
+        claude_content_message_event(
+            session_id,
+            native_type,
+            text.trim().to_string(),
+            tool_calls,
+            false,
+        )
+    }
+
+    fn runtime_events_from_data(
+        &mut self,
+        session_id: &str,
+        data: &str,
+    ) -> Option<Vec<ProviderRuntimeEvent>> {
+        let mut event = serde_json::from_str::<Value>(data).ok()?;
+        let mut stream_parent_tool_use_id = None;
+        if event.get("type").and_then(Value::as_str) == Some("stream_event") {
+            stream_parent_tool_use_id = event
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            event = event.get("event")?.clone();
+        }
+
+        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let native_type = claude_native_type(&event);
+        match event_type {
+            "system" if event.get("subtype").and_then(Value::as_str) == Some("init") => {
+                let model = event.get("model").and_then(Value::as_str).unwrap_or("");
+                let mut session = claude_runtime_event(
+                    ProviderRuntimeEventType::Session,
+                    session_id,
+                    "started",
+                    &native_type,
+                )
+                .with_payload("model", json!(model))
+                .with_payload("contextMax", json!(claude_context_window_for_model(model)));
+                if let Some(native_session_id) = event.get("session_id").and_then(Value::as_str) {
+                    session = session.with_thread_id(native_session_id);
+                }
+
+                let mut events = vec![session];
+                if let Some(servers) = event.get("mcp_servers").and_then(Value::as_array) {
+                    events.push(
+                        claude_runtime_event(
+                            ProviderRuntimeEventType::Mcp,
+                            session_id,
+                            "status",
+                            &native_type,
+                        )
+                        .with_payload("servers", Value::Array(servers.clone())),
+                    );
+                }
+                Some(events)
+            }
+            "stream_request_start" => {
+                self.reset();
+                Some(vec![claude_runtime_event(
+                    ProviderRuntimeEventType::Turn,
+                    session_id,
+                    "started",
+                    &native_type,
+                )])
+            }
+            "message_start" => {
+                self.reset();
+                Some(vec![claude_runtime_event(
+                    ProviderRuntimeEventType::Turn,
+                    session_id,
+                    "started",
+                    &native_type,
+                )
+                .with_payload("resetStreamingText", json!(true))])
+            }
+            "content_block_start" => {
+                let content_block = event.get("content_block");
+                if content_block
+                    .and_then(|block| block.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("tool_use")
+                {
+                    if let (Some(id), Some(name)) = (
+                        content_block
+                            .and_then(|block| block.get("id"))
+                            .and_then(Value::as_str),
+                        content_block
+                            .and_then(|block| block.get("name"))
+                            .and_then(Value::as_str),
+                    ) {
+                        self.pending_blocks.push(PendingClaudeToolUse {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            input_json: String::new(),
+                            parent_tool_use_id: stream_parent_tool_use_id,
+                        });
+                    }
+                }
+                Some(Vec::new())
+            }
+            "content_block_delta" => {
+                let delta = event.get("delta");
+                match delta
+                    .and_then(|delta| delta.get("type"))
+                    .and_then(Value::as_str)
+                {
+                    Some("text_delta") => {
+                        let text = delta
+                            .and_then(|delta| delta.get("text"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if text.is_empty() {
+                            Some(Vec::new())
+                        } else {
+                            Some(vec![claude_runtime_event(
+                                ProviderRuntimeEventType::Content,
+                                session_id,
+                                "delta",
+                                &native_type,
+                            )
+                            .with_payload("role", json!("assistant"))
+                            .with_payload("text", json!(text))])
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(partial_json) = delta
+                            .and_then(|delta| delta.get("partial_json"))
+                            .and_then(Value::as_str)
+                        {
+                            if let Some(last) = self.pending_blocks.last_mut() {
+                                last.input_json.push_str(partial_json);
+                            }
+                        }
+                        Some(Vec::new())
+                    }
+                    _ => Some(Vec::new()),
+                }
+            }
+            "assistant" => {
+                let content = event
+                    .pointer("/message/content")
+                    .or_else(|| event.get("content"))
+                    .and_then(Value::as_array)?;
+                let content_event = self.content_array_to_event(session_id, &native_type, content);
+                self.assistant_finalized = true;
+                self.pending_blocks.clear();
+                Some(vec![content_event])
+            }
+            "message_stop" => {
+                if self.assistant_finalized {
+                    self.reset();
+                    return Some(Vec::new());
+                }
+                let tool_calls = self.pending_tool_calls();
+                self.reset();
+                Some(vec![claude_content_message_event(
+                    session_id,
+                    &native_type,
+                    String::new(),
+                    tool_calls,
+                    true,
+                )])
+            }
+            "message_delta" => {
+                let stop_reason = event
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match stop_reason {
+                    "refusal" => Some(vec![claude_runtime_event(
+                        ProviderRuntimeEventType::Error,
+                        session_id,
+                        "warning",
+                        &native_type,
+                    )
+                    .with_payload(
+                        "message",
+                        json!("Claude declined to continue (policy refusal)."),
+                    )
+                    .with_payload("terminal", json!(false))]),
+                    "max_tokens" => Some(vec![claude_runtime_event(
+                        ProviderRuntimeEventType::Error,
+                        session_id,
+                        "warning",
+                        &native_type,
+                    )
+                    .with_payload(
+                        "message",
+                        json!("Response cut off - hit max_tokens. Ask Claude to continue."),
+                    )
+                    .with_payload("terminal", json!(false))]),
+                    _ => Some(Vec::new()),
+                }
+            }
+            "user" => {
+                let content = event
+                    .pointer("/message/content")
+                    .or_else(|| event.get("content"))
+                    .and_then(Value::as_array);
+                let Some(content) = content else {
+                    self.reset();
+                    return Some(Vec::new());
+                };
+                let events = content
+                    .iter()
+                    .filter_map(|block| {
+                        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                            return None;
+                        }
+                        let id = block.get("tool_use_id").and_then(Value::as_str)?;
+                        Some(
+                            claude_runtime_event(
+                                ProviderRuntimeEventType::Tool,
+                                session_id,
+                                "completed",
+                                &native_type,
+                            )
+                            .with_item_id(id)
+                            .with_payload("id", json!(id))
+                            .with_payload("result", json!(claude_tool_result_text(block)))
+                            .with_payload(
+                                "isError",
+                                json!(block
+                                    .get("is_error")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false)),
+                            ),
+                        )
+                    })
+                    .collect();
+                self.reset();
+                Some(events)
+            }
+            "result" => {
+                let usage = event.get("usage");
+                let input_tokens = total_claude_input_tokens(usage);
+                let output_tokens = usage
+                    .and_then(|usage| usage.get("output_tokens"))
+                    .and_then(Value::as_u64)
+                    .or_else(|| event.get("output_tokens").and_then(Value::as_u64))
+                    .unwrap_or(0);
+                let total_tokens = input_tokens + output_tokens;
+                let is_error = event
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut turn = claude_runtime_event(
+                    ProviderRuntimeEventType::Turn,
+                    session_id,
+                    "completed",
+                    &native_type,
+                )
+                .with_payload(
+                    "usage",
+                    json!({
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
+                    }),
+                )
+                .with_payload("inputTokens", json!(input_tokens))
+                .with_payload("outputTokens", json!(output_tokens))
+                .with_payload("totalTokens", json!(total_tokens))
+                .with_payload("isError", json!(is_error));
+                if let Some(cost) = event.get("total_cost_usd").and_then(Value::as_f64) {
+                    turn = turn.with_payload("costUsd", json!(cost));
+                }
+                if let Some(context_max) = claude_context_window_from_model_usage(&event) {
+                    turn = turn.with_payload("contextMax", json!(context_max));
+                }
+                if is_error {
+                    if let Some(result) = event.get("result") {
+                        turn = turn.with_payload("error", result.clone());
+                    }
+                }
+                self.reset();
+                Some(vec![turn])
+            }
+            "error" => {
+                let message = match event.get("error") {
+                    Some(Value::String(message)) => message.clone(),
+                    Some(Value::Object(error)) => error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Claude reported an error.")
+                        .to_string(),
+                    _ => event
+                        .get("result")
+                        .or_else(|| event.get("message_text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Claude reported an error.")
+                        .to_string(),
+                };
+                self.reset();
+                Some(vec![claude_runtime_event(
+                    ProviderRuntimeEventType::Error,
+                    session_id,
+                    "error",
+                    &native_type,
+                )
+                .with_payload("message", json!(message))])
+            }
+            _ => None,
+        }
+    }
+}
+
+fn emit_claude_provider_event(
+    handle: &AppHandle,
+    mapper: &mut ClaudeRuntimeEventMapper,
+    session_id: &str,
+    data: &str,
+) {
+    if let Some(events) = mapper.runtime_events_from_data(session_id, data) {
+        for event in events {
+            emit_provider_runtime_event(handle, event);
+        }
+    } else {
+        emit_provider_event(handle, ANTHROPIC_PROVIDER_ID, session_id, data);
+    }
+}
 
 // Claude CLI invocation needs every flag threaded through as a distinct argument; bundling
 // these would just introduce an internal struct that maps 1:1 to parameters, with no real gain.
@@ -483,13 +1131,14 @@ fn spawn_and_stream(
         safe_eprintln!("[claude] Reader thread started for {} (gen {})", sid, gen);
         let reader = std::io::BufReader::new(stdout);
         let mut had_output = false;
+        let mut runtime_mapper = ClaudeRuntimeEventMapper::default();
         for line in reader.lines() {
             match line {
                 Ok(line) if line.trim().is_empty() => continue,
                 Ok(line) => {
                     had_output = true;
                     let data = cap_event_size(line);
-                    emit_provider_event(&handle, "anthropic", &sid, &data);
+                    emit_claude_provider_event(&handle, &mut runtime_mapper, &sid, &data);
                     if let Err(e) = handle.emit(
                         "claude-event",
                         ClaudeEvent {
@@ -532,7 +1181,7 @@ fn spawn_and_stream(
                 "result": error_msg
             })
             .to_string();
-            emit_provider_event(&handle, "anthropic", &sid, &data);
+            emit_claude_provider_event(&handle, &mut runtime_mapper, &sid, &data);
             if let Err(e) = handle.emit(
                 "claude-event",
                 ClaudeEvent {
@@ -628,6 +1277,12 @@ impl ClaudeAdapter {
             capabilities: ProviderAdapterCapabilities {
                 session_model_switch: ProviderSessionModelSwitchMode::InSession,
                 history: ProviderHistoryCapabilities::FULL,
+                mcp: true,
+                plan: true,
+                images: true,
+                hook_log: true,
+                native_slash_commands: true,
+                compact: true,
             },
         }
     }
@@ -872,6 +1527,14 @@ impl ProviderAdapter for ClaudeAdapter {
         &self.capabilities
     }
 
+    fn snapshot(&self) -> ProviderSnapshot {
+        snapshot_from_descriptor(
+            &ANTHROPIC_SNAPSHOT_DESCRIPTOR,
+            self.capabilities(),
+            resolve_claude_path(),
+        )
+    }
+
     fn history_truncate(
         &self,
         req: ProviderHistoryRequest,
@@ -946,5 +1609,152 @@ impl ProviderAdapter for ClaudeAdapter {
             "status": "applied",
             "method": "deleted",
         }))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn mapped(mapper: &mut ClaudeRuntimeEventMapper, line: Value) -> Vec<Value> {
+        mapper
+            .runtime_events_from_data("claude-session", &line.to_string())
+            .unwrap()
+            .into_iter()
+            .map(ProviderRuntimeEvent::into_value)
+            .collect()
+    }
+
+    #[test]
+    fn claude_runtime_mapper_emits_session_and_mcp_envelopes() {
+        let mut mapper = ClaudeRuntimeEventMapper::default();
+        let events = mapped(
+            &mut mapper,
+            json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "native-claude-session",
+                "model": "sonnet[1m]",
+                "mcp_servers": [{ "name": "terminal-64", "status": "ready" }]
+            }),
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "provider.session");
+        assert_eq!(events[0]["provider"], ANTHROPIC_PROVIDER_ID);
+        assert_eq!(events[0]["sessionId"], "claude-session");
+        assert_eq!(events[0]["threadId"], "native-claude-session");
+        assert_eq!(events[0]["phase"], "started");
+        assert_eq!(events[0]["model"], "sonnet[1m]");
+        assert_eq!(events[0]["contextMax"], 1_000_000);
+        assert_eq!(events[1]["type"], "provider.mcp");
+        assert_eq!(events[1]["phase"], "status");
+        assert_eq!(events[1]["servers"][0]["name"], "terminal-64");
+    }
+
+    #[test]
+    fn claude_runtime_mapper_hydrates_streaming_content_tools_and_result() {
+        let mut mapper = ClaudeRuntimeEventMapper::default();
+
+        let turn_start = mapped(&mut mapper, json!({ "type": "stream_request_start" }));
+        assert_eq!(turn_start[0]["type"], "provider.turn");
+        assert_eq!(turn_start[0]["phase"], "started");
+
+        let text_delta = mapped(
+            &mut mapper,
+            json!({
+                "type": "content_block_delta",
+                "delta": { "type": "text_delta", "text": "hello" }
+            }),
+        );
+        assert_eq!(text_delta[0]["type"], "provider.content");
+        assert_eq!(text_delta[0]["phase"], "delta");
+        assert_eq!(text_delta[0]["text"], "hello");
+
+        let no_events = mapped(
+            &mut mapper,
+            json!({
+                "type": "content_block_start",
+                "content_block": { "type": "tool_use", "id": "tool-1", "name": "Read" }
+            }),
+        );
+        assert!(no_events.is_empty());
+
+        let no_events = mapped(
+            &mut mapper,
+            json!({
+                "type": "content_block_delta",
+                "delta": { "type": "input_json_delta", "partial_json": "{\"file_path\":\"src/main.ts\"}" }
+            }),
+        );
+        assert!(no_events.is_empty());
+
+        let message = mapped(&mut mapper, json!({ "type": "message_stop" }));
+        assert_eq!(message[0]["type"], "provider.content");
+        assert_eq!(message[0]["phase"], "message");
+        assert_eq!(message[0]["useBufferedText"], true);
+        assert_eq!(message[0]["toolCalls"][0]["id"], "tool-1");
+        assert_eq!(message[0]["toolCalls"][0]["name"], "Read");
+        assert_eq!(
+            message[0]["toolCalls"][0]["input"]["file_path"],
+            "src/main.ts"
+        );
+
+        let tool_result = mapped(
+            &mut mapper,
+            json!({
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": "done",
+                        "is_error": false
+                    }]
+                }
+            }),
+        );
+        assert_eq!(tool_result[0]["type"], "provider.tool");
+        assert_eq!(tool_result[0]["phase"], "completed");
+        assert_eq!(tool_result[0]["id"], "tool-1");
+        assert_eq!(tool_result[0]["result"], "done");
+        assert_eq!(tool_result[0]["isError"], false);
+
+        let completed = mapped(
+            &mut mapper,
+            json!({
+                "type": "result",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 4
+                },
+                "total_cost_usd": 0.12,
+                "modelUsage": {
+                    "claude": { "contextWindow": 200000 }
+                },
+                "is_error": false
+            }),
+        );
+        assert_eq!(completed[0]["type"], "provider.turn");
+        assert_eq!(completed[0]["phase"], "completed");
+        assert_eq!(completed[0]["usage"]["input_tokens"], 15);
+        assert_eq!(completed[0]["usage"]["output_tokens"], 4);
+        assert_eq!(completed[0]["usage"]["total_tokens"], 19);
+        assert_eq!(completed[0]["costUsd"], 0.12);
+        assert_eq!(completed[0]["contextMax"], 200000);
+    }
+
+    #[test]
+    fn claude_runtime_mapper_falls_back_for_unknown_legacy_shapes() {
+        let mut mapper = ClaudeRuntimeEventMapper::default();
+        assert!(mapper
+            .runtime_events_from_data("claude-session", r#"{"type":"future_event"}"#)
+            .is_none());
+        assert!(mapper
+            .runtime_events_from_data("claude-session", "not json")
+            .is_none());
     }
 }

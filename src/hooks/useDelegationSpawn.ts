@@ -24,8 +24,6 @@ interface UseDelegationSpawnOptions {
   selectedProvider: ProviderId;
   permissionMode: PermissionMode;
   selectedControls: ProviderControlValueMap;
-  selectedModel: string;
-  selectedEffort: string;
   selectedProviderPermissionId: string;
   addUserMessage: (sessionId: string, text: string) => void;
 }
@@ -36,8 +34,6 @@ export function useDelegationSpawn({
   selectedProvider,
   permissionMode,
   selectedControls,
-  selectedModel,
-  selectedEffort,
   selectedProviderPermissionId,
   addUserMessage,
 }: UseDelegationSpawnOptions) {
@@ -76,8 +72,6 @@ export function useDelegationSpawn({
         parentSession: parentSess,
         selectedProvider,
         selectedControls,
-        selectedModel,
-        selectedEffort,
         selectedProviderPermissionId,
       });
 
@@ -117,8 +111,6 @@ export function useDelegationSpawn({
             value,
           );
         }
-        useProviderSessionStore.getState().setSelectedModel(childSessionId, childRuntime.selectedModel);
-        useProviderSessionStore.getState().setSelectedEffort(childSessionId, childRuntime.selectedEffort);
         useProviderSessionStore.getState().setProviderPermission(
           childSessionId,
           childRuntime.provider,
@@ -156,8 +148,6 @@ export function useDelegationSpawn({
       selectedProvider,
       permissionMode,
       selectedControls,
-      selectedModel,
-      selectedEffort,
       selectedProviderPermissionId,
       addUserMessage,
     ],

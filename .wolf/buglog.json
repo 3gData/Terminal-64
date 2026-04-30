@@ -3103,6 +3103,369 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-04-30T01:15:24+02:00"
+    },
+    {
+      "id": "bug-162",
+      "timestamp": "2026-04-30T05:10:35+02:00",
+      "error_message": "`npm run typecheck` failed with exactOptionalPropertyTypes on runtimeToolResult: patch?: ProviderToolPatch | undefined was passed to buildProviderToolResult.",
+      "file": "src/contracts/providerEvents.ts",
+      "root_cause": "runtimePatch(value.patch) was called directly inside a conditional object spread, so TypeScript could not narrow the second call away from undefined under exact optional property types.",
+      "fix": "Stored runtimePatch(value.patch) in a local const before spreading, so the patch property is omitted unless a concrete ProviderToolPatch exists.",
+      "tags": [
+        "typescript",
+        "provider-events",
+        "exact-optional",
+        "typecheck"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T05:10:35+02:00"
+    },
+    {
+      "id": "bug-163",
+      "timestamp": "2026-04-30T05:10:35+02:00",
+      "error_message": "`cargo fmt --check` failed after adding Cursor runtime envelope helpers because rustfmt wanted multiline formatting in cursor_tool_entry.",
+      "file": "src-tauri/src/providers/cursor.rs",
+      "root_cause": "The new helper chain was not rustfmt-formatted.",
+      "fix": "Ran targeted rustfmt with --edition 2021 on the Rust files touched by the Events task.",
+      "tags": [
+        "rust",
+        "formatting",
+        "cursor",
+        "provider-events"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T05:10:35+02:00"
+    },
+    {
+      "id": "bug-164",
+      "timestamp": "2026-04-30T05:11:10+02:00",
+      "error_message": "npm run typecheck failed while Metadata was wiring provider runtime metadata. Remaining errors: src/lib/providerSnapshots.ts references missing values/placement fields on snapshot option/control descriptors.",
+      "file": "src/lib/providerSnapshots.ts",
+      "root_cause": "Concurrent provider snapshot/option descriptor work left providerSnapshots.ts out of sync with the descriptor types while Metadata changes typechecked past their own strict-shape errors.",
+      "fix": "Metadata fixed its own runtime metadata typing and fixture errors; providerSnapshots.ts remains owned by the Snapshot/Options agents.",
+      "tags": [
+        "frontend",
+        "typecheck",
+        "provider-snapshots",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T05:11:10+02:00"
+    },
+    {
+      "id": "bug-165",
+      "timestamp": "2026-04-30T03:12:54.393Z",
+      "error_message": "`npm run typecheck -- --pretty false` failed after snapshot IPC work with missing `providerSnapshots` helper exports and stale descriptor fields.",
+      "file": "src/lib/providerSnapshots.ts, src/contracts/providerSnapshot.ts, src-tauri/src/providers/snapshots.rs",
+      "root_cause": "The initial snapshot helper only exposed the backend loader while parallel Picker UI already imported display/control helper APIs, and parallel Options work changed descriptors from placement/values to scope/options.",
+      "fix": "Added snapshot display/control/permission/capability helper exports and aligned frontend plus backend snapshot descriptors with kind/scope/options. Reran npm typecheck successfully.",
+      "tags": [
+        "typecheck",
+        "provider-snapshots",
+        "parallel-agents",
+        "provider-controls"
+      ],
+      "related_bugs": [
+        "bug-162",
+        "bug-163",
+        "bug-164"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:12:54.394Z"
+    },
+    {
+      "id": "bug-166",
+      "timestamp": "2026-04-30T03:15:38.852Z",
+      "error_message": "`cargo clippy --all-targets -- -D warnings` failed because the new registry snapshot test used `expect()`.",
+      "file": "src-tauri/src/providers/registry.rs",
+      "root_cause": "The registry snapshot conformance test used Option::expect for missing snapshots, but this repository denies clippy::expect_used even in tests.",
+      "fix": "Replaced expect() with explicit match branches that panic with a targeted message only on missing required snapshots. Reran clippy successfully.",
+      "tags": [
+        "rust",
+        "clippy",
+        "provider-snapshots",
+        "tests"
+      ],
+      "related_bugs": [
+        "bug-165"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:15:38.852Z"
+    },
+    {
+      "id": "bug-167",
+      "timestamp": "2026-04-30T03:21:24Z",
+      "error_message": "`cargo test providers::snapshots providers::registry -- --nocapture` failed with `unexpected argument 'providers::registry'`.",
+      "file": "N/A",
+      "root_cause": "Cargo accepts only one test name filter before the `--` test harness arguments; passing two module filters is a command invocation error.",
+      "fix": "Reran the focused provider tests with a single `providers::` filter, which covered the snapshot and registry tests successfully.",
+      "tags": [
+        "cargo",
+        "tests",
+        "command-invocation"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:21:24Z"
+    },
+    {
+      "id": "bug-168",
+      "timestamp": "2026-04-30T03:41:59Z",
+      "error_message": "`cargo test providers::registry -- --nocapture` failed with E0061: `emit_provider_runtime_event` in `src/providers/cursor.rs:557` was called with 4 arguments but the helper in `src/providers/mod.rs` takes 2.",
+      "file": "src-tauri/src/providers/cursor.rs",
+      "root_cause": "Concurrent provider event-contract edits updated the shared runtime-event helper signature while Cursor emission code still used the previous provider/session/value argument shape.",
+      "fix": "Not fixed by the Snapshots agent because the failing code belongs to the EventContract task; reported the blocker in team chat and left snapshot ownership changes unchanged.",
+      "tags": [
+        "rust",
+        "cargo-test",
+        "provider-events",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:41:59Z"
+    },
+    {
+      "id": "bug-169",
+      "timestamp": "2026-04-30T03:42:57Z",
+      "error_message": "`cargo test providers::snapshots -- --nocapture` and `cargo test providers::registry -- --nocapture` failed with E0061: `emit_cursor_runtime_events` in `src/providers/cursor.rs` takes 2 arguments but calls at lines 600, 637, and 758 supplied 3.",
+      "file": "src-tauri/src/providers/cursor.rs",
+      "root_cause": "Concurrent provider event-contract edits changed the Cursor runtime-event helper signature while some call sites still passed an explicit session id.",
+      "fix": "Not fixed by the Capabilities agent because the failing code belongs to the EventContract task; reported the blocker in team chat and continued with capability-only static checks.",
+      "tags": [
+        "rust",
+        "cargo-test",
+        "provider-events",
+        "parallel-agents"
+      ],
+      "related_bugs": [
+        "bug-168"
+      ],
+      "occurrences": 2,
+      "last_seen": "2026-04-30T03:43:00Z"
+    },
+    {
+      "id": "bug-170",
+      "timestamp": "2026-04-30T03:44:21Z",
+      "error_message": "`cargo test providers::events -- --nocapture` failed with E0061 because Cursor runtime-event helper calls still supplied the removed session_id argument.",
+      "file": "src-tauri/src/providers/cursor.rs",
+      "root_cause": "The EventContract helper refactor changed `emit_cursor_runtime_events` to take only the AppHandle and `Vec<ProviderRuntimeEvent>`, but three remaining call sites still used the old `(handle, session_id, events)` signature.",
+      "fix": "Removed the stale session_id argument at the MCP status, synthesized error, and synthesized empty-result call sites, then reran rustfmt.",
+      "tags": [
+        "rust",
+        "cargo-test",
+        "provider-events",
+        "cursor"
+      ],
+      "related_bugs": [
+        "bug-168",
+        "bug-169"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:44:21Z"
+    },
+    {
+      "id": "bug-171",
+      "timestamp": "2026-04-30T03:45:02Z",
+      "error_message": "ProviderRuntimeEvent/provider-event suppression was provider-scoped, so one migrated session could drop legacy events for other active sessions on the same provider.",
+      "file": "src/lib/providerEventIngestion.ts",
+      "root_cause": "`subscribeProviderEventIngestion` tracked providers that had emitted on the shared `provider-event` topic in a `Set<ProviderId>`, then suppressed all legacy Claude/OpenAI events for that provider instead of only suppressing duplicate events for the same provider session.",
+      "fix": "Refactored ingestion through a pure router keyed by `(provider, sessionId)`, kept legacy events flowing for other sessions/providers, decoded canonical `ProviderRuntimeEvent` envelopes generically with Cursor preserving its decoder path, and added mixed Cursor/Claude/OpenAI frontend fixtures.",
+      "tags": [
+        "provider-events",
+        "frontend",
+        "legacy-compatibility",
+        "session-scoping"
+      ],
+      "related_bugs": [
+        "bug-124",
+        "bug-129"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:45:02Z"
+    },
+    {
+      "id": "bug-172",
+      "timestamp": "2026-04-30T03:46:03Z",
+      "error_message": "`cargo check` failed with E0063/E0308 in `src/providers/snapshots.rs`: `ProviderSnapshotOptionValue` initializers are missing `value`, and `default_value` now expects `ProviderSnapshotControlValue` instead of `String`.",
+      "file": "src-tauri/src/providers/snapshots.rs",
+      "root_cause": "Concurrent control-kind schema edits changed the Rust snapshot wire types while snapshot builder initializers had not yet been updated to the new field/type shape.",
+      "fix": "Not fixed by EventContract because this belongs to the active snapshot/control schema tasks; reported the blocker in team chat after verifying event-specific tests passed.",
+      "tags": [
+        "rust",
+        "cargo-check",
+        "provider-snapshots",
+        "control-kinds",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:46:03Z"
+    },
+    {
+      "id": "bug-173",
+      "timestamp": "2026-04-30T03:47:13Z",
+      "error_message": "`npm run typecheck -- --pretty false` failed after broadening provider control values with TS2322/TS2345/TS2379/TS1361 errors in delegationChildRuntime.ts, providers.ts, providerSnapshots.ts, and providerConformance.verification.ts.",
+      "file": "src/lib/providers.ts",
+      "root_cause": "The provider control value union widened selected control/default/option values beyond strings, but a few helpers still accepted string-only option types or returned generic selected control values into legacy string fields.",
+      "fix": "Added a widened AnyProviderControlOption helper type, moved providerControlOptionValue to a value import, cast manifest control options at generic snapshot/permission boundaries, and narrowed legacy selected model/effort reads to strings.",
+      "tags": [
+        "typescript",
+        "provider-controls",
+        "snapshots",
+        "typecheck"
+      ],
+      "related_bugs": [
+        "bug-172"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:47:13Z"
+    },
+    {
+      "id": "bug-174",
+      "timestamp": "2026-04-30T03:47:57Z",
+      "error_message": "`cargo fmt --check` failed because `src-tauri/src/providers/snapshots.rs` import ordering did not match rustfmt after provider snapshot control value types were added.",
+      "file": "src-tauri/src/providers/snapshots.rs",
+      "root_cause": "Concurrent control-kind edits changed the snapshot imports after the Capabilities patch had already formatted the file.",
+      "fix": "Ran targeted `rustfmt --edition 2021 src-tauri/src/providers/snapshots.rs`; reran `cargo fmt --check`, `git diff --check`, snapshot/registry tests, and clippy successfully.",
+      "tags": [
+        "rust",
+        "rustfmt",
+        "provider-snapshots",
+        "parallel-agents"
+      ],
+      "related_bugs": [
+        "bug-172"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T03:47:57Z"
+    },
+    {
+      "id": "bug-175",
+      "timestamp": "2026-04-30T04:02:02Z",
+      "error_message": "`npm run typecheck` failed with TS2339 at `src/lib/providerConformance.verification.ts(537,18)`: `Property 'reason' does not exist on type 'ProviderHydrateResult'`.",
+      "file": "src/lib/providerConformance.verification.ts",
+      "root_cause": "Concurrent Conformance fixture edits read `reason` from the hydrate result union without first narrowing away the successful `messages` variant.",
+      "fix": "Not fixed by LegacyAudit because the file is in Conformance's active edit scope; reported the blocker in team chat and left the file untouched.",
+      "tags": [
+        "typescript",
+        "typecheck",
+        "provider-conformance",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:02:02Z"
+    },
+    {
+      "id": "bug-176",
+      "timestamp": "2026-04-30T04:04:39Z",
+      "error_message": "`npm run typecheck` failed with TS2339 at `src/lib/providerConformance.verification.ts(537,18)`: `Property 'reason' does not exist on type 'ProviderHydrateResult'`.",
+      "file": "src/lib/providerConformance.verification.ts",
+      "root_cause": "The unsupported hydrate fixture asserted the `status` with a helper that does not narrow the `ProviderHydrateResult` discriminated union before reading `reason`.",
+      "fix": "Changed the hydrate status check to an assertion on `hydrate.status === \"unsupported\"`, which narrows the union before the reason assertion.",
+      "tags": [
+        "typescript",
+        "typecheck",
+        "provider-conformance"
+      ],
+      "related_bugs": [
+        "bug-175"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:04:39Z"
+    },
+    {
+      "id": "bug-177",
+      "timestamp": "2026-04-30T04:04:39Z",
+      "error_message": "`npm run typecheck` failed with TS2339 at `src/lib/anthropicProviderEvents.verification.ts(264,29)`: `Property 'message' does not exist on type 'NormalizedProviderEvent'`.",
+      "file": "src/lib/anthropicProviderEvents.verification.ts",
+      "root_cause": "A concurrent Claude event verification fixture reads the error-event `message` field without first narrowing the normalized event union to `kind === \"error\"`.",
+      "fix": "Not fixed by Conformance because the file is owned by the concurrent ClaudeEvents task; reported the blocker in team chat.",
+      "tags": [
+        "typescript",
+        "typecheck",
+        "provider-events",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:04:39Z"
+    },
+    {
+      "id": "bug-178",
+      "timestamp": "2026-04-30T04:04:58Z",
+      "error_message": "`cargo clippy --all-targets -- -D warnings` failed with clippy::question_mark at `src-tauri/src/providers/claude.rs:589`: `let Some(content) = content else { return None; }` can be `let content = content?;`.",
+      "file": "src-tauri/src/providers/claude.rs",
+      "root_cause": "A concurrent Claude ProviderRuntimeEvent mapper change introduced a let-else early return pattern that violates the repository's denied Clippy question_mark lint.",
+      "fix": "Not fixed by DescriptorDrift because the code path is owned by the concurrent ClaudeEvents task; reported the blocker in team chat.",
+      "tags": [
+        "rust",
+        "clippy",
+        "provider-events",
+        "parallel-agents"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:04:58Z"
+    },
+    {
+      "id": "bug-179",
+      "timestamp": "2026-04-30T04:05:07Z",
+      "error_message": "`npm run typecheck` failed with TS2339 at `src/lib/anthropicProviderEvents.verification.ts(264,29)`: `Property 'message' does not exist on type 'NormalizedProviderEvent'`.",
+      "file": "src/lib/anthropicProviderEvents.verification.ts",
+      "root_cause": "The Anthropic runtime error fixture used an equality helper on `message.event.kind`; that helper checks the value but does not narrow the `NormalizedProviderEvent` union.",
+      "fix": "Replaced the equality helper with an assertion on `message.event.kind === \"error\"` before reading the error message field.",
+      "tags": [
+        "typescript",
+        "typecheck",
+        "provider-events",
+        "anthropic"
+      ],
+      "related_bugs": [
+        "bug-177"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:05:07Z"
+    },
+    {
+      "id": "bug-180",
+      "timestamp": "2026-04-30T04:05:07Z",
+      "error_message": "`cargo clippy --all-targets -- -D warnings` failed with clippy::question_mark at `src-tauri/src/providers/claude.rs:589`: `let Some(content) = content else { return None; }` can be `let content = content?;`.",
+      "file": "src-tauri/src/providers/claude.rs",
+      "root_cause": "The Claude ProviderRuntimeEvent mapper used let-else to return `None` from an `Option`-returning function, which triggers the repository's denied `question_mark` lint.",
+      "fix": "Changed the assistant content extraction to use `and_then(Value::as_array)?` before building the runtime content envelope.",
+      "tags": [
+        "rust",
+        "clippy",
+        "provider-events",
+        "anthropic"
+      ],
+      "related_bugs": [
+        "bug-178"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:05:07Z"
+    },
+    {
+      "id": "bug-181",
+      "timestamp": "2026-04-30T04:06:06Z",
+      "error_message": "`cargo clippy --all-targets -- -D warnings` failed with clippy::unwrap_used in new Codex ProviderRuntimeEvent tests at `src-tauri/src/providers/codex.rs`.",
+      "file": "src-tauri/src/providers/codex.rs",
+      "root_cause": "The new Rust tests used `into_iter().next().unwrap()` after asserting vector length, but the repository denies `unwrap_used` in tests too.",
+      "fix": "Replaced the unwrap-based extraction with indexed clones after the explicit length assertions.",
+      "tags": [
+        "rust",
+        "clippy",
+        "provider-events",
+        "openai"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-04-30T04:06:06Z"
     }
   ]
 }

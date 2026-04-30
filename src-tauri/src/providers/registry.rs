@@ -21,6 +21,7 @@ use crate::providers::traits::{
     ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderPreparedCommand,
     ProviderSendPromptRequest,
 };
+use crate::types::ProviderSnapshot;
 
 pub struct ProviderRegistry {
     adapters: HashMap<ProviderKind, Arc<dyn ProviderAdapter>>,
@@ -43,7 +44,7 @@ impl ProviderRegistry {
         );
         // Keep the full capability shape live; adding a capability field should
         // force registry-level consideration instead of becoming silent dead code.
-        let _model_switch_capability = adapter.capabilities().session_model_switch;
+        let _registered_capabilities = *adapter.capabilities();
         self.adapters.insert(kind, adapter);
     }
 
@@ -120,6 +121,27 @@ impl ProviderRegistry {
         self.get(kind)
             .map(|adapter| adapter.capabilities().history)
             .unwrap_or(ProviderHistoryCapabilities::NONE)
+    }
+
+    pub fn snapshots(&self) -> Vec<ProviderSnapshot> {
+        let ordered = [
+            ProviderKind::ClaudeAgent,
+            ProviderKind::Codex,
+            ProviderKind::Cursor,
+            ProviderKind::OpenCode,
+        ];
+        let mut snapshots = Vec::new();
+        for kind in ordered {
+            if let Some(adapter) = self.get(kind) {
+                snapshots.push(adapter.snapshot());
+            }
+        }
+        for (kind, adapter) in self.iter() {
+            if !ordered.contains(kind) {
+                snapshots.push(adapter.snapshot());
+            }
+        }
+        snapshots
     }
 
     fn history_adapter_or_unsupported(
@@ -244,6 +266,12 @@ mod tests {
                 capabilities: ProviderAdapterCapabilities {
                     session_model_switch: ProviderSessionModelSwitchMode::InSession,
                     history,
+                    mcp: false,
+                    plan: false,
+                    images: false,
+                    hook_log: false,
+                    native_slash_commands: false,
+                    compact: false,
                 },
                 calls,
             }
@@ -261,6 +289,59 @@ mod tests {
 
         fn capabilities(&self) -> &ProviderAdapterCapabilities {
             &self.capabilities
+        }
+
+        fn snapshot(&self) -> ProviderSnapshot {
+            let session_model_switch = match self.capabilities.session_model_switch {
+                ProviderSessionModelSwitchMode::InSession => "in-session",
+                ProviderSessionModelSwitchMode::Unsupported => "unsupported",
+            }
+            .to_string();
+            ProviderSnapshot {
+                id: format!("mock-{:?}", self.kind).to_ascii_lowercase(),
+                display: crate::types::ProviderSnapshotDisplay {
+                    label: "Mock".to_string(),
+                    short_label: "Mock".to_string(),
+                    brand_title: "Mock Provider".to_string(),
+                    empty_state_label: "Mock".to_string(),
+                    default_session_name: "Mock".to_string(),
+                },
+                auth: crate::types::ProviderSnapshotAuth {
+                    status: "unknown".to_string(),
+                    label: "Mock CLI".to_string(),
+                    detail: None,
+                },
+                install: crate::types::ProviderSnapshotInstall {
+                    status: "installed".to_string(),
+                    command: "mock".to_string(),
+                    path: None,
+                    version: None,
+                },
+                status: crate::types::ProviderSnapshotStatus {
+                    state: "available".to_string(),
+                    message: None,
+                },
+                models: Vec::new(),
+                options: Vec::new(),
+                capabilities: crate::types::ProviderSnapshotCapabilities {
+                    mcp: self.capabilities.mcp,
+                    plan: self.capabilities.plan,
+                    fork: self.capabilities.history.fork,
+                    rewind: self.capabilities.history.rewind,
+                    images: self.capabilities.images,
+                    hook_log: self.capabilities.hook_log,
+                    native_slash_commands: self.capabilities.native_slash_commands,
+                    compact: self.capabilities.compact,
+                    session_model_switch,
+                    history: crate::types::ProviderSnapshotHistoryCapabilities {
+                        hydrate: self.capabilities.history.hydrate,
+                        fork: self.capabilities.history.fork,
+                        rewind: self.capabilities.history.rewind,
+                        delete: self.capabilities.history.delete,
+                    },
+                },
+                slash_commands: Vec::new(),
+            }
         }
 
         fn create_session(
@@ -343,6 +424,50 @@ mod tests {
 
     fn assert_provider_adapter<T: ProviderAdapter + Send + Sync + 'static>() {}
 
+    fn session_model_switch_label(mode: ProviderSessionModelSwitchMode) -> &'static str {
+        match mode {
+            ProviderSessionModelSwitchMode::InSession => "in-session",
+            ProviderSessionModelSwitchMode::Unsupported => "unsupported",
+        }
+    }
+
+    fn assert_snapshot_capabilities_match_adapter(adapter: &dyn ProviderAdapter) {
+        let capabilities = adapter.capabilities();
+        let snapshot = adapter.snapshot();
+
+        assert_eq!(
+            snapshot.capabilities.session_model_switch,
+            session_model_switch_label(capabilities.session_model_switch)
+        );
+        assert_eq!(
+            snapshot.capabilities.history.hydrate,
+            capabilities.history.hydrate
+        );
+        assert_eq!(
+            snapshot.capabilities.history.fork,
+            capabilities.history.fork
+        );
+        assert_eq!(
+            snapshot.capabilities.history.rewind,
+            capabilities.history.rewind
+        );
+        assert_eq!(
+            snapshot.capabilities.history.delete,
+            capabilities.history.delete
+        );
+        assert_eq!(snapshot.capabilities.mcp, capabilities.mcp);
+        assert_eq!(snapshot.capabilities.plan, capabilities.plan);
+        assert_eq!(snapshot.capabilities.fork, capabilities.history.fork);
+        assert_eq!(snapshot.capabilities.rewind, capabilities.history.rewind);
+        assert_eq!(snapshot.capabilities.images, capabilities.images);
+        assert_eq!(snapshot.capabilities.hook_log, capabilities.hook_log);
+        assert_eq!(
+            snapshot.capabilities.native_slash_commands,
+            capabilities.native_slash_commands
+        );
+        assert_eq!(snapshot.capabilities.compact, capabilities.compact);
+    }
+
     #[test]
     fn concrete_provider_adapters_implement_common_contract() {
         assert_provider_adapter::<ClaudeAdapter>();
@@ -358,22 +483,148 @@ mod tests {
         for (expected, adapter) in providers {
             assert_eq!(adapter.provider(), expected);
             let history = adapter.capabilities().history;
+            let snapshot = adapter.snapshot();
             match expected {
                 ProviderKind::ClaudeAgent | ProviderKind::Codex => {
                     assert!(history.hydrate);
                     assert!(history.fork);
                     assert!(history.rewind);
                     assert!(history.delete);
+                    assert!(snapshot.capabilities.history.hydrate);
+                    assert!(snapshot.capabilities.history.rewind);
                 }
                 ProviderKind::Cursor => {
                     assert!(!history.hydrate);
                     assert!(!history.fork);
                     assert!(!history.rewind);
                     assert!(!history.delete);
+                    assert_eq!(snapshot.id, "cursor");
+                    assert!(!snapshot.capabilities.history.hydrate);
+                    assert!(!snapshot.capabilities.history.rewind);
                 }
                 ProviderKind::OpenCode => unreachable!("OpenCode has no adapter yet"),
             }
         }
+    }
+
+    #[test]
+    fn registered_provider_snapshots_expose_adapter_owned_capabilities() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::ClaudeAgent, Arc::new(ClaudeAdapter::new()));
+        registry.register(ProviderKind::Codex, Arc::new(CodexAdapter::new()));
+        registry.register(ProviderKind::Cursor, Arc::new(CursorAdapter::new()));
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), registry.kinds().len());
+
+        for (kind, expected_id) in [
+            (ProviderKind::ClaudeAgent, "anthropic"),
+            (ProviderKind::Codex, "openai"),
+            (ProviderKind::Cursor, "cursor"),
+        ] {
+            let adapter = registry.get(kind).unwrap();
+            assert_snapshot_capabilities_match_adapter(adapter.as_ref());
+
+            let snapshot = adapter.snapshot();
+            assert_eq!(snapshot.id, expected_id);
+            assert!(!snapshot.options.is_empty());
+            assert!(!snapshot.models.is_empty());
+
+            let registry_snapshot = snapshots
+                .iter()
+                .find(|candidate| candidate.id == expected_id)
+                .unwrap();
+            assert_eq!(
+                registry_snapshot.capabilities.history.hydrate,
+                snapshot.capabilities.history.hydrate
+            );
+            assert_eq!(
+                registry_snapshot.capabilities.history.fork,
+                snapshot.capabilities.history.fork
+            );
+            assert_eq!(
+                registry_snapshot.capabilities.history.rewind,
+                snapshot.capabilities.history.rewind
+            );
+            assert_eq!(
+                registry_snapshot.capabilities.history.delete,
+                snapshot.capabilities.history.delete
+            );
+            assert_eq!(
+                registry_snapshot.capabilities.mcp,
+                snapshot.capabilities.mcp
+            );
+            assert_eq!(
+                registry_snapshot.capabilities.session_model_switch,
+                snapshot.capabilities.session_model_switch
+            );
+        }
+    }
+
+    #[test]
+    fn registry_snapshots_include_registered_provider_descriptors() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::ClaudeAgent, Arc::new(ClaudeAdapter::new()));
+        registry.register(ProviderKind::Codex, Arc::new(CodexAdapter::new()));
+        registry.register(ProviderKind::Cursor, Arc::new(CursorAdapter::new()));
+
+        let snapshots = registry.snapshots();
+        let ids: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["anthropic", "openai", "cursor"]);
+
+        let anthropic = match snapshots.iter().find(|snapshot| snapshot.id == "anthropic") {
+            Some(snapshot) => snapshot,
+            None => panic!("anthropic snapshot missing"),
+        };
+        assert_eq!(anthropic.display.short_label, "Claude");
+        assert!(anthropic.capabilities.history.hydrate);
+        assert!(anthropic.options.iter().any(|option| {
+            option.id == "model"
+                && option.kind == "select"
+                && option.scope == "topbar"
+                && option
+                    .options
+                    .iter()
+                    .any(|value| value.id == "sonnet" && value.default == Some(true))
+        }));
+
+        let cursor = match snapshots.iter().find(|snapshot| snapshot.id == "cursor") {
+            Some(snapshot) => snapshot,
+            None => panic!("cursor snapshot missing"),
+        };
+        assert!(!cursor.capabilities.history.hydrate);
+        assert!(cursor
+            .options
+            .iter()
+            .any(|option| option.id == "apply-mode" && option.scope == "composer"));
+    }
+
+    #[test]
+    fn registry_snapshots_delegate_to_adapter_snapshot_hook() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let adapter = Arc::new(MockAdapter::new(
+            ProviderKind::OpenCode,
+            ProviderHistoryCapabilities {
+                hydrate: true,
+                fork: false,
+                rewind: false,
+                delete: true,
+            },
+            calls,
+        ));
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::OpenCode, adapter);
+
+        let snapshots = registry.snapshots();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id, "mock-opencode");
+        assert!(snapshots[0].capabilities.history.hydrate);
+        assert!(!snapshots[0].capabilities.history.rewind);
+        assert!(snapshots[0].capabilities.history.delete);
     }
 
     #[test]
@@ -519,5 +770,43 @@ mod tests {
             calls,
             vec!["history-hydrate:{\"session_id\":\"session-1\"}".to_string()]
         );
+    }
+
+    #[test]
+    fn registered_cursor_history_operations_return_unsupported() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderKind::Cursor, Arc::new(CursorAdapter::new()));
+
+        let capabilities = registry.history_capabilities(ProviderKind::Cursor);
+        assert!(!capabilities.hydrate);
+        assert!(!capabilities.fork);
+        assert!(!capabilities.rewind);
+        assert!(!capabilities.delete);
+
+        let rewind = registry
+            .history_truncate(ProviderKind::Cursor, json!({ "session_id": "cursor-1" }))
+            .unwrap();
+        let fork = registry
+            .history_fork(ProviderKind::Cursor, json!({ "session_id": "cursor-1" }))
+            .unwrap();
+        let hydrate = registry
+            .history_hydrate(ProviderKind::Cursor, json!({ "session_id": "cursor-1" }))
+            .unwrap();
+        let delete = registry
+            .history_delete(ProviderKind::Cursor, json!({ "session_id": "cursor-1" }))
+            .unwrap();
+
+        for (operation, response) in [
+            ("rewind", rewind),
+            ("fork", fork),
+            ("hydrate", hydrate),
+            ("delete", delete),
+        ] {
+            assert_eq!(response["status"], "unsupported");
+            assert_eq!(response["method"], "unsupported");
+            assert!(response["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(&format!("history {operation}"))));
+        }
     }
 }

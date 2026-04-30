@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import { PROVIDER_IDS, type ProviderId } from "../lib/providers";
+import { PROVIDER_IDS, type ProviderControlValue, type ProviderId } from "../lib/providers";
 import { DEFAULT_WIDGET_HOST_PROTECTION_MODE, isWidgetHostProtectionMode, type WidgetHostProtectionMode } from "../lib/widgetHostProtection";
 
 export interface QuickPaste {
@@ -20,7 +20,7 @@ export interface WidgetRenderModeResolution {
   fallbackReason: string | null;
 }
 
-export type ProviderControlDefaults = Record<string, Record<string, string | null>>;
+export type ProviderControlDefaults = Record<string, Record<string, ProviderControlValue>>;
 
 const WIDGET_NATIVE_WEBVIEW_READY: boolean = true;
 const DEFAULT_PROVIDER_AVAILABILITY = PROVIDER_IDS.reduce((availability, provider) => {
@@ -77,9 +77,9 @@ function normalizeProviderControlDefaults(value: unknown): ProviderControlDefaul
   const defaults: ProviderControlDefaults = {};
   for (const [provider, rawControls] of Object.entries(value)) {
     if (!rawControls || typeof rawControls !== "object" || Array.isArray(rawControls)) continue;
-    const controls: Record<string, string | null> = {};
+    const controls: Record<string, ProviderControlValue> = {};
     for (const [controlId, rawValue] of Object.entries(rawControls)) {
-      if (typeof rawValue === "string" || rawValue === null) {
+      if (typeof rawValue === "string" || typeof rawValue === "boolean" || typeof rawValue === "number" || rawValue === null) {
         controls[controlId] = rawValue;
       }
     }

@@ -1,8 +1,9 @@
 //! Cursor CLI adapter for the provider registry.
 //!
 //! Cursor's CLI exposes a non-interactive `cursor-agent -p` mode with
-//! `--output-format stream-json`. The stream is forwarded as generic
-//! `provider-event` payloads and normalized by the frontend decoder.
+//! `--output-format stream-json`. The adapter maps that stream into Terminal
+//! 64 `ProviderRuntimeEvent` envelopes before emitting shared `provider-event`
+//! payloads.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -12,13 +13,131 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 
-use crate::providers::emit_provider_event;
+use crate::providers::snapshots::{
+    snapshot_from_descriptor, SnapshotControlDescriptor, SnapshotDescriptor,
+    SnapshotDisplayDescriptor, SnapshotInstallDescriptor, SnapshotOptionDescriptor,
+};
 use crate::providers::traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandLifecycle,
     ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderKind,
     ProviderPreparedCommand, ProviderSendPromptRequest, ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
+use crate::providers::{
+    emit_provider_event, emit_provider_runtime_event, ProviderRuntimeEvent,
+    ProviderRuntimeEventType,
+};
+use crate::types::ProviderSnapshot;
+
+const CURSOR_MODEL_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::basic("auto", "Auto"),
+    SnapshotOptionDescriptor::basic("composer-2-fast", "Composer 2 Fast"),
+    SnapshotOptionDescriptor::basic("composer-2", "Composer 2"),
+    SnapshotOptionDescriptor::basic("composer-1.5", "Composer 1.5"),
+    SnapshotOptionDescriptor::basic("gpt-5.3-codex", "Codex 5.3"),
+    SnapshotOptionDescriptor::basic("gpt-5.3-codex-fast", "Codex 5.3 Fast"),
+    SnapshotOptionDescriptor::basic("gpt-5.3-codex-high", "Codex 5.3 High"),
+    SnapshotOptionDescriptor::basic("gpt-5.3-codex-xhigh", "Codex 5.3 Extra High"),
+    SnapshotOptionDescriptor::basic("gpt-5.3-codex-spark-preview", "Codex 5.3 Spark"),
+    SnapshotOptionDescriptor::basic("gpt-5.2", "GPT-5.2"),
+    SnapshotOptionDescriptor::basic("gpt-5.5-medium", "GPT-5.5 1M"),
+    SnapshotOptionDescriptor::basic("gpt-5.5-high", "GPT-5.5 1M High"),
+    SnapshotOptionDescriptor::basic("gpt-5.5-extra-high", "GPT-5.5 1M Extra High"),
+    SnapshotOptionDescriptor::basic("gpt-5.4-medium", "GPT-5.4 1M"),
+    SnapshotOptionDescriptor::basic("gpt-5.4-high", "GPT-5.4 1M High"),
+    SnapshotOptionDescriptor::basic("gpt-5.4-xhigh", "GPT-5.4 1M Extra High"),
+    SnapshotOptionDescriptor::basic("gpt-5.4-mini-medium", "GPT-5.4 Mini"),
+    SnapshotOptionDescriptor::basic("claude-opus-4-7-medium", "Opus 4.7 1M Medium"),
+    SnapshotOptionDescriptor::basic("claude-opus-4-7-high", "Opus 4.7 1M High"),
+    SnapshotOptionDescriptor::basic("claude-opus-4-7-thinking-high", "Opus 4.7 1M High Thinking"),
+    SnapshotOptionDescriptor::basic("claude-4.6-sonnet-medium", "Sonnet 4.6 1M"),
+    SnapshotOptionDescriptor::basic(
+        "claude-4.6-sonnet-medium-thinking",
+        "Sonnet 4.6 1M Thinking",
+    ),
+    SnapshotOptionDescriptor::basic("gemini-3.1-pro", "Gemini 3.1 Pro"),
+    SnapshotOptionDescriptor::basic("gemini-3-flash", "Gemini 3 Flash"),
+    SnapshotOptionDescriptor::basic("grok-4-20", "Grok 4.20"),
+    SnapshotOptionDescriptor::basic("grok-4-20-thinking", "Grok 4.20 Thinking"),
+    SnapshotOptionDescriptor::basic("kimi-k2.5", "Kimi K2.5"),
+];
+
+const CURSOR_MODE_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::basic("default", "Default"),
+    SnapshotOptionDescriptor::basic("ask", "Ask"),
+    SnapshotOptionDescriptor::basic("plan", "Plan"),
+];
+
+const CURSOR_PERMISSION_OPTIONS: &[SnapshotOptionDescriptor] = &[
+    SnapshotOptionDescriptor::described(
+        "default",
+        "Review",
+        "Propose changes without force-applying them",
+        "#89b4fa",
+        Some("review"),
+    ),
+    SnapshotOptionDescriptor::described(
+        "plan",
+        "Plan",
+        "Planning prompt without direct writes",
+        "#94e2d5",
+        Some("plan"),
+    ),
+    SnapshotOptionDescriptor::described(
+        "bypass_all",
+        "Force",
+        "Pass --force so Cursor can apply changes",
+        "#f38ba8",
+        Some("force"),
+    ),
+];
+
+const CURSOR_CONTROLS: &[SnapshotControlDescriptor] = &[
+    SnapshotControlDescriptor::select(
+        "model",
+        "Model",
+        "composer-2-fast",
+        "topbar",
+        CURSOR_MODEL_OPTIONS,
+        None,
+        Some("model"),
+    ),
+    SnapshotControlDescriptor::select(
+        "mode",
+        "Mode",
+        "default",
+        "topbar",
+        CURSOR_MODE_OPTIONS,
+        None,
+        None,
+    ),
+    SnapshotControlDescriptor::select(
+        "apply-mode",
+        "Mode",
+        "default",
+        "composer",
+        CURSOR_PERMISSION_OPTIONS,
+        Some("mode"),
+        Some("permission"),
+    ),
+];
+
+const CURSOR_SNAPSHOT_DESCRIPTOR: SnapshotDescriptor = SnapshotDescriptor {
+    id: "cursor",
+    display: SnapshotDisplayDescriptor {
+        label: "Cursor",
+        short_label: "Cursor",
+        brand_title: "Cursor Agent",
+        empty_state_label: "Cursor Agent",
+        default_session_name: "Cursor",
+    },
+    auth_label: "Cursor Agent CLI",
+    install: SnapshotInstallDescriptor {
+        command: "cursor-agent",
+        status_label: "Cursor Agent",
+    },
+    controls: CURSOR_CONTROLS,
+};
 
 struct CursorInstance {
     child: Child,
@@ -261,6 +380,304 @@ fn cursor_mcp_delegation_active(env: Option<&HashMap<String, String>>) -> bool {
     !port.is_empty() && port != "0" && !secret.is_empty() && !group_id.is_empty()
 }
 
+fn cursor_runtime_event(
+    event_type: ProviderRuntimeEventType,
+    session_id: &str,
+    phase: &str,
+    native_type: &str,
+) -> ProviderRuntimeEvent {
+    ProviderRuntimeEvent::new(event_type, "cursor", session_id)
+        .with_payload("phase", serde_json::json!(phase))
+        .with_native_type(native_type)
+}
+
+fn cursor_native_type(event: &Value) -> String {
+    let base = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+    if subtype.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}:{subtype}")
+    }
+}
+
+fn cursor_text_from_message(message: Option<&Value>) -> String {
+    let Some(content) = message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return String::new();
+    };
+    content
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(Value::as_str) == Some("text") {
+                block.get("text").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn cursor_tool_entry(tool_call: Option<&Value>) -> Option<(&str, &Value)> {
+    let object = tool_call?.as_object()?;
+    object
+        .iter()
+        .next()
+        .map(|(key, value)| (key.as_str(), value))
+}
+
+fn cursor_tool_name(tool_call: Option<&Value>) -> String {
+    let Some((key, payload)) = cursor_tool_entry(tool_call) else {
+        return "tool".to_string();
+    };
+    let explicit = payload.get("args").and_then(|args| {
+        ["name", "toolName", "tool_name"]
+            .iter()
+            .find_map(|field| args.get(*field).and_then(Value::as_str))
+    });
+    explicit
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(key)
+        .to_string()
+}
+
+fn cursor_tool_payload(tool_call: Option<&Value>) -> Option<&Value> {
+    cursor_tool_entry(tool_call).map(|(_, payload)| payload)
+}
+
+fn parse_cursor_nested_args(value: &Value) -> Option<serde_json::Map<String, Value>> {
+    if let Some(object) = value.as_object() {
+        return Some(object.clone());
+    }
+    let text = value.as_str()?.trim();
+    if !text.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|parsed| parsed.as_object().cloned())
+}
+
+fn cursor_tool_input(name: &str, args: Option<&Value>) -> Value {
+    let mut input = args
+        .and_then(|args| args.get("arguments").or_else(|| args.get("args")))
+        .and_then(parse_cursor_nested_args)
+        .or_else(|| args.and_then(Value::as_object).cloned())
+        .unwrap_or_default();
+
+    if let Some(args_object) = args.and_then(Value::as_object) {
+        for field in ["name", "toolName", "tool_name"] {
+            if !input.contains_key("name") {
+                if let Some(value) = args_object.get(field).and_then(Value::as_str) {
+                    input.insert("name".to_string(), serde_json::json!(value));
+                }
+            }
+        }
+    }
+
+    let path = input
+        .get("path")
+        .or_else(|| input.get("file"))
+        .or_else(|| input.get("filePath"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(path) = path {
+        input.insert("path".to_string(), serde_json::json!(path));
+        input.insert("file_path".to_string(), serde_json::json!(path));
+    }
+
+    if name == "shellToolCall" && !matches!(input.get("command"), Some(Value::String(_))) {
+        if let Some(cmd) = input.get("cmd").and_then(Value::as_str).map(str::to_string) {
+            input.insert("command".to_string(), serde_json::json!(cmd));
+        }
+    }
+
+    Value::Object(input)
+}
+
+fn stringify_cursor_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => match serde_json::to_string(value) {
+            Ok(text) => text,
+            Err(_) => value.to_string(),
+        },
+    }
+}
+
+fn cursor_runtime_events_from_value(session_id: &str, event: &Value) -> Vec<ProviderRuntimeEvent> {
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+    let native_type = cursor_native_type(event);
+
+    match (event_type, subtype) {
+        ("system", "init") => {
+            let mut session = cursor_runtime_event(
+                ProviderRuntimeEventType::Session,
+                session_id,
+                "started",
+                &native_type,
+            );
+            if let Some(thread_id) = event.get("session_id").and_then(Value::as_str) {
+                session = session.with_thread_id(thread_id);
+            }
+            if let Some(model) = event.get("model").and_then(Value::as_str) {
+                session = session.with_payload("model", serde_json::json!(model));
+            }
+            vec![
+                session,
+                cursor_runtime_event(
+                    ProviderRuntimeEventType::Turn,
+                    session_id,
+                    "started",
+                    &native_type,
+                ),
+            ]
+        }
+        ("mcp_status", _) | ("mcp.status.updated", _) => {
+            let servers = event
+                .get("servers")
+                .or_else(|| event.get("mcp_servers"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            vec![cursor_runtime_event(
+                ProviderRuntimeEventType::Mcp,
+                session_id,
+                "status",
+                &native_type,
+            )
+            .with_payload("servers", Value::Array(servers))]
+        }
+        ("assistant", _) => {
+            let text = cursor_text_from_message(event.get("message"));
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![cursor_runtime_event(
+                    ProviderRuntimeEventType::Content,
+                    session_id,
+                    "delta",
+                    &native_type,
+                )
+                .with_payload("role", serde_json::json!("assistant"))
+                .with_payload("text", serde_json::json!(text))]
+            }
+        }
+        ("tool_call", "started") | ("tool_call", "completed") => {
+            let id = event
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                return Vec::new();
+            }
+            let tool_call = event.get("tool_call");
+            let payload = cursor_tool_payload(tool_call);
+            let name = cursor_tool_name(tool_call);
+            let input = cursor_tool_input(&name, payload.and_then(|payload| payload.get("args")));
+            let phase = if subtype == "started" {
+                "started"
+            } else {
+                "completed"
+            };
+            let mut runtime_event = cursor_runtime_event(
+                ProviderRuntimeEventType::Tool,
+                session_id,
+                phase,
+                &native_type,
+            )
+            .with_item_id(id.clone())
+            .with_payload("id", serde_json::json!(id))
+            .with_payload("name", serde_json::json!(name))
+            .with_payload("input", input);
+
+            if subtype == "completed" {
+                let result = stringify_cursor_value(payload.and_then(|payload| {
+                    payload
+                        .get("result")
+                        .or_else(|| payload.get("output"))
+                        .or_else(|| payload.get("error"))
+                }));
+                let is_error = payload.and_then(|payload| payload.get("error")).is_some();
+                runtime_event = runtime_event
+                    .with_payload("result", serde_json::json!(result))
+                    .with_payload("isError", serde_json::json!(is_error));
+            }
+            vec![runtime_event]
+        }
+        ("result", _) => {
+            let is_error = event
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let result = event
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut runtime_event = cursor_runtime_event(
+                ProviderRuntimeEventType::Turn,
+                session_id,
+                "completed",
+                &native_type,
+            )
+            .with_payload("isError", serde_json::json!(is_error))
+            .with_payload("result", serde_json::json!(result));
+            if is_error {
+                runtime_event = runtime_event.with_payload("error", serde_json::json!(result));
+            }
+            vec![runtime_event]
+        }
+        ("error", _) => {
+            let message = match event.get("error") {
+                Some(Value::String(message)) => message.clone(),
+                Some(Value::Object(error)) => error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Cursor reported an error.")
+                    .to_string(),
+                _ => event
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Cursor reported an error.")
+                    .to_string(),
+            };
+            vec![cursor_runtime_event(
+                ProviderRuntimeEventType::Error,
+                session_id,
+                "error",
+                &native_type,
+            )
+            .with_payload("message", serde_json::json!(message))]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn emit_cursor_runtime_events(handle: &AppHandle, events: Vec<ProviderRuntimeEvent>) {
+    for event in events {
+        emit_provider_runtime_event(handle, event);
+    }
+}
+
+fn emit_cursor_stream_event(handle: &AppHandle, session_id: &str, line: &str) {
+    if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+        let events = cursor_runtime_events_from_value(session_id, &parsed);
+        if !events.is_empty() {
+            emit_cursor_runtime_events(handle, events);
+            return;
+        }
+    }
+    let data = cap_event_size(line.to_string());
+    emit_provider_event(handle, "cursor", session_id, &data);
+}
+
 fn emit_cursor_mcp_status(
     handle: &AppHandle,
     session_id: &str,
@@ -286,12 +703,14 @@ fn emit_cursor_mcp_status(
     if let Err(message) = approval {
         server["error"] = serde_json::json!(message);
     }
-    let data = serde_json::json!({
-        "type": "mcp_status",
-        "servers": [server],
-    })
-    .to_string();
-    emit_provider_event(handle, "cursor", session_id, &data);
+    let event = cursor_runtime_event(
+        ProviderRuntimeEventType::Mcp,
+        session_id,
+        "status",
+        "mcp_status",
+    )
+    .with_payload("servers", serde_json::json!([server]));
+    emit_cursor_runtime_events(handle, vec![event]);
 }
 
 fn cursor_session_id_from_event(line: &str) -> Option<String> {
@@ -323,13 +742,12 @@ fn is_result_event(line: &str) -> bool {
 }
 
 fn emit_cursor_error(handle: &AppHandle, session_id: &str, message: String) {
-    let data = serde_json::json!({
+    let event = serde_json::json!({
         "type": "result",
         "is_error": true,
         "result": message,
-    })
-    .to_string();
-    emit_provider_event(handle, "cursor", session_id, &data);
+    });
+    emit_cursor_runtime_events(handle, cursor_runtime_events_from_value(session_id, &event));
 }
 
 fn spawn_and_stream(
@@ -417,8 +835,7 @@ fn spawn_and_stream(
                         }
                     }
                     saw_result |= is_result_event(&line);
-                    let data = cap_event_size(line);
-                    emit_provider_event(&handle, "cursor", &sid, &data);
+                    emit_cursor_stream_event(&handle, &sid, &line);
                 }
                 Err(e) => {
                     safe_eprintln!("[cursor] Reader error: {} for {}", e, sid);
@@ -442,13 +859,12 @@ fn spawn_and_stream(
             );
             emit_cursor_error(&handle, &sid, error_msg);
         } else if !saw_result {
-            let data = serde_json::json!({
+            let event = serde_json::json!({
                 "type": "result",
                 "is_error": false,
                 "result": "",
-            })
-            .to_string();
-            emit_provider_event(&handle, "cursor", &sid, &data);
+            });
+            emit_cursor_runtime_events(&handle, cursor_runtime_events_from_value(&sid, &event));
         }
 
         let is_current = if let Ok(mut instances) = instances_clone.lock() {
@@ -502,6 +918,12 @@ impl CursorAdapter {
             capabilities: ProviderAdapterCapabilities {
                 session_model_switch: ProviderSessionModelSwitchMode::InSession,
                 history: ProviderHistoryCapabilities::NONE,
+                mcp: true,
+                plan: true,
+                images: false,
+                hook_log: false,
+                native_slash_commands: false,
+                compact: false,
             },
         }
     }
@@ -644,5 +1066,13 @@ impl ProviderAdapter for CursorAdapter {
 
     fn capabilities(&self) -> &ProviderAdapterCapabilities {
         &self.capabilities
+    }
+
+    fn snapshot(&self) -> ProviderSnapshot {
+        snapshot_from_descriptor(
+            &CURSOR_SNAPSHOT_DESCRIPTOR,
+            self.capabilities(),
+            resolve_cursor_agent_path(),
+        )
     }
 }

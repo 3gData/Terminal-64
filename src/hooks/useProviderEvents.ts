@@ -19,8 +19,7 @@ import {
 } from "../lib/providerEventSemantics";
 import { cancelProviderSession } from "../lib/tauriApi";
 import {
-  getProviderDefaultEffort,
-  getProviderDefaultModel,
+  getProviderLegacyControl,
   providerSupports,
   type ProviderId,
 } from "../lib/providers";
@@ -29,12 +28,14 @@ import type { HookEvent, HookEventPayload, HookEventType, ToolCall } from "../li
 import type { PermissionRequestPayload } from "../lib/claudeEventDecoder";
 import { useSettingsStore } from "../stores/settingsStore";
 import {
-  getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
+  getProviderSelectedControlValue,
+  getProviderSessionRuntimeMetadata,
   resolveSessionProviderState,
   useProviderSessionStore,
   type ProviderTask,
   type PendingQuestionItem,
+  type ProviderSessionState,
 } from "../stores/providerSessionStore";
 
 // RAF batching for streaming text — coalesces deltas into one store update per frame.
@@ -73,7 +74,6 @@ async function runAutoCompact(sessionId: string) {
   const providerState = resolveSessionProviderState(session);
   if (!providerSupports(providerState.provider, "compact")) return;
 
-  const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
   const prompt = "/compact";
   store.addUserMessage(sessionId, prompt);
   store.setStreaming(sessionId, true);
@@ -85,10 +85,8 @@ async function runAutoCompact(sessionId: string) {
       cwd: session.cwd || ".",
       prompt,
       started: session.hasBeenStarted,
-      threadId: openAiMetadata?.codexThreadId ?? null,
+      runtimeMetadata: getProviderSessionRuntimeMetadata(providerState, providerState.provider),
       selectedControls: providerState.selectedControls[providerState.provider] ?? {},
-      selectedModel: providerState.selectedModel ?? getProviderDefaultModel(providerState.provider),
-      selectedEffort: providerState.selectedEffort ?? getProviderDefaultEffort(providerState.provider),
       providerPermissionId: providerState.providerPermissions[providerState.provider]
         ?? getProviderPermissionId(providerState, providerState.provider),
       permissionMode: "auto",
@@ -152,19 +150,30 @@ function markProviderEventLive(
   store.touchLastEvent(sessionId);
 }
 
+function modelControlValue(
+  providerState: ProviderSessionState | null | undefined,
+  provider: ProviderId,
+): string | null {
+  const control = getProviderLegacyControl(provider, "model");
+  if (!control) return null;
+  const value = getProviderSelectedControlValue(providerState, provider, control.id);
+  return typeof value === "string" ? value : null;
+}
+
 function handleSessionStarted(
   sessionId: string,
   provider: ProviderId,
   event: Extract<NormalizedProviderEvent, { kind: "session_started" }>,
   store: ReturnType<typeof useProviderSessionStore.getState>,
 ) {
-  if (event.threadId) store.setCodexThreadId(sessionId, event.threadId);
+  if (event.threadId) store.setProviderRuntimeResumeId(sessionId, provider, event.threadId);
   if (event.model) store.setModel(sessionId, event.model);
   store.setStreaming(sessionId, true);
   const session = store.sessions[sessionId];
   const prevUsed = session?.contextUsed || 0;
-  const model = event.model || (session ? resolveSessionProviderState(session).selectedModel : null) || session?.model || null;
-  const contextMax = event.contextMax ?? (event.model ? getProviderEventContextWindow(provider, model) : 0);
+  const providerState = session ? resolveSessionProviderState(session) : null;
+  const model = event.model || modelControlValue(providerState, provider) || session?.model || null;
+  const contextMax = event.contextMax ?? (model ? getProviderEventContextWindow(provider, model) : 0);
   if (contextMax > 0) {
     store.setContextUsage(sessionId, prevUsed, contextMax);
   }
@@ -253,7 +262,7 @@ function handleUsage(
   if (event.inputTokens <= 0) return;
   const session = store.sessions[sessionId];
   const providerState = session ? resolveSessionProviderState(session) : null;
-  const model = providerState?.selectedModel ?? session?.model ?? null;
+  const model = modelControlValue(providerState, provider) ?? session?.model ?? null;
   const contextMax = event.contextMax
     ?? session?.contextMax
     ?? getProviderEventContextWindow(provider, model);
@@ -283,7 +292,7 @@ function handleTurnCompleted(
   const latestSession = useProviderSessionStore.getState().sessions[sessionId];
   if (latestSession) {
     const providerState = resolveSessionProviderState(latestSession);
-    const model = providerState.selectedModel ?? latestSession.model ?? null;
+    const model = modelControlValue(providerState, provider) ?? latestSession.model ?? null;
     const modelContextMax = getProviderEventContextWindow(provider, model);
     let contextMax = event.contextMax ?? latestSession.contextMax ?? modelContextMax;
     if (modelContextMax > contextMax) contextMax = modelContextMax;

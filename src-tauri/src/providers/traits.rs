@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::permission_server::PermissionServer;
+use crate::types::ProviderSnapshot;
 
 /// Error type surfaced by every adapter method. The live command adapters
 /// still surface user-facing strings; the normalized async surface can grow a
@@ -37,14 +38,21 @@ pub enum ProviderSessionModelSwitchMode {
     Unsupported,
 }
 
-/// Matches `ProviderAdapterCapabilities` in ProviderAdapter.ts:23–27.
-#[derive(Debug, Clone)]
+/// Matches `ProviderAdapterCapabilities` in ProviderAdapter.ts:23–27 plus
+/// Terminal 64's provider-owned static feature flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAdapterCapabilities {
     pub session_model_switch: ProviderSessionModelSwitchMode,
     pub history: ProviderHistoryCapabilities,
+    pub mcp: bool,
+    pub plan: bool,
+    pub images: bool,
+    pub hook_log: bool,
+    pub native_slash_commands: bool,
+    pub compact: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderHistoryCapabilities {
     pub hydrate: bool,
     pub fork: bool,
@@ -149,6 +157,8 @@ pub trait ProviderAdapter: Send + Sync {
     fn provider(&self) -> ProviderKind;
 
     fn capabilities(&self) -> &ProviderAdapterCapabilities;
+
+    fn snapshot(&self) -> ProviderSnapshot;
 
     fn prepare_create_session(
         &self,

@@ -4,8 +4,8 @@ import { emit, listen } from "@tauri-apps/api/event";
 import {
   queuedPromptDisplayText,
   queuedPromptProviderPrompt,
-  getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
+  getProviderSessionRuntimeMetadata,
   getProviderSelectedControlValues,
   resolveSessionProviderState,
   selectSessionProvider,
@@ -25,12 +25,12 @@ import { listSlashCommands, resolvePermission, readFile, writeFile, listMcpServe
 import type { SlashCommand, PermissionMode, McpServer, HookEvent } from "../../lib/types";
 import {
   getProviderControl,
-  getProviderLegacyControl,
   isProviderControlValue,
   listProviderControls,
   providerSupports,
   type ProviderControlId,
   type ProviderControlMetadata,
+  type ProviderControlValue,
   type ProviderId,
 } from "../../lib/providers";
 import {
@@ -40,7 +40,7 @@ import {
 } from "../../lib/delegationWorkflow";
 import { subscribeProviderDelegationRequests } from "../../lib/providerEventSemantics";
 import { rewritePromptStream } from "../../lib/ai";
-import { toolHeader } from "./ChatMessage";
+import { toolHeader } from "./toolPresentation";
 import FileTree from "./FileTree";
 import { fontStack } from "../../lib/fonts";
 import { CLAUDE_BUILTIN_COMMANDS } from "../../lib/claudeSlashCommands";
@@ -85,7 +85,7 @@ const EMPTY_TOOL_USAGE_STATS: Record<string, number> = Object.freeze({});
 
 function canPickProviderBeforeStart(session: ProviderChatSessionView, hasStreamingText: boolean): boolean {
   const providerState = resolveSessionProviderState(session);
-  const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
+  const resumeId = getProviderSessionRuntimeMetadata(providerState, providerState.provider)?.resume.id ?? null;
   return session.providerLocked === false
     && !hasStreamingText
     && !session.hasBeenStarted
@@ -98,7 +98,7 @@ function canPickProviderBeforeStart(session: ProviderChatSessionView, hasStreami
     && !providerState.seedTranscript
     && !session.resumeAtUuid
     && !session.forkParentSessionId
-    && !openAiMetadata?.codexThreadId;
+    && !resumeId;
 }
 
 function legacySettingsDefaultForControl(
@@ -125,12 +125,12 @@ function selectedControlValuesForUi({
 }: {
   provider: ProviderId;
   persisted: ProviderControlValueMap;
-  settingsDefaults: Record<string, string | null> | undefined;
+  settingsDefaults: Record<string, ProviderControlValue> | undefined;
   globalModel: string;
   globalEffort: string;
 }): ProviderControlValueMap {
   const values: ProviderControlValueMap = {};
-  for (const control of listProviderControls(provider, "topbar")) {
+  for (const control of listProviderControls(provider)) {
     const persistedValue = persisted[control.id];
     const settingsValue = settingsDefaults?.[control.id];
     values[control.id] =
@@ -140,15 +140,6 @@ function selectedControlValuesForUi({
       ?? control.defaultValue;
   }
   return values;
-}
-
-function legacyControlValue(
-  provider: ProviderId,
-  selectedControls: ProviderControlValueMap,
-  legacySlot: "model" | "effort",
-): string {
-  const control = getProviderLegacyControl(provider, legacySlot);
-  return control ? selectedControls[control.id] ?? "" : "";
 }
 
 async function cancelByProvider(sessionId: string, provider: ProviderId): Promise<void> {
@@ -205,10 +196,7 @@ function providerTurnForSession({
   disallowedTools?: string;
 }): ProviderTurnInput {
   const providerState = resolveSessionProviderState(session);
-  const openAiMetadata = getOpenAiProviderSessionMetadata(providerState);
   const controlValues = selectedControls ?? getProviderSelectedControlValues(providerState, providerState.provider);
-  const model = legacyControlValue(providerState.provider, controlValues, "model");
-  const effort = legacyControlValue(providerState.provider, controlValues, "effort");
   const providerOptions = providerState.provider === "anthropic" && disallowedTools !== undefined
     ? { anthropic: { disallowedTools } }
     : undefined;
@@ -218,10 +206,8 @@ function providerTurnForSession({
     cwd,
     prompt,
     started: session.hasBeenStarted,
-    threadId: openAiMetadata?.codexThreadId ?? null,
+    runtimeMetadata: getProviderSessionRuntimeMetadata(providerState, providerState.provider),
     selectedControls: controlValues,
-    selectedModel: model || null,
-    selectedEffort: effort || null,
     providerPermissionId: getProviderPermissionId(providerState, providerState.provider),
     permissionMode,
     skipOpenwolf: session.skipOpenwolf,
@@ -568,9 +554,7 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
     }),
     [globalEffort, globalModel, persistedControlValues, providerControlDefaults, selectedProvider],
   );
-  const selectedModel = legacyControlValue(selectedProvider, selectedControlValues, "model");
-  const selectedEffort = legacyControlValue(selectedProvider, selectedControlValues, "effort");
-  const handleSelectControl = useCallback((controlId: ProviderControlId, value: string) => {
+  const handleSelectControl = useCallback((controlId: ProviderControlId, value: ProviderControlValue) => {
     const control = getProviderControl(selectedProvider, controlId);
     if (!control || !isProviderControlValue(selectedProvider, controlId, value)) return;
     useProviderSessionStore.getState().setProviderControl(sessionId, selectedProvider, controlId, value);
@@ -582,8 +566,8 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
       },
     };
     const legacyPatch: { claudeModel?: string; claudeEffort?: string } = {};
-    if (control.legacySlot === "model") legacyPatch.claudeModel = value;
-    if (control.legacySlot === "effort") legacyPatch.claudeEffort = value;
+    if (typeof value === "string" && control.legacySlot === "model") legacyPatch.claudeModel = value;
+    if (typeof value === "string" && control.legacySlot === "effort") legacyPatch.claudeEffort = value;
     useSettingsStore.getState().set({ providerControlDefaults: nextDefaults, ...legacyPatch });
   }, [selectedProvider, sessionId]);
   const handleSelectPreStartProvider = useCallback((provider: ProviderId) => {
@@ -673,7 +657,7 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
   // This keeps legacy settings or edited localStorage from sending invalid
   // provider-specific values.
   useEffect(() => {
-    for (const control of listProviderControls(selectedProvider, "topbar")) {
+    for (const control of listProviderControls(selectedProvider)) {
       const value = selectedControlValues[control.id];
       if (!isProviderControlValue(selectedProvider, control.id, value)) {
         useProviderSessionStore.getState().setProviderControl(
@@ -1458,8 +1442,6 @@ export function ProviderChat({ sessionId, cwd, skipPermissions, isActive }: Prov
     selectedProvider,
     permissionMode,
     selectedControls: selectedControlValues,
-    selectedModel,
-    selectedEffort,
     selectedProviderPermissionId,
     addUserMessage,
   });

@@ -48,8 +48,6 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     for (const [controlId, value] of Object.entries(providerState.selectedControls[provider] ?? {})) {
       store.setProviderControl(newPanel.terminalId, provider, controlId, value);
     }
-    store.setSelectedModel(newPanel.terminalId, providerState.selectedModel);
-    store.setSelectedEffort(newPanel.terminalId, providerState.selectedEffort);
     store.setProviderPermission(newPanel.terminalId, provider, getProviderPermissionId(providerState, provider));
 
     let forkResult: ProviderForkResult = {};
