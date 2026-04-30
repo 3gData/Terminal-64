@@ -40,7 +40,8 @@ import type {
   PermissionMode,
 } from "./types";
 import { joinPath } from "./platform";
-import { getProviderManifest, type ProviderId } from "./providers";
+import { isClaudePermissionId, listProviderControls, type ProviderId } from "./providers";
+import { getDefaultProviderPermissionId } from "./providerPermissions";
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
 
 // PTY terminal commands
@@ -1015,11 +1016,50 @@ export async function readFileBase64(path: string): Promise<string> {
  * @param cwd       Working directory for the provider runtime
  * @param sessionName  Display name for the session
  * @param prompt    Initial prompt to send
- * @param getStores  Lazy getter to avoid circular imports — returns {canvasStore, claudeStore, settingsStore}
+ * @param getStores  Lazy getter to avoid circular imports — returns {canvasStore, providerSessionStore, settingsStore}
  */
 interface SpawnProviderSessionOptions {
   skipOpenwolf?: boolean;
   provider?: ProviderId;
+}
+
+interface SpawnProviderTurnInputArgs {
+  provider: ProviderId;
+  sessionId: string;
+  cwd: string;
+  prompt: string;
+  skipOpenwolf?: boolean;
+}
+
+function claudePermissionModeForSpawn(provider: ProviderId, permissionId: string): PermissionMode | undefined {
+  if (provider !== "anthropic" || !isClaudePermissionId(permissionId)) return undefined;
+  return permissionId;
+}
+
+export function buildSpawnProviderTurnInput({
+  provider,
+  sessionId,
+  cwd,
+  prompt,
+  skipOpenwolf,
+}: SpawnProviderTurnInputArgs): ProviderTurnInput {
+  const providerPermissionId = getDefaultProviderPermissionId(provider);
+  const selectedControls = Object.fromEntries(
+    listProviderControls(provider).map((control) => [control.id, control.defaultValue]),
+  );
+  const turnInput: ProviderTurnInput = {
+    provider,
+    sessionId,
+    cwd,
+    prompt,
+    started: false,
+    selectedControls,
+    providerPermissionId,
+  };
+  const permissionMode = claudePermissionModeForSpawn(provider, providerPermissionId);
+  if (permissionMode) turnInput.permissionMode = permissionMode;
+  if (skipOpenwolf !== undefined) turnInput.skipOpenwolf = skipOpenwolf;
+  return turnInput;
 }
 
 export function spawnProviderSessionWithPrompt(
@@ -1028,12 +1068,12 @@ export function spawnProviderSessionWithPrompt(
   prompt: string,
   getStores: () => {
     canvasStore: { getState: () => any };
-    claudeStore: { getState: () => any };
+    providerSessionStore: { getState: () => any };
     settingsStore: { getState: () => any };
   },
   options?: SpawnProviderSessionOptions,
 ): void {
-  const { canvasStore, claudeStore, settingsStore } = getStores();
+  const { canvasStore, providerSessionStore } = getStores();
   const provider = options?.provider ?? "anthropic";
   canvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
   const terminals = canvasStore.getState().terminals;
@@ -1042,33 +1082,28 @@ export function spawnProviderSessionWithPrompt(
 
   const sid = sessionPanel.terminalId;
   const skip = options?.skipOpenwolf;
-  claudeStore.getState().createSession(sid, sessionName, false, skip, cwd, provider, true);
-  claudeStore.getState().addUserMessage(sid, prompt);
+  providerSessionStore.getState().createSession(sid, sessionName, false, skip, cwd, provider, true);
+  providerSessionStore.getState().addUserMessage(sid, prompt);
   // Small delay so the chat panel mounts and event listeners are ready.
   setTimeout(() => {
-    const manifest = getProviderManifest(provider);
-    const permissionMode = (settingsStore.getState().claudePermMode || manifest.defaultPermission) as PermissionMode;
-    const turnInput: ProviderTurnInput = {
+    const turnInput = buildSpawnProviderTurnInput({
       provider,
       sessionId: sid,
       cwd,
       prompt,
-      started: false,
-      permissionMode,
-      providerPermissionId: manifest.defaultPermission,
-      skipOpenwolf: skip,
-    };
+      ...(skip !== undefined ? { skipOpenwolf: skip } : {}),
+    });
 
     import("./providerRuntime").then(({ runProviderTurn }) => runProviderTurn(turnInput))
       .then((result) => {
-        const store = claudeStore.getState();
+        const store = providerSessionStore.getState();
         if (result.clearSeedTranscript) store.clearSeedTranscript(sid);
         if (result.clearResumeAtUuid) store.setResumeAtUuid(sid, null);
         if (result.clearForkParentSessionId) store.setForkParentSessionId(sid, null);
-        claudeStore.getState().incrementPromptCount(sid);
+        providerSessionStore.getState().incrementPromptCount(sid);
       })
       .catch((err: unknown) => {
-        claudeStore.getState().setError(sid, String(err));
+        providerSessionStore.getState().setError(sid, String(err));
       });
   }, 300);
 }
@@ -1080,7 +1115,7 @@ export function spawnClaudeWithPrompt(
   prompt: string,
   getStores: () => {
     canvasStore: { getState: () => any };
-    claudeStore: { getState: () => any };
+    providerSessionStore: { getState: () => any };
     settingsStore: { getState: () => any };
   },
   options?: SpawnProviderSessionOptions,

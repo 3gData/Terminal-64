@@ -1,15 +1,17 @@
 //! Backend provider adapter contract.
 //!
 //! The current Tauri surface is a synchronous command bridge: generic
-//! `provider_*` IPC handlers resolve a provider id, prepare shared sidecar
-//! context, then hand the raw provider-owned JSON payload to the selected
-//! adapter. History operations use the same registry boundary and are gated by
-//! explicit capabilities. This file intentionally models that supported
-//! surface instead of carrying unused async lifecycle stubs from the upstream
-//! t3code shape.
+//! `provider_*` IPC handlers resolve a provider id and hand the raw
+//! provider-owned JSON payload to the selected adapter. Provider-specific
+//! command setup lives in adapter-owned preparation hooks, while history
+//! operations use the same registry boundary and are gated by explicit
+//! capabilities. This file intentionally models that supported surface instead
+//! of carrying unused async lifecycle stubs from the upstream t3code shape.
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+
+use crate::permission_server::PermissionServer;
 
 /// Error type surfaced by every adapter method. The live command adapters
 /// still surface user-facing strings; the normalized async surface can grow a
@@ -82,12 +84,40 @@ pub fn provider_history_unsupported_response(
     })
 }
 
-/// Sidecar data produced by provider-agnostic command setup. Concrete
+/// Sidecar data produced by provider-owned command preparation. Concrete
 /// adapters decide which fields, if any, apply to their payload.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCommandContext {
     pub settings_path: Option<String>,
     pub approver_mcp_config: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProviderOpenWolfOptions {
+    pub enabled: bool,
+    pub auto_init: bool,
+    pub design_qc: bool,
+}
+
+pub struct ProviderCommandLifecycle<'a> {
+    pub app_handle: &'a AppHandle,
+    pub permission_server: &'a PermissionServer,
+    pub openwolf: ProviderOpenWolfOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderPreparedCommand {
+    pub request: ProviderCommandRequest,
+    pub cleanup_tokens: Vec<String>,
+}
+
+impl ProviderPreparedCommand {
+    pub fn new(request: ProviderCommandRequest) -> Self {
+        Self {
+            request,
+            cleanup_tokens: Vec::new(),
+        }
+    }
 }
 
 /// Existing Tauri IPC command payload grouped behind one backend provider
@@ -119,6 +149,22 @@ pub trait ProviderAdapter: Send + Sync {
     fn provider(&self) -> ProviderKind;
 
     fn capabilities(&self) -> &ProviderAdapterCapabilities;
+
+    fn prepare_create_session(
+        &self,
+        _lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        Ok(ProviderPreparedCommand::new(req))
+    }
+
+    fn prepare_send_prompt(
+        &self,
+        _lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderSendPromptRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        Ok(ProviderPreparedCommand::new(req))
+    }
 
     fn create_session(
         &self,

@@ -568,7 +568,7 @@ function App() {
       <ProviderSessionDialog
         isOpen={providerSessionDialogOpen}
         onClose={() => setProviderSessionDialogOpen(false)}
-        onConfirm={(cwd, _skip, sessionName, _provider) => {
+        onConfirm={(cwd, _skip, sessionName, provider) => {
           useCanvasStore.getState().addClaudeTerminal(cwd, false, sessionName);
           {
             const terminals = useCanvasStore.getState().terminals;
@@ -579,7 +579,7 @@ function App() {
               // the pre-first-send provider choice; first send locks it.
               // The chat shell's createSession effect is idempotent, so this
               // primes name/cwd before the panel mounts.
-              useProviderSessionStore.getState().createSession(sid, sessionName, false, undefined, cwd, "anthropic", false);
+              useProviderSessionStore.getState().createSession(sid, sessionName, false, undefined, cwd, provider, false);
               if (sessionName) {
                 // Auto-link to Discord (silently fails if bot not running)
                 linkSessionToDiscord(sid, sessionName, cwd).catch(() => {});

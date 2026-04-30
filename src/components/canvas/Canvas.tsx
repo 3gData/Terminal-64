@@ -1,14 +1,14 @@
 import { useCallback, useRef, useEffect, useMemo, useState } from "react";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { useProviderSessionStore } from "../../stores/providerSessionStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useShallow } from "zustand/react/shallow";
 import { readFileBase64 } from "../../lib/tauriApi";
 import FloatingTerminal from "./FloatingTerminal";
 import { PartyEqualizer } from "../party/PartyOverlay";
-import VoiceStatusBadge from "../claude/VoiceStatusBadge";
-import VoiceLivePanel from "../claude/VoiceLivePanel";
-import VoiceMascot from "../claude/VoiceMascot";
+import VoiceStatusBadge from "../provider-chat/VoiceStatusBadge";
+import VoiceLivePanel from "../provider-chat/VoiceLivePanel";
+import VoiceMascot from "../provider-chat/VoiceMascot";
 import "./Canvas.css";
 
 /** Safari/WebKit gesture events (non-standard, not in lib.dom.d.ts) */
@@ -42,7 +42,7 @@ export default function Canvas() {
   // Read zoom for non-transform uses (badge); pan/zoom for transforms are applied via direct DOM writes below
   const zoom = useCanvasStore((s) => s.zoom);
   // Only extract cwds to avoid re-rendering on every message/streaming update
-  const providerSessionCwds = useClaudeStore(useShallow((s) => {
+  const providerSessionCwds = useProviderSessionStore(useShallow((s) => {
     const out: Record<string, string> = {};
     for (const [id, sess] of Object.entries(s.sessions)) {
       if (sess.cwd) out[id] = sess.cwd;

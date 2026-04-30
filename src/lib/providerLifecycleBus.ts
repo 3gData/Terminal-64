@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { NormalizedProviderEvent } from "../contracts/providerEvents";
-import { resolveSessionProviderState, useClaudeStore } from "../stores/claudeStore";
+import { resolveSessionProviderState, useProviderSessionStore } from "../stores/providerSessionStore";
 import type { ProviderId } from "./providers";
 
 export type ProviderLifecycleSource = "claude_hook" | "provider_event" | "store";
@@ -154,7 +154,7 @@ async function startClaudeHookLifecycleSource(): Promise<() => void> {
 }
 
 function startProviderStoreTurnLifecycleSource(): () => void {
-  return useClaudeStore.subscribe((state, prev) => {
+  return useProviderSessionStore.subscribe((state, prev) => {
     for (const [sessionId, session] of Object.entries(state.sessions)) {
       const wasStreaming = prev.sessions[sessionId]?.isStreaming ?? false;
       if (wasStreaming === session.isStreaming) continue;

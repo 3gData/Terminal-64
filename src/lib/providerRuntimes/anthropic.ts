@@ -1,6 +1,5 @@
 import {
   createMcpConfigFile,
-  ensureT64Mcp,
   mapHistoryMessages,
   providerCancel,
   providerClose,
@@ -16,6 +15,7 @@ import type {
   ProviderHistoryTruncateResult,
   ProviderHydrateResult,
   ProviderRuntime,
+  ProviderTurnOptionsByProvider,
   ProviderTurnInput,
   ProviderTurnResult,
 } from "../../contracts/providerRuntime";
@@ -63,31 +63,29 @@ declare module "../../contracts/providerIpc" {
   }
 }
 
-function buildClaudeRequest(input: ProviderTurnInput): CreateClaudeRequest {
+function buildClaudeRequest(input: ProviderTurnInput<"anthropic">): CreateClaudeRequest {
+  const options = input.providerOptions?.anthropic;
+  const selectedModel = input.selectedControls?.model ?? input.selectedModel;
+  const selectedEffort = input.selectedControls?.effort ?? input.selectedEffort;
   return {
     session_id: input.sessionId,
     cwd: input.cwd,
     prompt: input.prompt,
     permission_mode: input.permissionOverride || input.permissionMode || "default",
-    ...(input.selectedModel ? { model: input.selectedModel } : {}),
-    ...(input.selectedEffort ? { effort: input.selectedEffort } : {}),
-    ...(input.mcpConfig ? { mcp_config: input.mcpConfig } : {}),
-    ...(input.noSessionPersistence ? { no_session_persistence: true } : {}),
+    ...(selectedModel ? { model: selectedModel } : {}),
+    ...(selectedEffort ? { effort: selectedEffort } : {}),
+    ...(options?.mcpConfig ? { mcp_config: options.mcpConfig } : {}),
+    ...(options?.noSessionPersistence ? { no_session_persistence: true } : {}),
   };
 }
 
-function buildClaudeSendRequest(input: ProviderTurnInput): SendClaudePromptRequest {
+function buildClaudeSendRequest(input: ProviderTurnInput<"anthropic">): SendClaudePromptRequest {
+  const options = input.providerOptions?.anthropic;
   return {
     ...buildClaudeRequest(input),
-    ...(input.disallowedTools ? { disallowed_tools: input.disallowedTools } : {}),
+    ...(options?.disallowedTools ? { disallowed_tools: options.disallowedTools } : {}),
     ...(input.resumeAtUuid ? { resume_session_at: input.resumeAtUuid } : {}),
   };
-}
-
-async function ensureFirstTurnMcp(input: ProviderTurnInput) {
-  if (!input.started) {
-    await ensureT64Mcp(input.cwd).catch(() => {});
-  }
 }
 
 function delegationMcpEnvConfig(env: Record<string, string> | undefined) {
@@ -106,11 +104,11 @@ function delegationMcpEnvConfig(env: Record<string, string> | undefined) {
   };
 }
 
-async function prepareTurn(input: ProviderTurnInput): Promise<ProviderTurnInput> {
-  await ensureFirstTurnMcp(input);
-  if (input.mcpConfig) return input;
+async function prepareTurn(input: ProviderTurnInput<"anthropic">): Promise<ProviderTurnInput<"anthropic">> {
+  const options = input.providerOptions?.anthropic;
+  if (options?.mcpConfig) return input;
 
-  const delegation = delegationMcpEnvConfig(input.mcpEnv);
+  const delegation = delegationMcpEnvConfig(options?.mcpEnv);
   if (!delegation) return input;
 
   const mcpConfig = await createMcpConfigFile(
@@ -119,14 +117,21 @@ async function prepareTurn(input: ProviderTurnInput): Promise<ProviderTurnInput>
     delegation.groupId,
     delegation.agentLabel,
   );
-  return { ...input, mcpConfig };
+  const providerOptions: ProviderTurnOptionsByProvider = {
+    ...input.providerOptions,
+    anthropic: {
+      ...options,
+      mcpConfig,
+    },
+  };
+  return { ...input, providerOptions };
 }
 
-function legacyResumeResult(input: ProviderTurnInput): ProviderTurnResult {
+function legacyResumeResult(input: ProviderTurnInput<"anthropic">): ProviderTurnResult {
   return input.resumeAtUuid ? { clearResumeAtUuid: true } : {};
 }
 
-async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function create(input: ProviderTurnInput<"anthropic">): Promise<ProviderTurnResult> {
   const req = buildClaudeRequest(input);
   try {
     await providerCreate({ provider: "anthropic", req }, input.skipOpenwolf);
@@ -136,7 +141,7 @@ async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
   return legacyResumeResult(input);
 }
 
-async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function send(input: ProviderTurnInput<"anthropic">): Promise<ProviderTurnResult> {
   const req = buildClaudeSendRequest(input);
   if (input.forkParentSessionId) {
     const forkReq: SendClaudePromptRequest = { ...req, fork_session: input.forkParentSessionId };
@@ -158,7 +163,7 @@ function operationStatus(status: "applied" | "skipped" | "unsupported" | undefin
   return status ?? "applied";
 }
 
-export const anthropicRuntime: ProviderRuntime = {
+export const anthropicRuntime: ProviderRuntime<"anthropic"> = {
   provider: "anthropic",
 
   prepareTurn,

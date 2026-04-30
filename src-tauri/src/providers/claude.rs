@@ -11,8 +11,6 @@
 //!
 //! Shared helpers (`shim_command`, `cap_event_size`,
 //! `sanitize_dangling_tool_uses`) live in [`crate::providers::util`].
-//! OpenWolf helpers stayed in `claude_manager.rs` for now — they aren't
-//! provider-scoped and will move to a dedicated `openwolf.rs` later.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -23,10 +21,10 @@ use tauri::{AppHandle, Emitter};
 
 use crate::providers::emit_provider_event;
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError,
-    ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
-    ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
-    ProviderSessionModelSwitchMode,
+    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandContext,
+    ProviderCommandLifecycle, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
+    ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderOpenWolfOptions,
+    ProviderPreparedCommand, ProviderSendPromptRequest, ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{
     cap_event_size, expanded_tool_path, find_existing_claude_session_jsonl,
@@ -269,6 +267,128 @@ fn resolve_session_id(provided: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn provider_payload_string_field<'a>(
+    payload: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a str> {
+    payload.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn provider_payload_cwd(payload: &serde_json::Value) -> Option<&str> {
+    provider_payload_string_field(payload, "cwd").filter(|cwd| !cwd.trim().is_empty())
+}
+
+fn write_provider_payload_string_field(
+    payload: &mut serde_json::Value,
+    field: &str,
+    value: String,
+) -> Result<(), String> {
+    let Some(object) = payload.as_object_mut() else {
+        return Err("provider request payload must be a JSON object".to_string());
+    };
+    object.insert(field.to_string(), serde_json::Value::String(value));
+    Ok(())
+}
+
+/// Map frontend permission_mode strings to the CLI's internal names. Anything
+/// else (default/auto/plan/acceptEdits) we pass through as-is — the MCP
+/// approver only short-circuits on the exact `bypassPermissions` string.
+fn cli_permission_mode(mode: &str) -> &str {
+    match mode {
+        "bypass_all" => "bypassPermissions",
+        "accept_edits" => "acceptEdits",
+        "plan" => "plan",
+        "auto" => "auto",
+        _ => "default",
+    }
+}
+
+/// Hard safety net: never init OpenWolf inside T64's own managed directories
+/// (widgets, skills). Guards against stale session state or frontend bugs where
+/// skipOpenwolf wasn't propagated.
+fn is_t64_managed_dir(cwd: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    std::path::Path::new(cwd).starts_with(home.join(".terminal64"))
+}
+
+fn maybe_apply_openwolf(
+    settings_path: &Option<String>,
+    cwd: &str,
+    options: ProviderOpenWolfOptions,
+) {
+    if !options.enabled || is_t64_managed_dir(cwd) {
+        return;
+    }
+    crate::claude_manager::ensure_openwolf(cwd, options.auto_init);
+    if let Some(sp) = settings_path {
+        if let Err(e) = crate::claude_manager::merge_openwolf_hooks(sp, cwd, options.design_qc) {
+            safe_eprintln!("[openwolf] Failed to merge hooks: {}", e);
+        }
+    }
+}
+
+fn prepare_claude_command(
+    lifecycle: &ProviderCommandLifecycle<'_>,
+    mut req: ProviderCreateSessionRequest,
+    generate_empty_session_id: bool,
+    command_label: &str,
+) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+    let mut session_id = provider_payload_string_field(&req.payload, "session_id")
+        .ok_or_else(|| {
+            format!(
+                "Invalid Anthropic {} request: missing required field 'session_id'",
+                command_label
+            )
+        })?
+        .to_string();
+
+    if generate_empty_session_id && session_id.trim().is_empty() {
+        session_id = uuid::Uuid::new_v4().to_string();
+        write_provider_payload_string_field(&mut req.payload, "session_id", session_id.clone())?;
+    }
+
+    let permission_mode = provider_payload_string_field(&req.payload, "permission_mode")
+        .ok_or_else(|| {
+            format!(
+                "Invalid Anthropic {} request: missing required field 'permission_mode'",
+                command_label
+            )
+        })?;
+    let cli_mode = cli_permission_mode(permission_mode);
+    let registration = lifecycle
+        .permission_server
+        .register_session(&session_id, cli_mode)
+        .ok();
+    let settings_path = registration
+        .as_ref()
+        .map(|(_, s, _)| s.to_string_lossy().to_string());
+    let approver_path = registration
+        .as_ref()
+        .map(|(_, _, m)| m.to_string_lossy().to_string());
+    let cleanup_tokens = registration
+        .map(|(token, _, _)| vec![token])
+        .unwrap_or_default();
+
+    if let Some(cwd) = provider_payload_cwd(&req.payload) {
+        if let Err(e) = crate::ensure_t64_mcp_impl(lifecycle.app_handle, cwd) {
+            safe_eprintln!("[claude:mcp] setup failed before {}: {}", command_label, e);
+        }
+        maybe_apply_openwolf(&settings_path, cwd, lifecycle.openwolf);
+    }
+
+    req.context = ProviderCommandContext {
+        settings_path,
+        approver_mcp_config: approver_path,
+    };
+
+    Ok(ProviderPreparedCommand {
+        request: req,
+        cleanup_tokens,
+    })
 }
 
 /// Stderr pattern for a strict CLI that doesn't recognize `--session-id`.
@@ -684,6 +804,22 @@ impl Default for ClaudeAdapter {
 }
 
 impl ProviderAdapter for ClaudeAdapter {
+    fn prepare_create_session(
+        &self,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        prepare_claude_command(lifecycle, req, true, "create")
+    }
+
+    fn prepare_send_prompt(
+        &self,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderSendPromptRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        prepare_claude_command(lifecycle, req, false, "send")
+    }
+
     fn create_session(
         &self,
         app_handle: &AppHandle,

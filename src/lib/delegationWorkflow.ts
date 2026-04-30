@@ -3,6 +3,7 @@ import { getProviderDelegationPolicy, type ProviderId } from "./providers";
 
 export interface DelegationPlanTask {
   description: string;
+  agentName?: string;
 }
 
 export interface DelegationStartPlan {
@@ -47,6 +48,7 @@ export interface DelegationChildSpawnPlan {
 export interface BuildDelegationChildSpawnPlanOptions {
   sharedContext: string;
   taskDescription: string;
+  agentName?: string | undefined;
   taskIndex: number;
   taskCount: number;
   teamChatEnabled: boolean;
@@ -86,11 +88,11 @@ Use the terminal-64 MCP tool ${startToolName}. Do not write a delegation block m
 
 Call ${startToolName} with:
 - context: one paragraph of shared context all agents need
-- tasks: an array of 2-8 objects, each with a description field
+- tasks: an array of 2-8 objects, each with a description field and optional agentName field
 
 If ${startToolName} is not available in your tool registry, output exactly this fallback shape and no other text:
 <${fallbackTagName}>
-{"context":"one paragraph of shared context","tasks":[{"description":"specific independent task 1"},{"description":"specific independent task 2"}]}
+{"context":"one paragraph of shared context","tasks":[{"agentName":"Builder","description":"specific independent task 1"},{"agentName":"Verifier","description":"specific independent task 2"}]}
 </${fallbackTagName}>
 
 Rules:
@@ -187,18 +189,27 @@ function delegationInputCandidates(input: Record<string, unknown>): Record<strin
 function parseTasks(rawTasks: unknown): DelegationPlanTask[] {
   if (!Array.isArray(rawTasks)) return [];
   return rawTasks
-    .map((task): string => {
-      if (typeof task === "string") return task.trim();
+    .map((task): DelegationPlanTask | null => {
+      if (typeof task === "string") {
+        const description = task.trim();
+        return description ? { description } : null;
+      }
       const record = recordValue(task);
-      if (!record) return "";
-      return stringValue(record.description)
+      if (!record) return null;
+      const description = stringValue(record.description)
         || stringValue(record.task)
         || stringValue(record.goal)
         || stringValue(record.name);
+      if (!description) return null;
+      const agentName = stringValue(record.agentName)
+        || stringValue(record.agent_name)
+        || stringValue(record.agent)
+        || stringValue(record.assignee)
+        || stringValue(record.label);
+      return agentName ? { description, agentName } : { description };
     })
-    .filter((description) => description.length > 0)
+    .filter((task): task is DelegationPlanTask => task != null)
     .slice(0, 8)
-    .map((description) => ({ description }));
 }
 
 function parseStartDelegationCandidate(input: Record<string, unknown>): DelegationStartPlan | null {
@@ -289,20 +300,31 @@ export function buildDelegationAgentLabel(index: number): string {
   return `Agent ${index + 1}`;
 }
 
-export function buildDelegationChildName(taskDescription: string): string {
-  return `[D] ${taskDescription.slice(0, 30)}`;
+function normalizeAgentName(agentName: string | undefined): string {
+  return (agentName || "").trim().replace(/\s+/g, " ").slice(0, 40);
+}
+
+export function resolveDelegationAgentLabel(index: number, agentName?: string | undefined): string {
+  return normalizeAgentName(agentName) || buildDelegationAgentLabel(index);
+}
+
+export function buildDelegationChildName(taskDescription: string, agentLabel?: string): string {
+  const prefix = agentLabel ? `${agentLabel}: ` : "";
+  return `[D] ${(prefix + taskDescription).slice(0, 30)}`;
 }
 
 function buildDelegationTeamChatNote(taskCount: number): string {
   return `\n\nIMPORTANT - Team Coordination via terminal-64 MCP:
 You are part of a team of ${taskCount} agents working in the same codebase. You MUST use the team chat to coordinate:
 
-1. send_to_team - Post a message to the shared team chat. Do this:
+Use the Terminal 64 MCP tools directly; do not simulate these actions with shell commands or plain-text status lines. Some providers may display these as ReadTeam, SendToTeam, and ReportDone, but the underlying tools are:
+
+1. read_team - Check what other agents have posted. Do this BEFORE starting work and periodically during long tasks to stay aware of what others are doing.
+2. send_to_team - Post a message to the shared team chat. Do this:
    - At the START of your work (announce what you're about to do)
    - Before modifying any shared files (to avoid conflicts)
    - After completing major milestones
    - If you encounter issues or blockers
-2. read_team - Check what other agents have posted. Do this BEFORE starting work and periodically during long tasks to stay aware of what others are doing.
 3. report_done - When your task is fully complete, call this with a summary of what you did and what files you changed.
 
 Coordinate actively. If another agent is working on a file you need, mention it in team chat and work around it. Communication prevents conflicts.`;
@@ -311,15 +333,16 @@ Coordinate actively. If another agent is working on a file you need, mention it 
 export function buildDelegationChildSpawnPlan({
   sharedContext,
   taskDescription,
+  agentName,
   taskIndex,
   taskCount,
   teamChatEnabled,
 }: BuildDelegationChildSpawnPlanOptions): DelegationChildSpawnPlan {
-  const agentLabel = buildDelegationAgentLabel(taskIndex);
+  const agentLabel = resolveDelegationAgentLabel(taskIndex, agentName);
   const channelNote = teamChatEnabled ? buildDelegationTeamChatNote(taskCount) : "";
   return {
     agentLabel,
-    childName: buildDelegationChildName(taskDescription),
+    childName: buildDelegationChildName(taskDescription, agentLabel),
     initialPrompt: `Context: ${sharedContext}\n\nYour task: ${taskDescription}\n\nYou are agent "${agentLabel}" - one of ${taskCount} parallel agents. Focus on YOUR specific task only.${channelNote}\n\nWhen done, call report_done (if available) or state your task is complete.`,
   };
 }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useThemeStore } from "../../stores/themeStore";
 import {
+  isProviderAvailable,
   normalizeWidgetRenderMode,
   resolveWidgetRenderMode,
   useSettingsStore,
@@ -28,6 +29,8 @@ import {
   getNoisyWidgetDefault,
   type WidgetHostProtectionMode,
 } from "../../lib/widgetHostProtection";
+import { listProviderManifests, type ProviderId } from "../../lib/providers";
+import { ProviderLogo } from "../ui/BrandLogos";
 import { downloadVoiceModel, voiceModelsStatus, onVoiceDownloadProgress, setVoiceSensitivity as setVoiceSensitivityBackend, type VoiceModelKind } from "../../lib/voiceApi";
 
 interface SettingsPanelProps {
@@ -35,11 +38,23 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+function Toggle({
+  checked,
+  onChange,
+  disabled = false,
+  title,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  title?: string | undefined;
+}) {
   return (
     <button
-      className={`sp-toggle ${checked ? "sp-toggle--on" : ""}`}
+      className={`sp-toggle ${checked ? "sp-toggle--on" : ""} ${disabled ? "sp-toggle--disabled" : ""}`}
       onClick={() => onChange(!checked)}
+      disabled={disabled}
+      title={title}
       role="switch"
       aria-checked={checked}
     >
@@ -461,6 +476,22 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const autoCompactEnabled = useSettingsStore((s) => s.autoCompactEnabled);
   const autoCompactThreshold = useSettingsStore((s) => s.autoCompactThreshold);
 
+  // Provider availability
+  const providerAvailability = useSettingsStore((s) => s.providerAvailability);
+  const providerManifests = listProviderManifests();
+  const enabledProviderCount = providerManifests.filter((manifest) =>
+    isProviderAvailable(manifest.id, providerAvailability)
+  ).length;
+  const handleProviderAvailabilityChange = (providerId: ProviderId, enabled: boolean) => {
+    if (!enabled && enabledProviderCount <= 1 && isProviderAvailable(providerId, providerAvailability)) return;
+    setSetting({
+      providerAvailability: {
+        ...providerAvailability,
+        [providerId]: enabled,
+      },
+    });
+  };
+
   // Claude window defaults
   const claudeDefaultPermMode = useSettingsStore((s) => s.claudeDefaultPermMode);
 
@@ -778,6 +809,36 @@ export default function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 />
               </div>
             )}
+          </Section>
+
+          {/* Providers */}
+          <Section label="Providers" icon="◇">
+            <div className="sp-provider-list">
+              {providerManifests.map((manifest) => {
+                const enabled = isProviderAvailable(manifest.id, providerAvailability);
+                const disableLocked = enabled && enabledProviderCount <= 1;
+                return (
+                  <div
+                    className={`sp-provider-row ${enabled ? "" : "sp-provider-row--disabled"}`}
+                    key={manifest.id}
+                  >
+                    <div className="sp-provider-info">
+                      <ProviderLogo provider={manifest.id} size={16} />
+                      <div className="sp-provider-copy">
+                        <span className="sp-provider-name">{manifest.ui.label}</span>
+                        <span className="sp-hint-inline">{manifest.ui.defaultSessionName}</span>
+                      </div>
+                    </div>
+                    <Toggle
+                      checked={enabled}
+                      disabled={disableLocked}
+                      {...(disableLocked ? { title: "Keep at least one provider enabled" } : {})}
+                      onChange={(v) => handleProviderAvailabilityChange(manifest.id, v)}
+                    />
+                  </div>
+                );
+              })}
+            </div>
           </Section>
 
           {/* Claude */}

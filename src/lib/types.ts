@@ -236,6 +236,8 @@ export interface DelegationChildRuntimeMetadata {
   providerId: string;
   model?: string;
   effort?: string;
+  providerPermissionId?: string;
+  /** @deprecated Use providerPermissionId. */
   permissionPreset?: string;
   cwd: string;
   cleanupState: DelegationChildCleanupState;
@@ -245,6 +247,7 @@ export interface DelegationChildRuntimeMetadata {
 export interface DelegateTask {
   id: string;
   description: string;
+  agentName?: string;
   sessionId: string;
   status: DelegateTaskStatus;
   childRuntime?: DelegationChildRuntimeMetadata;
@@ -266,6 +269,7 @@ export interface DelegationGroup {
   status: DelegationStatus;
   createdAt: number;
   sharedContext?: string;
+  teamChatLogPath?: string;
   collaborationEnabled: boolean;
   parentPermissionMode?: PermissionMode;
 }

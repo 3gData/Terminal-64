@@ -15,8 +15,8 @@ import type { PermissionMode } from "../lib/types";
 import {
   getProviderPermissionId,
   resolveSessionProviderState,
-  useClaudeStore,
-} from "../stores/claudeStore";
+  useProviderSessionStore,
+} from "../stores/providerSessionStore";
 
 export interface ProviderPermissionControls {
   permissionId: string;
@@ -43,7 +43,7 @@ export function useProviderPermissionControls({
   provider,
   skipPermissions,
 }: UseProviderPermissionControlsArgs): ProviderPermissionControls {
-  const providerPermissionId = useClaudeStore((state) => {
+  const providerPermissionId = useProviderSessionStore((state) => {
     const providerState = resolveSessionProviderState(state.sessions[sessionId]);
     return getProviderPermissionId(providerState, provider);
   });
@@ -51,7 +51,7 @@ export function useProviderPermissionControls({
   useEffect(() => {
     const policy = getProviderPermissionControlPolicy(provider);
     if (skipPermissions && policy.skipPermissionId && isProviderPermissionId(provider, policy.skipPermissionId)) {
-      useClaudeStore.getState().setProviderPermission(sessionId, provider, policy.skipPermissionId);
+      useProviderSessionStore.getState().setProviderPermission(sessionId, provider, policy.skipPermissionId);
     }
   }, [provider, sessionId, skipPermissions]);
 
@@ -69,7 +69,7 @@ export function useProviderPermissionControls({
   const selectPermissionId = useCallback(
     (nextPermissionId: string, _options?: { persist?: boolean }) => {
       if (!isProviderPermissionId(provider, nextPermissionId)) return false;
-      useClaudeStore.getState().setProviderPermission(sessionId, provider, nextPermissionId);
+      useProviderSessionStore.getState().setProviderPermission(sessionId, provider, nextPermissionId);
       return true;
     },
     [provider, sessionId],

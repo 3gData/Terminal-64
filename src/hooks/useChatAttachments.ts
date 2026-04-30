@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { readFileBase64, savePastedImage } from "../lib/tauriApi";
 import { useCanvasStore } from "../stores/canvasStore";
-import type { QueuedPromptAttachmentState } from "../stores/claudeStore";
+import type { QueuedPromptAttachmentState } from "../stores/providerSessionStore";
 
 const CHAT_DROP_SELECTOR = ".cc-container[data-session-id]";
 const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;

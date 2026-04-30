@@ -210,6 +210,11 @@
   border-color: rgba(137, 180, 250, 0.4);
 }
 
+.sp-toggle--disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .sp-toggle-knob {
   position: absolute;
   top: 2px;
@@ -224,6 +229,53 @@
 .sp-toggle--on .sp-toggle-knob {
   transform: translateX(16px);
   background: var(--accent, #89b4fa);
+}
+
+/* ---- Provider Availability ---- */
+
+.sp-provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.sp-provider-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 7px 8px;
+  border: 1px solid rgba(137, 180, 250, 0.14);
+  border-radius: 6px;
+  background: rgba(17, 17, 27, 0.45);
+}
+
+.sp-provider-row--disabled {
+  opacity: 0.64;
+}
+
+.sp-provider-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sp-provider-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sp-provider-name {
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--fg-secondary, #bac2de);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- Status Dot ---- */

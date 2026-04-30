@@ -27,22 +27,26 @@ const PROVIDER_RUNTIMES = {
   anthropic: anthropicRuntime,
   openai: openaiRuntime,
   cursor: cursorRuntime,
-} satisfies Record<ProviderId, ProviderRuntime>;
+} satisfies { [P in ProviderId]: ProviderRuntime<P> };
 
-export function getProviderRuntime(provider: ProviderId): ProviderRuntime {
-  return PROVIDER_RUNTIMES[provider];
+export function getProviderRuntime<TProvider extends ProviderId>(provider: TProvider): ProviderRuntime<TProvider> {
+  return PROVIDER_RUNTIMES[provider] as unknown as ProviderRuntime<TProvider>;
 }
 
 export function providerTurnOperation(input: ProviderTurnInput): "create" | "send" {
   return input.started || input.threadId || input.forkParentSessionId ? "send" : "create";
 }
 
-export async function prepareProviderTurnInput(input: ProviderTurnInput): Promise<ProviderTurnInput> {
+export async function prepareProviderTurnInput<TProvider extends ProviderId>(
+  input: ProviderTurnInput<TProvider>,
+): Promise<ProviderTurnInput<TProvider>> {
   const runtime = getProviderRuntime(input.provider);
   return runtime.prepareTurn ? runtime.prepareTurn(input) : input;
 }
 
-export async function runProviderTurn(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+export async function runProviderTurn<TProvider extends ProviderId>(
+  input: ProviderTurnInput<TProvider>,
+): Promise<ProviderTurnResult> {
   const preparedInput = await prepareProviderTurnInput(input);
   const runtime = getProviderRuntime(preparedInput.provider);
   if (providerTurnOperation(preparedInput) === "send") {

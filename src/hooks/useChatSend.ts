@@ -5,17 +5,18 @@ import { isAbsolutePath, joinPath } from "../lib/platform";
 import {
   getOpenAiProviderSessionMetadata,
   resolveSessionProviderState,
-  useClaudeStore,
-} from "../stores/claudeStore";
+  useProviderSessionStore,
+  type ProviderControlValueMap,
+} from "../stores/providerSessionStore";
 import type { PermissionMode } from "../lib/types";
 import type { ProviderTurnInput } from "../contracts/providerRuntime";
+import { getProviderLegacyControl } from "../lib/providers";
 
 interface UseChatSendOptions {
   sessionId: string;
   effectiveCwd: string;
   permissionMode: PermissionMode;
-  selectedModel: string;
-  selectedEffort: string;
+  selectedControls: ProviderControlValueMap;
   selectedProviderPermissionId: string;
   incrementPromptCount: (sessionId: string) => void;
 }
@@ -24,8 +25,7 @@ export function useChatSend({
   sessionId,
   effectiveCwd,
   permissionMode,
-  selectedModel,
-  selectedEffort,
+  selectedControls,
   selectedProviderPermissionId,
   incrementPromptCount,
 }: UseChatSendOptions) {
@@ -35,7 +35,7 @@ export function useChatSend({
       permissionOverride?: PermissionMode,
       opts?: { codexCollaborationMode?: "plan" | "default" },
     ) => {
-      const store = useClaudeStore.getState();
+      const store = useProviderSessionStore.getState();
       const sess = store.sessions[sessionId];
       const started = (sess?.hasBeenStarted ?? false) && (sess?.promptCount ?? 0) > 0;
       const providerState = resolveSessionProviderState(sess);
@@ -77,6 +77,8 @@ export function useChatSend({
           }
         }
 
+        const modelControl = getProviderLegacyControl(provider, "model");
+        const effortControl = getProviderLegacyControl(provider, "effort");
         const turnInput: ProviderTurnInput = {
           provider,
           sessionId,
@@ -84,15 +86,18 @@ export function useChatSend({
           prompt: providerPrompt,
           started,
           threadId: codexThreadId,
-          selectedModel,
-          selectedEffort,
+          selectedControls,
+          selectedModel: modelControl ? selectedControls[modelControl.id] ?? null : providerState.selectedModel,
+          selectedEffort: effortControl ? selectedControls[effortControl.id] ?? null : providerState.selectedEffort,
           providerPermissionId: selectedProviderPermissionId,
           permissionMode,
           skipOpenwolf: sess?.skipOpenwolf || false,
           seedTranscript,
           resumeAtUuid: sess?.resumeAtUuid ?? null,
           forkParentSessionId: sess?.forkParentSessionId ?? null,
-          codexCollaborationMode,
+          ...(provider === "openai" && codexCollaborationMode !== undefined
+            ? { providerOptions: { openai: { collaborationMode: codexCollaborationMode } } }
+            : {}),
         };
         if (permissionOverride !== undefined) {
           turnInput.permissionOverride = permissionOverride;
@@ -105,11 +110,11 @@ export function useChatSend({
         if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
         incrementPromptCount(sessionId);
       } catch (err) {
-        const currentStore = useClaudeStore.getState();
+        const currentStore = useProviderSessionStore.getState();
         currentStore.setStreaming(sessionId, false);
         currentStore.setError(sessionId, String(err));
       }
     },
-    [sessionId, effectiveCwd, permissionMode, selectedModel, selectedEffort, selectedProviderPermissionId, incrementPromptCount],
+    [sessionId, effectiveCwd, permissionMode, selectedControls, selectedProviderPermissionId, incrementPromptCount],
   );
 }

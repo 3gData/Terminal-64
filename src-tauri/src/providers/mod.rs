@@ -26,8 +26,9 @@ pub use events::{ProviderEvent, ProviderEventBase};
 pub use registry::ProviderRegistry;
 pub use traits::{
     ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandContext,
-    ProviderCommandRequest, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
-    ProviderKind, ProviderSendPromptRequest, ProviderSessionModelSwitchMode,
+    ProviderCommandLifecycle, ProviderCommandRequest, ProviderCreateSessionRequest,
+    ProviderHistoryCapabilities, ProviderKind, ProviderOpenWolfOptions, ProviderPreparedCommand,
+    ProviderSendPromptRequest, ProviderSessionModelSwitchMode,
 };
 
 pub(crate) fn emit_provider_event(

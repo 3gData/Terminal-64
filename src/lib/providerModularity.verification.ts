@@ -10,9 +10,11 @@ import {
   claudeBlockToProviderToolResult,
 } from "./claudeEventDecoder";
 import {
+  buildDelegationChildRuntimeMetadata,
   buildDelegationChildProviderTurnInput,
   buildDelegationMcpEnv,
   getDelegationMcpTransport,
+  resolveDelegationChildRuntimePermission,
   resolveDelegationChildRuntimeSettings,
 } from "./delegationChildRuntime";
 import {
@@ -41,14 +43,23 @@ import {
 } from "./codexEventDecoder";
 import {
   decodeCodexPermission,
+  defineProviderManifest,
+  getProviderDefaultEffort,
+  getProviderDefaultModel,
+  getProviderDefaultPermission,
+  getProviderEffortOptions,
   getProviderHistoryPolicy,
   getProviderManifest,
+  getProviderModelOptions,
+  getProviderPermissionOptions,
   isProviderId,
   PROVIDER_IDS,
   providerPersistsLocalTranscript,
   providerSupports,
+  type PermissionOption,
   type ProviderId,
   type ProviderManifest,
+  type ProviderManifestDefinition,
 } from "./providers";
 import {
   cancelProviderSession,
@@ -72,6 +83,7 @@ import {
   isProviderPermissionId,
   permissionModeFromProviderPermission,
 } from "./providerPermissions";
+import { buildSpawnProviderTurnInput } from "./tauriApi";
 import {
   getProviderSessionMetadata,
   getOpenAiProviderSessionMetadata,
@@ -80,9 +92,14 @@ import {
   resolveProviderSessionMetadata,
   STORAGE_KEY,
   flushSave,
-  useClaudeStore,
+  useProviderSessionStore,
   type ProviderSessionState,
-} from "../stores/claudeStore";
+} from "../stores/providerSessionStore";
+import {
+  getDefaultAvailableProvider,
+  listAvailableProviderIds,
+  useSettingsStore,
+} from "../stores/settingsStore";
 import type { CreateCodexRequest, ProviderCreateRequest, ProviderSendRequest } from "../contracts/providerIpc";
 import type { ChatMessage } from "./types";
 
@@ -92,10 +109,25 @@ type VerificationResult = {
 };
 
 type FutureProviderId = ProviderId | "opencode";
-type FutureProviderManifest = Omit<ProviderManifest, "id"> & { id: FutureProviderId };
-type FutureProviderRuntime = Omit<ProviderRuntime, "provider"> & { provider: FutureProviderId };
-type FutureProviderSessionState = Omit<ProviderSessionState, "provider" | "providerMetadata" | "providerPermissions"> & {
+type FutureProviderManifest = ProviderManifest<FutureProviderId>;
+type FutureProviderManifestDefinition = ProviderManifestDefinition<FutureProviderId>;
+type FutureProviderRuntime = {
   provider: FutureProviderId;
+  create: unknown;
+  send: unknown;
+  prepareTurn?: unknown;
+  cancel: unknown;
+  close: unknown;
+  history: ProviderRuntime<ProviderId>["history"];
+};
+type FutureProviderSessionState = Omit<
+  ProviderSessionState,
+  "provider" | "providerMetadata" | "providerPermissions" | "selectedControls"
+> & {
+  provider: FutureProviderId;
+  selectedControls: ProviderSessionState["selectedControls"] & {
+    opencode?: Record<string, string | null>;
+  };
   providerMetadata: ProviderSessionState["providerMetadata"] & {
     opencode?: {
       threadId: string | null;
@@ -147,7 +179,11 @@ const transcriptFixture: ChatMessage[] = [
   { id: "a2", role: "assistant", content: "Edited.", timestamp: 4 },
 ];
 
-const futureProviderStubManifest = {
+const futureProviderStubPermissions = [
+  { id: "stub", label: "Stub", color: "#89b4fa", desc: "Not implemented" },
+] satisfies PermissionOption[];
+
+const futureProviderStubManifestDefinition = {
   id: "opencode",
   ui: {
     label: "OpenCode",
@@ -188,18 +224,40 @@ const futureProviderStubManifest = {
     source: "none",
     hydrateFailureLabel: "OpenCode",
   },
-  controls: {
-    model: { id: "model", label: "Model" },
-    effort: { id: "effort", label: "Effort" },
-    permission: { id: "permission", label: "Profile", inputSuffix: "profile" },
-  },
-  models: [{ id: "stub-model", label: "Stub Model" }],
-  efforts: [{ id: "stub-effort", label: "Stub Effort" }],
-  permissions: [{ id: "stub", label: "Stub", color: "#89b4fa", desc: "Not implemented" }],
-  defaultModel: "stub-model",
-  defaultEffort: "stub-effort",
-  defaultPermission: "stub",
-} satisfies FutureProviderManifest;
+  controls: [
+    {
+      id: "model",
+      label: "Model",
+      options: [{ id: "stub-model", label: "Stub Model" }],
+      defaultValue: "stub-model",
+      placement: "topbar",
+      legacySlot: "model",
+    },
+    {
+      id: "effort",
+      label: "Effort",
+      options: [{ id: "stub-effort", label: "Stub Effort" }],
+      defaultValue: "stub-effort",
+      placement: "topbar",
+      legacySlot: "effort",
+    },
+    {
+      id: "permission",
+      label: "Profile",
+      options: futureProviderStubPermissions,
+      defaultValue: "stub",
+      placement: "input-permission",
+      inputSuffix: "profile",
+      legacySlot: "permission",
+    },
+  ],
+} satisfies FutureProviderManifestDefinition;
+
+// @ts-expect-error provider manifest definitions derive compatibility fields from controls.
+const duplicateFutureProviderManifestDefinition = { ...futureProviderStubManifestDefinition, defaultModel: "stub-model" } satisfies FutureProviderManifestDefinition;
+void duplicateFutureProviderManifestDefinition;
+
+const futureProviderStubManifest = defineProviderManifest(futureProviderStubManifestDefinition);
 
 function unsupportedFutureProvider(provider: FutureProviderId, operation: string): Error {
   return new Error(`Provider ${provider} has no ${operation} runtime binding`);
@@ -232,9 +290,12 @@ function createUnsupportedFutureRuntime(provider: FutureProviderId): FutureProvi
   };
 }
 
-function providerInput(overrides: Partial<ProviderTurnInput> = {}): ProviderTurnInput {
+function providerInput<TProvider extends ProviderId = "openai">(
+  overrides: Partial<ProviderTurnInput<TProvider>> & { provider?: TProvider } = {},
+): ProviderTurnInput<TProvider> {
+  const provider = overrides.provider ?? ("openai" as TProvider);
   return {
-    provider: "openai",
+    provider,
     sessionId: "session-1",
     cwd: "/repo",
     prompt: "hello",
@@ -253,17 +314,28 @@ const providerHistoryHandlerNames = {
   delete: "deleteHistory",
 } satisfies Record<ProviderHistoryCapability, ProviderHistoryHandlerName>;
 
+function assertProviderManifestCompatibilityFieldsAreDerived(provider: ProviderId): void {
+  const manifest = getProviderManifest(provider);
+  assert(manifest.models === getProviderModelOptions(provider), `${provider} compatibility models are derived from controls`);
+  assert(manifest.efforts === getProviderEffortOptions(provider), `${provider} compatibility efforts are derived from controls`);
+  assert(manifest.permissions === getProviderPermissionOptions(provider), `${provider} compatibility permissions are derived from controls`);
+  assertEqual(manifest.defaultModel, getProviderDefaultModel(provider), `${provider} compatibility default model is derived`);
+  assertEqual(manifest.defaultEffort, getProviderDefaultEffort(provider), `${provider} compatibility default effort is derived`);
+  assertEqual(manifest.defaultPermission, getProviderDefaultPermission(provider), `${provider} compatibility default permission is derived`);
+}
+
 export function verifyProviderManifestDefaults(): VerificationResult {
   const anthropic = getProviderManifest("anthropic");
   const openai = getProviderManifest("openai");
   const cursor = getProviderManifest("cursor");
 
-  assertEqual(anthropic.defaultModel, "sonnet", "Anthropic default model");
-  assertEqual(anthropic.defaultEffort, "high", "Anthropic default effort");
-  assertEqual(anthropic.defaultPermission, "default", "Anthropic default permission");
-  assert(anthropic.models.some((model) => model.id === anthropic.defaultModel), "Anthropic default model is listed");
-  assert(anthropic.efforts.some((effort) => effort.id === anthropic.defaultEffort), "Anthropic default effort is listed");
-  assert(anthropic.permissions.some((permission) => permission.id === anthropic.defaultPermission), "Anthropic default permission is listed");
+  assertProviderManifestCompatibilityFieldsAreDerived("anthropic");
+  assertEqual(getProviderDefaultModel("anthropic"), "sonnet", "Anthropic default model");
+  assertEqual(getProviderDefaultEffort("anthropic"), "high", "Anthropic default effort");
+  assertEqual(getProviderDefaultPermission("anthropic"), "default", "Anthropic default permission");
+  assert(getProviderModelOptions("anthropic").some((model) => model.id === getProviderDefaultModel("anthropic")), "Anthropic default model is listed");
+  assert(getProviderEffortOptions("anthropic").some((effort) => effort.id === getProviderDefaultEffort("anthropic")), "Anthropic default effort is listed");
+  assert(isProviderPermissionId("anthropic", getProviderDefaultPermission("anthropic")), "Anthropic default permission is listed");
   assertEqual(anthropic.delegation.mcpTransport, "temp-config", "Anthropic delegation MCP transport is manifest-owned");
   assertEqual(anthropic.delegation.skipOpenwolf, "inherit", "Anthropic delegation inherits OpenWolf setting");
   assertEqual(anthropic.delegation.planner.permissionOverride, "inherit", "Anthropic delegation planner inherits explicit overrides");
@@ -282,12 +354,13 @@ export function verifyProviderManifestDefaults(): VerificationResult {
   assertEqual(getProviderHistoryPolicy("anthropic").source, "claude-jsonl", "Anthropic history policy helper uses manifest source");
   assert(!providerPersistsLocalTranscript("anthropic"), "Anthropic does not persist local transcripts");
 
-  assertEqual(openai.defaultModel, "gpt-5.5", "OpenAI default model");
-  assertEqual(openai.defaultEffort, "medium", "OpenAI default effort");
-  assertEqual(openai.defaultPermission, "workspace", "OpenAI default permission");
-  assert(openai.models.some((model) => model.id === openai.defaultModel), "OpenAI default model is listed");
-  assert(openai.efforts.some((effort) => effort.id === openai.defaultEffort), "OpenAI default effort is listed");
-  assert(openai.permissions.some((permission) => permission.id === openai.defaultPermission), "OpenAI default permission is listed");
+  assertProviderManifestCompatibilityFieldsAreDerived("openai");
+  assertEqual(getProviderDefaultModel("openai"), "gpt-5.5", "OpenAI default model");
+  assertEqual(getProviderDefaultEffort("openai"), "medium", "OpenAI default effort");
+  assertEqual(getProviderDefaultPermission("openai"), "workspace", "OpenAI default permission");
+  assert(getProviderModelOptions("openai").some((model) => model.id === getProviderDefaultModel("openai")), "OpenAI default model is listed");
+  assert(getProviderEffortOptions("openai").some((effort) => effort.id === getProviderDefaultEffort("openai")), "OpenAI default effort is listed");
+  assert(isProviderPermissionId("openai", getProviderDefaultPermission("openai")), "OpenAI default permission is listed");
   assertEqual(openai.delegation.mcpTransport, "env", "OpenAI delegation MCP transport is manifest-owned");
   assertEqual(openai.delegation.skipOpenwolf, "always", "OpenAI delegation always skips OpenWolf bootstrap");
   assertEqual(openai.delegation.planner.permissionOverride, "inherit", "OpenAI delegation planner inherits explicit overrides");
@@ -303,12 +376,13 @@ export function verifyProviderManifestDefaults(): VerificationResult {
   assert(providerSupports("openai", "rewind"), "OpenAI manifest advertises rewind support");
   assert(!providerSupports("openai", "hookLog"), "OpenAI manifest does not expose Claude hook log");
 
-  assertEqual(cursor.defaultModel, "composer-2-fast", "Cursor default model");
-  assertEqual(cursor.defaultEffort, "default", "Cursor default effort");
-  assertEqual(cursor.defaultPermission, "default", "Cursor default permission");
-  assert(cursor.models.some((model) => model.id === cursor.defaultModel), "Cursor default model is listed");
-  assert(cursor.efforts.some((effort) => effort.id === cursor.defaultEffort), "Cursor default effort is listed");
-  assert(cursor.permissions.some((permission) => permission.id === cursor.defaultPermission), "Cursor default permission is listed");
+  assertProviderManifestCompatibilityFieldsAreDerived("cursor");
+  assertEqual(getProviderDefaultModel("cursor"), "composer-2-fast", "Cursor default model");
+  assertEqual(getProviderDefaultEffort("cursor"), "default", "Cursor default effort");
+  assertEqual(getProviderDefaultPermission("cursor"), "default", "Cursor default permission");
+  assert(getProviderModelOptions("cursor").some((model) => model.id === getProviderDefaultModel("cursor")), "Cursor default model is listed");
+  assert(getProviderEffortOptions("cursor").some((effort) => effort.id === getProviderDefaultEffort("cursor")), "Cursor default effort is listed");
+  assert(isProviderPermissionId("cursor", getProviderDefaultPermission("cursor")), "Cursor default permission is listed");
   assertEqual(cursor.delegation.mcpTransport, "env", "Cursor delegation MCP transport is manifest-owned");
   assertEqual(cursor.delegation.skipOpenwolf, "always", "Cursor delegation skips OpenWolf bootstrap");
   assertEqual(cursor.delegation.planner.permissionOverride, "bypass_all", "Cursor delegation planner uses manifest-owned force mode");
@@ -327,8 +401,10 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
   const sessionId = "provider-verification-legacy-openai";
   const stateSessionId = "provider-verification-state-openai";
   const cursorSessionId = "provider-verification-cursor-local";
+  const recoveredOpenAiSessionId = "provider-verification-recovered-openai";
+  const recoveredCursorSessionId = "provider-verification-recovered-cursor";
   const previousStorage = localStorage.getItem(STORAGE_KEY);
-  const previousSessions = useClaudeStore.getState().sessions;
+  const previousSessions = useProviderSessionStore.getState().sessions;
 
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -362,8 +438,10 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
           providerMetadata: {
             openai: {
               codexThreadId: "thread-provider-state",
-              selectedCodexPermission: "workspace",
             },
+          },
+          providerPermissions: {
+            openai: "workspace",
           },
         },
         provider: "anthropic",
@@ -391,14 +469,77 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
         providerLocked: true,
         localTranscript: transcriptFixture.slice(0, 2),
       },
+      [recoveredOpenAiSessionId]: {
+        sessionId: recoveredOpenAiSessionId,
+        name: "Recovered OpenAI",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 4,
+        schemaVersion: 6,
+        providerState: {
+          provider: "anthropic",
+          providerLocked: true,
+          selectedModel: "sonnet",
+          selectedEffort: "high",
+          seedTranscript: null,
+          providerMetadata: {
+            openai: {
+              codexThreadId: "thread-recovered",
+            },
+          },
+          providerPermissions: {
+            openai: "workspace",
+          },
+          selectedControls: {
+            openai: {
+              model: "gpt-5.5",
+              effort: "medium",
+              sandbox: "workspace",
+            },
+          },
+        },
+        provider: "anthropic",
+      },
+      [recoveredCursorSessionId]: {
+        sessionId: recoveredCursorSessionId,
+        name: "Recovered Cursor",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 5,
+        schemaVersion: 6,
+        providerState: {
+          provider: "anthropic",
+          providerLocked: true,
+          selectedModel: "sonnet",
+          selectedEffort: "high",
+          seedTranscript: null,
+          providerMetadata: {},
+          providerPermissions: {
+            cursor: "default",
+          },
+          selectedControls: {
+            cursor: {
+              model: "composer-2-fast",
+              mode: "ask",
+              "apply-mode": "default",
+            },
+          },
+        },
+        provider: "anthropic",
+        localTranscript: transcriptFixture.slice(0, 2),
+      },
     }));
-    useClaudeStore.setState({ sessions: {} });
-    useClaudeStore.getState().createSession(sessionId);
-    useClaudeStore.getState().createSession(stateSessionId);
-    useClaudeStore.getState().createSession(cursorSessionId);
-    const migrated = useClaudeStore.getState().sessions[sessionId];
-    const stateBacked = useClaudeStore.getState().sessions[stateSessionId];
-    const cursorBacked = useClaudeStore.getState().sessions[cursorSessionId];
+    useProviderSessionStore.setState({ sessions: {} });
+    useProviderSessionStore.getState().createSession(sessionId);
+    useProviderSessionStore.getState().createSession(stateSessionId, undefined, false, undefined, undefined, "anthropic", false);
+    useProviderSessionStore.getState().createSession(cursorSessionId, undefined, false, undefined, undefined, "anthropic", false);
+    useProviderSessionStore.getState().createSession(recoveredOpenAiSessionId);
+    useProviderSessionStore.getState().createSession(recoveredCursorSessionId);
+    const migrated = useProviderSessionStore.getState().sessions[sessionId];
+    const stateBacked = useProviderSessionStore.getState().sessions[stateSessionId];
+    const cursorBacked = useProviderSessionStore.getState().sessions[cursorSessionId];
+    const recoveredOpenAi = useProviderSessionStore.getState().sessions[recoveredOpenAiSessionId];
+    const recoveredCursor = useProviderSessionStore.getState().sessions[recoveredCursorSessionId];
 
     assert(migrated, "legacy OpenAI metadata creates a session");
     assertEqual(migrated.providerState.provider, "openai", "legacy provider migrates into providerState");
@@ -409,30 +550,66 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
     assertEqual(getProviderPermissionId(migrated.providerState, "openai"), "yolo", "legacy Codex permission migrates");
     assertEqual(migrated.providerState.selectedModel, "gpt-5.4", "legacy selected model migrates");
     assertEqual(migrated.providerState.selectedEffort, "high", "legacy selected effort migrates");
+    assertEqual(migrated.providerState.selectedControls.openai?.model, "gpt-5.4", "legacy selected model seeds OpenAI control value");
+    assertEqual(migrated.providerState.selectedControls.openai?.effort, "high", "legacy selected effort seeds OpenAI control value");
+    assertEqual(migrated.providerState.selectedControls.openai?.sandbox, "yolo", "legacy Codex permission seeds OpenAI permission control");
     assertEqual(migrated.messages.length, 2, "legacy seed transcript hydrates into visible messages");
     assertEqual(migrated.codexThreadId, migratedOpenAi?.codexThreadId ?? null, "compat thread mirror matches providerState");
 
     assert(stateBacked, "schema v5 metadata creates a providerState-backed session");
     assertEqual(stateBacked.providerState.provider, "openai", "providerState provider wins over stale flat provider");
+    assertEqual(stateBacked.provider, "openai", "persisted provider wins over mount-time default provider");
     assertEqual(stateBacked.providerState.providerLocked, true, "providerState lock flag wins over saved metadata");
     assertEqual(stateBacked.providerLocked, true, "provider lock mirror follows providerState");
     const stateBackedOpenAi = getOpenAiProviderSessionMetadata(stateBacked.providerState);
     assertEqual(stateBackedOpenAi?.codexThreadId, "thread-provider-state", "providerState thread id wins over stale flat mirror");
-    assertEqual(getProviderPermissionId(stateBacked.providerState, "openai"), "workspace", "providerState permission wins over stale flat mirror");
+    assertEqual(getProviderPermissionId(stateBacked.providerState, "openai"), "workspace", "providerState permission wins from providerPermissions over stale flat mirror");
     assertEqual(stateBacked.providerState.selectedModel, "gpt-5.5", "providerState selected model wins over stale flat mirror");
 
     assert(cursorBacked, "Cursor local transcript metadata creates a session");
     assertEqual(cursorBacked.providerState.provider, "cursor", "Cursor provider state hydrates from metadata");
+    assertEqual(cursorBacked.provider, "cursor", "Cursor provider survives mount-time default provider after refresh");
+    assertEqual(cursorBacked.providerState.selectedControls.cursor?.mode, "default", "legacy Cursor selected effort migrates to provider-owned mode control");
+    assertEqual(cursorBacked.providerState.selectedEffort, null, "Cursor mode is not mirrored as selectedEffort");
     assertEqual(cursorBacked.messages.length, 2, "Cursor local transcript hydrates into visible messages");
-    useClaudeStore.getState().addUserMessage(cursorSessionId, "persist this");
-    useClaudeStore.getState().finalizeAssistantMessage(cursorSessionId, "persisted");
+
+    assert(recoveredOpenAi, "corrupted OpenAI metadata creates a session");
+    assertEqual(recoveredOpenAi.providerState.provider, "openai", "OpenAI thread metadata recovers provider after bad Anthropic refresh save");
+    assertEqual(
+      getOpenAiProviderSessionMetadata(recoveredOpenAi.providerState)?.codexThreadId,
+      "thread-recovered",
+      "recovered OpenAI metadata keeps Codex thread id",
+    );
+
+    assert(recoveredCursor, "corrupted Cursor metadata creates a session");
+    assertEqual(recoveredCursor.providerState.provider, "cursor", "Cursor local transcript/control metadata recovers provider after bad Anthropic refresh save");
+    assertEqual(recoveredCursor.providerState.selectedControls.cursor?.mode, "ask", "recovered Cursor keeps provider-owned mode control");
+
+    useProviderSessionStore.getState().addUserMessage(cursorSessionId, "persist this");
+    useProviderSessionStore.getState().finalizeAssistantMessage(cursorSessionId, "persisted");
     flushSave();
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") as Record<string, { localTranscript?: ChatMessage[] }>;
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") as Record<string, {
+      localTranscript?: ChatMessage[];
+      selectedCodexPermission?: string | null;
+      providerPermissions?: Record<string, string | null>;
+      providerState?: {
+        providerMetadata?: {
+          openai?: { selectedCodexPermission?: string | null };
+        };
+      };
+    }>;
     const savedCursorTranscript = saved[cursorSessionId]?.localTranscript ?? [];
     assertEqual(savedCursorTranscript.length, 4, "Cursor transcript writes back to metadata");
     assertEqual(savedCursorTranscript[3]?.content, "persisted", "Cursor assistant message persists locally");
     assertEqual(saved[sessionId]?.localTranscript, undefined, "OpenAI transcript stays provider-owned after metadata save");
     assertEqual(saved[stateSessionId]?.localTranscript, undefined, "Provider-state OpenAI transcript stays out of local metadata");
+    assertEqual(saved[sessionId]?.providerPermissions?.openai, "yolo", "OpenAI permission writes through providerPermissions");
+    assertEqual(saved[sessionId]?.selectedCodexPermission, undefined, "OpenAI save drops legacy flat Codex permission");
+    assertEqual(
+      saved[sessionId]?.providerState?.providerMetadata?.openai?.selectedCodexPermission,
+      undefined,
+      "OpenAI provider metadata no longer stores permission ids",
+    );
 
     const hotReloadFallback = resolveSessionProviderState({
       provider: "openai",
@@ -451,7 +628,7 @@ export function verifyProviderStateMigrationFixture(): VerificationResult {
 
     return { name: "providerState legacy migration", ok: true };
   } finally {
-    useClaudeStore.setState({ sessions: previousSessions });
+    useProviderSessionStore.setState({ sessions: previousSessions });
     if (previousStorage === null) {
       localStorage.removeItem(STORAGE_KEY);
     } else {
@@ -464,8 +641,8 @@ export function verifyProviderPickerLockFixtures(): VerificationResult {
   assert(typeof localStorage !== "undefined", "provider picker fixture requires browser localStorage");
 
   const previousStorage = localStorage.getItem(STORAGE_KEY);
-  const previousSessions = useClaudeStore.getState().sessions;
-  const store = useClaudeStore.getState();
+  const previousSessions = useProviderSessionStore.getState().sessions;
+  const store = useProviderSessionStore.getState();
 
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -498,36 +675,40 @@ export function verifyProviderPickerLockFixtures(): VerificationResult {
           providerMetadata: {
             openai: {
               codexThreadId: "thread-saved-picker",
-              selectedCodexPermission: "full-auto",
             },
+          },
+          providerPermissions: {
+            openai: "full-auto",
           },
         },
       },
     }));
-    useClaudeStore.setState({ sessions: {} });
+    useProviderSessionStore.setState({ sessions: {} });
 
     store.createSession("picker-blank", undefined, true);
-    let blank = useClaudeStore.getState().sessions["picker-blank"];
+    let blank = useProviderSessionStore.getState().sessions["picker-blank"];
     assert(blank, "blank user-created session exists");
     assertEqual(blank.providerState.provider, "anthropic", "blank user-created session defaults to Claude");
     assertEqual(blank.providerState.providerLocked, false, "blank user-created session starts provider-unlocked");
 
     assertEqual(store.switchProviderBeforeStart("picker-blank", "openai"), true, "blank session can switch to OpenAI before first send");
-    blank = useClaudeStore.getState().sessions["picker-blank"];
+    blank = useProviderSessionStore.getState().sessions["picker-blank"];
     assert(blank, "switched blank session still exists");
-    const openaiManifest = getProviderManifest("openai");
     assertEqual(blank.providerState.provider, "openai", "pre-send provider picker writes providerState provider");
     assertEqual(blank.provider, "openai", "pre-send provider picker writes compatibility provider mirror");
     assertEqual(blank.providerState.providerLocked, false, "pre-send provider switch keeps session unlocked");
-    assertEqual(blank.providerState.selectedModel, openaiManifest.defaultModel, "pre-send provider switch resets default model");
-    assertEqual(blank.providerState.selectedEffort, openaiManifest.defaultEffort, "pre-send provider switch resets default effort");
-    assertEqual(getProviderPermissionId(blank.providerState, "openai"), openaiManifest.defaultPermission, "pre-send provider switch resets provider permission");
+    assertEqual(blank.providerState.selectedModel, getProviderDefaultModel("openai"), "pre-send provider switch resets default model");
+    assertEqual(blank.providerState.selectedEffort, getProviderDefaultEffort("openai"), "pre-send provider switch resets default effort");
+    assertEqual(blank.providerState.selectedControls.openai?.model, getProviderDefaultModel("openai"), "pre-send provider switch seeds model control");
+    assertEqual(blank.providerState.selectedControls.openai?.effort, getProviderDefaultEffort("openai"), "pre-send provider switch seeds effort control");
+    assertEqual(getProviderPermissionId(blank.providerState, "openai"), getProviderDefaultPermission("openai"), "pre-send provider switch resets provider permission");
     assertEqual(
       providerTurnOperation(providerInput({
         provider: blank.providerState.provider,
         started: blank.hasBeenStarted && blank.promptCount > 0,
         selectedModel: blank.providerState.selectedModel,
         selectedEffort: blank.providerState.selectedEffort,
+        selectedControls: blank.providerState.selectedControls.openai,
         providerPermissionId: getProviderPermissionId(blank.providerState, "openai"),
       })),
       "create",
@@ -535,44 +716,44 @@ export function verifyProviderPickerLockFixtures(): VerificationResult {
     );
 
     store.addUserMessage("picker-blank", "hello");
-    blank = useClaudeStore.getState().sessions["picker-blank"];
+    blank = useProviderSessionStore.getState().sessions["picker-blank"];
     assert(blank, "blank session survives first user message");
     assertEqual(blank.providerState.providerLocked, true, "first user message locks selected provider");
     assertEqual(store.switchProviderBeforeStart("picker-blank", "anthropic"), false, "first-send-locked session rejects later provider switch");
-    assertEqual(useClaudeStore.getState().sessions["picker-blank"]?.providerState.provider, "openai", "rejected provider switch preserves selected provider");
+    assertEqual(useProviderSessionStore.getState().sessions["picker-blank"]?.providerState.provider, "openai", "rejected provider switch preserves selected provider");
 
     store.createSession("picker-count-lock", undefined, true);
     assertEqual(store.switchProviderBeforeStart("picker-count-lock", "openai"), true, "second blank session can switch before prompt count increments");
     store.incrementPromptCount("picker-count-lock");
-    const counted = useClaudeStore.getState().sessions["picker-count-lock"];
+    const counted = useProviderSessionStore.getState().sessions["picker-count-lock"];
     assert(counted, "prompt-count lock fixture exists");
     assertEqual(counted.hasBeenStarted, true, "prompt-count increment marks session started");
     assertEqual(counted.providerState.providerLocked, true, "prompt-count increment locks provider");
     assertEqual(store.switchProviderBeforeStart("picker-count-lock", "anthropic"), false, "started session cannot switch provider");
 
     store.createSession("picker-explicit-locked", "Explicit OpenAI", true, false, "", "openai", true);
-    const explicitLocked = useClaudeStore.getState().sessions["picker-explicit-locked"];
+    const explicitLocked = useProviderSessionStore.getState().sessions["picker-explicit-locked"];
     assert(explicitLocked, "explicitly locked session exists");
     assertEqual(explicitLocked.providerState.provider, "openai", "explicit provider survives createSession");
     assertEqual(explicitLocked.providerState.providerLocked, true, "explicit provider lock survives createSession");
     assertEqual(store.switchProviderBeforeStart("picker-explicit-locked", "anthropic"), false, "explicitly locked saved/forked session rejects provider switch");
 
     store.createSession("picker-legacy-openai");
-    const legacy = useClaudeStore.getState().sessions["picker-legacy-openai"];
+    const legacy = useProviderSessionStore.getState().sessions["picker-legacy-openai"];
     assert(legacy, "legacy saved session reopens");
     assertEqual(legacy.providerState.provider, "openai", "legacy saved session reopens with known provider");
     assertEqual(legacy.providerState.providerLocked, true, "legacy saved session reopens provider-locked");
     assertEqual(store.switchProviderBeforeStart("picker-legacy-openai", "anthropic"), false, "legacy saved session rejects provider switch");
 
     store.createSession("picker-saved-openai");
-    const saved = useClaudeStore.getState().sessions["picker-saved-openai"];
+    const saved = useProviderSessionStore.getState().sessions["picker-saved-openai"];
     assert(saved, "providerState saved session reopens");
     assertEqual(saved.providerState.provider, "openai", "providerState saved session reopens with known provider");
     assertEqual(saved.providerState.providerLocked, true, "providerState saved session reopens provider-locked");
 
     store.createSession("picker-disk-hydrated", undefined, true);
     store.loadFromDisk("picker-disk-hydrated", transcriptFixture.slice(0, 2));
-    const diskHydrated = useClaudeStore.getState().sessions["picker-disk-hydrated"];
+    const diskHydrated = useProviderSessionStore.getState().sessions["picker-disk-hydrated"];
     assert(diskHydrated, "disk-hydrated session exists");
     assertEqual(diskHydrated.promptCount, 1, "disk hydration restores prompt count");
     assertEqual(diskHydrated.hasBeenStarted, true, "disk hydration marks session started when user turns exist");
@@ -581,7 +762,7 @@ export function verifyProviderPickerLockFixtures(): VerificationResult {
 
     return { name: "empty-chat provider picker lock fixtures", ok: true };
   } finally {
-    useClaudeStore.setState({ sessions: previousSessions });
+    useProviderSessionStore.setState({ sessions: previousSessions });
     if (previousStorage === null) {
       localStorage.removeItem(STORAGE_KEY);
     } else {
@@ -601,10 +782,12 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   );
 
   const createReq = buildCodexCreateRequest(providerInput({
-    selectedModel: "gpt-5.4",
-    selectedEffort: "xhigh",
+    selectedControls: {
+      model: "gpt-5.4",
+      effort: "xhigh",
+    },
     providerPermissionId: "workspace",
-    codexCollaborationMode: "plan",
+    providerOptions: { openai: { collaborationMode: "plan" } },
   }));
   assertEqual(createReq.session_id, "session-1", "Codex create keeps local session id");
   assertEqual(createReq.model, "gpt-5.4", "Codex create includes selected model");
@@ -615,7 +798,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   assertNoUndefinedOwnValues(createReq as unknown as Record<string, unknown>, "createReq");
 
   const buildAfterPlanReq = buildCodexCreateRequest(providerInput({
-    codexCollaborationMode: "default",
+    providerOptions: { openai: { collaborationMode: "default" } },
   }));
   assertEqual(
     buildAfterPlanReq.collaboration_mode,
@@ -625,7 +808,7 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
 
   const cursorReviewReq = buildCursorRequest(providerInput({
     provider: "cursor",
-    selectedModel: "auto",
+    selectedControls: { model: "auto", mode: "default" },
     providerPermissionId: "default",
   }));
   assertEqual(cursorReviewReq.session_id, "session-1", "Cursor request keeps local session id");
@@ -636,13 +819,12 @@ export function verifyProviderRuntimeFixtures(): VerificationResult {
   const cursorForceReq = buildCursorRequest(providerInput({
     provider: "cursor",
     threadId: "cursor-thread",
-    selectedModel: "gpt-5.3-codex",
-    selectedEffort: "ask",
+    selectedControls: { model: "gpt-5.3-codex", mode: "ask" },
     providerPermissionId: "bypass_all",
   }));
   assertEqual(cursorForceReq.thread_id, "cursor-thread", "Cursor request can carry resume thread id");
   assertEqual(cursorForceReq.model, "gpt-5.3-codex", "Cursor explicit model is included");
-  assertEqual(cursorForceReq.mode, "ask", "Cursor effort selector maps to CLI mode");
+  assertEqual(cursorForceReq.mode, "ask", "Cursor mode control maps to CLI mode");
   assertEqual(cursorForceReq.force, true, "Cursor bypass permission maps to --force");
   assertNoUndefinedOwnValues(cursorForceReq as unknown as Record<string, unknown>, "cursorForceReq");
 
@@ -774,9 +956,8 @@ export function verifyProviderLifecycleAndHistorySurfaceFixtures(): Verification
 
 export function verifyProviderPermissionHelperFixtures(): VerificationResult {
   for (const provider of PROVIDER_IDS) {
-    const manifest = getProviderManifest(provider);
     const defaultPermission = getDefaultProviderPermissionId(provider);
-    assertEqual(defaultPermission, manifest.defaultPermission, `${provider} default permission is manifest-owned`);
+    assertEqual(defaultPermission, getProviderDefaultPermission(provider), `${provider} default permission is manifest-owned`);
     assert(isProviderPermissionId(provider, defaultPermission), `${provider} default permission is listed`);
     assertEqual(
       getProviderPermissionOption(provider, "missing").id,
@@ -815,14 +996,68 @@ export function verifyProviderPermissionHelperFixtures(): VerificationResult {
   return { name: "provider permission helper conformance fixtures", ok: true };
 }
 
+export function verifyProviderPromptSpawnFixtures(): VerificationResult {
+  const anthropicSpawn = buildSpawnProviderTurnInput({
+    provider: "anthropic",
+    sessionId: "spawn-anthropic",
+    cwd: "/repo",
+    prompt: "hello",
+  });
+  assertEqual(anthropicSpawn.providerPermissionId, "default", "Anthropic prompt spawn uses manifest default permission");
+  assertEqual(anthropicSpawn.permissionMode, "default", "Anthropic prompt spawn passes Claude-shaped permission mode");
+  assertEqual(
+    anthropicSpawn.selectedControls?.["tool-permission"],
+    "default",
+    "Anthropic prompt spawn seeds manifest-declared permission control",
+  );
+
+  const openaiSpawn = buildSpawnProviderTurnInput({
+    provider: "openai",
+    sessionId: "spawn-openai",
+    cwd: "/repo",
+    prompt: "hello",
+  });
+  assertEqual(openaiSpawn.providerPermissionId, "workspace", "OpenAI prompt spawn uses manifest default permission");
+  assertEqual(openaiSpawn.selectedControls?.sandbox, "workspace", "OpenAI prompt spawn seeds sandbox control");
+  assert(
+    !Object.prototype.hasOwnProperty.call(openaiSpawn, "permissionMode"),
+    "OpenAI prompt spawn omits Claude-shaped permissionMode",
+  );
+  assert(
+    !Object.prototype.hasOwnProperty.call(openaiSpawn, "skipOpenwolf"),
+    "prompt spawn omits undefined skipOpenwolf",
+  );
+
+  const cursorSpawn = buildSpawnProviderTurnInput({
+    provider: "cursor",
+    sessionId: "spawn-cursor",
+    cwd: "/repo",
+    prompt: "hello",
+    skipOpenwolf: true,
+  });
+  assertEqual(cursorSpawn.providerPermissionId, "default", "Cursor prompt spawn uses manifest default permission");
+  assertEqual(cursorSpawn.selectedControls?.["apply-mode"], "default", "Cursor prompt spawn seeds apply-mode control");
+  assertEqual(cursorSpawn.skipOpenwolf, true, "prompt spawn preserves explicit skipOpenwolf");
+  assert(
+    !Object.prototype.hasOwnProperty.call(cursorSpawn, "permissionMode"),
+    "Cursor prompt spawn omits permissionMode even when the provider default id overlaps Claude",
+  );
+  assertNoUndefinedOwnValues(openaiSpawn as unknown as Record<string, unknown>, "openaiSpawn");
+  assertNoUndefinedOwnValues(cursorSpawn as unknown as Record<string, unknown>, "cursorSpawn");
+
+  return { name: "provider prompt spawn fixtures", ok: true };
+}
+
 export function verifyProviderMetadataHelperFixtures(): VerificationResult {
   const openaiState = resolveSessionProviderState({
     provider: "openai",
     providerMetadata: {
       openai: {
         codexThreadId: "thread-provider-metadata",
-        selectedCodexPermission: "workspace",
       },
+    },
+    providerPermissions: {
+      openai: "workspace",
     },
     selectedModel: "gpt-5.5",
     selectedEffort: "medium",
@@ -875,6 +1110,12 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
         providerLocked: true,
         selectedModel: "gpt-5.4",
         selectedEffort: "medium",
+        selectedControls: {
+          openai: {
+            model: "gpt-5.4",
+            effort: "medium",
+          },
+        },
         providerPermissions: {
           openai: "full-auto",
         },
@@ -882,28 +1123,41 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
         providerMetadata: {
           openai: {
             codexThreadId: "thread-parent",
-            selectedCodexPermission: "full-auto",
           },
         },
       },
       skipOpenwolf: true,
     },
     selectedProvider: "anthropic",
+    selectedControls: { model: "sonnet", effort: "high" },
     selectedModel: "sonnet",
     selectedEffort: "high",
     selectedProviderPermissionId: "workspace",
   });
   assertEqual(inheritedRuntime.provider, "openai", "delegation child inherits parent provider");
+  assertEqual(inheritedRuntime.selectedControls.model, "gpt-5.4", "delegation child inherits parent model control");
+  assertEqual(inheritedRuntime.selectedControls.effort, "medium", "delegation child inherits parent effort control");
   assertEqual(inheritedRuntime.selectedModel, "gpt-5.4", "delegation child inherits parent model");
   assertEqual(inheritedRuntime.selectedEffort, "medium", "delegation child inherits parent effort");
   assertEqual(inheritedRuntime.selectedProviderPermissionId, "full-auto", "delegation child inherits parent provider permission");
   assertEqual(inheritedRuntime.inheritSkipOpenwolf, true, "delegation child inherits parent OpenWolf skip preference");
+  const inheritedMetadata = buildDelegationChildRuntimeMetadata(inheritedRuntime, "/repo");
+  assertEqual(inheritedMetadata.providerPermissionId, "full-auto", "delegation child metadata stores provider permission id");
+  assert(!Object.prototype.hasOwnProperty.call(inheritedMetadata, "permissionPreset"), "delegation child metadata omits legacy permissionPreset");
+
+  const selectedOpenAiPermission = resolveDelegationChildRuntimePermission("openai", "workspace");
+  assertEqual(selectedOpenAiPermission.providerPermissionId, "workspace", "OpenAI child selected permission preserves workspace");
+  assert(!Object.prototype.hasOwnProperty.call(selectedOpenAiPermission, "permissionOverride"), "OpenAI selected child permission omits bypass override");
+  const forcedAnthropicPermission = resolveDelegationChildRuntimePermission("anthropic", "default");
+  assertEqual(forcedAnthropicPermission.providerPermissionId, "bypass_all", "Anthropic bypass child permission stores provider bypass id");
+  assertEqual(forcedAnthropicPermission.permissionOverride, "bypass_all", "Anthropic bypass child permission forces runtime override");
 
   const openaiChild = buildDelegationChildProviderTurnInput({
     provider: "openai",
     sessionId: "child-openai",
     cwd: "/repo",
     prompt: "do the task",
+    selectedControls: { model: "gpt-5.5", effort: "high" },
     selectedModel: "gpt-5.5",
     selectedEffort: "high",
     selectedProviderPermissionId: "workspace",
@@ -913,12 +1167,16 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
 
   assertEqual(openaiChild.provider, "openai", "delegation OpenAI child keeps provider");
   assertEqual(openaiChild.started, false, "delegation child starts as a first turn");
-  assertEqual(openaiChild.permissionOverride, "bypass_all", "delegation child uses bypass override");
+  assertEqual(openaiChild.providerPermissionId, "workspace", "delegation OpenAI child keeps selected permission id");
+  assert(!Object.prototype.hasOwnProperty.call(openaiChild, "permissionOverride"), "delegation OpenAI child selected policy does not force bypass override");
   assertEqual(openaiChild.skipOpenwolf, true, "delegation OpenAI child skips OpenWolf bootstrap");
-  assertEqual(openaiChild.skipGitRepoCheck, true, "delegation OpenAI child skips git repo check");
-  assertEqual(openaiChild.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation OpenAI child receives MCP env");
-  assert(!Object.prototype.hasOwnProperty.call(openaiChild, "mcpConfig"), "delegation OpenAI child does not receive Claude MCP config");
-  assert(!Object.prototype.hasOwnProperty.call(openaiChild, "noSessionPersistence"), "delegation OpenAI child omits Claude persistence flag");
+  assertEqual(openaiChild.providerOptions?.openai?.skipGitRepoCheck, true, "delegation OpenAI child skips git repo check");
+  assertEqual(openaiChild.providerOptions?.openai?.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation OpenAI child receives MCP env");
+  assert(!Object.prototype.hasOwnProperty.call(openaiChild.providerOptions ?? {}, "anthropic"), "delegation OpenAI child does not receive Anthropic options");
+  assert(!Object.prototype.hasOwnProperty.call(openaiChild.providerOptions ?? {}, "cursor"), "delegation OpenAI child does not receive Cursor options");
+  const openaiChildReq = buildCodexCreateRequest(openaiChild as ProviderTurnInput<"openai">);
+  assertEqual(openaiChildReq.sandbox_mode, "workspace-write", "delegation OpenAI selected permission reaches Codex request");
+  assert(!Object.prototype.hasOwnProperty.call(openaiChildReq, "yolo"), "delegation OpenAI selected policy does not map to yolo");
   assertNoUndefinedOwnValues(openaiChild as unknown as Record<string, unknown>, "openaiChild");
 
   const cursorChild = buildDelegationChildProviderTurnInput({
@@ -926,18 +1184,24 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     sessionId: "child-cursor",
     cwd: "/repo",
     prompt: "do the task",
+    selectedControls: { model: "auto", mode: "ask" },
     selectedModel: "auto",
-    selectedEffort: "default",
-    selectedProviderPermissionId: "bypass_all",
+    selectedEffort: "",
+    selectedProviderPermissionId: "default",
     inheritSkipOpenwolf: false,
     mcpEnv,
   });
 
   assertEqual(cursorChild.provider, "cursor", "delegation Cursor child keeps provider");
+  assertEqual(cursorChild.selectedControls?.mode, "ask", "delegation Cursor child carries mode control without selectedEffort");
+  assertEqual(cursorChild.providerPermissionId, "default", "delegation Cursor child keeps selected permission id");
+  assert(!Object.prototype.hasOwnProperty.call(cursorChild, "permissionOverride"), "delegation Cursor child selected policy does not force bypass override");
   assertEqual(cursorChild.skipOpenwolf, true, "delegation Cursor child skips OpenWolf bootstrap");
-  assertEqual(cursorChild.skipGitRepoCheck, true, "delegation Cursor child skips git repo check");
-  assertEqual(cursorChild.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Cursor child receives MCP env");
-  assert(!Object.prototype.hasOwnProperty.call(cursorChild, "mcpConfig"), "delegation Cursor child does not receive Claude MCP config");
+  assertEqual(cursorChild.providerOptions?.cursor?.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Cursor child receives MCP env");
+  assert(!Object.prototype.hasOwnProperty.call(cursorChild.providerOptions ?? {}, "anthropic"), "delegation Cursor child does not receive Anthropic options");
+  assert(!Object.prototype.hasOwnProperty.call(cursorChild.providerOptions ?? {}, "openai"), "delegation Cursor child does not receive OpenAI options");
+  const cursorChildReq = buildCursorRequest(cursorChild as ProviderTurnInput<"cursor">);
+  assert(!Object.prototype.hasOwnProperty.call(cursorChildReq, "force"), "delegation Cursor selected default permission does not force writes");
   assertNoUndefinedOwnValues(cursorChild as unknown as Record<string, unknown>, "cursorChild");
 
   const anthropicChild = buildDelegationChildProviderTurnInput({
@@ -945,6 +1209,7 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
     sessionId: "child-anthropic",
     cwd: "/repo",
     prompt: "do the task",
+    selectedControls: { model: "sonnet", effort: "high" },
     selectedModel: "sonnet",
     selectedEffort: "high",
     selectedProviderPermissionId: "workspace",
@@ -953,11 +1218,14 @@ export function verifyDelegationChildSpawnFixtures(): VerificationResult {
   });
 
   assertEqual(anthropicChild.provider, "anthropic", "delegation Anthropic child keeps provider");
+  assertEqual(anthropicChild.providerPermissionId, "bypass_all", "delegation Anthropic child manifest policy stores bypass permission");
+  assertEqual(anthropicChild.permissionOverride, "bypass_all", "delegation Anthropic child manifest policy forces bypass override");
   assertEqual(anthropicChild.skipOpenwolf, true, "delegation Anthropic child inherits OpenWolf preference");
-  assertEqual(anthropicChild.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Anthropic child carries MCP env for runtime temp config");
-  assertEqual(anthropicChild.noSessionPersistence, true, "delegation Anthropic child disables session persistence");
-  assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "mcpConfig"), "delegation Anthropic child defers temp MCP config creation to runtime prep");
-  assert(!Object.prototype.hasOwnProperty.call(anthropicChild, "skipGitRepoCheck"), "delegation Anthropic child omits Codex git flag");
+  assertEqual(anthropicChild.providerOptions?.anthropic?.mcpEnv?.T64_AGENT_LABEL, "Agent 1", "delegation Anthropic child carries MCP env for runtime temp config");
+  assertEqual(anthropicChild.providerOptions?.anthropic?.noSessionPersistence, true, "delegation Anthropic child disables session persistence");
+  assert(!Object.prototype.hasOwnProperty.call(anthropicChild.providerOptions?.anthropic ?? {}, "mcpConfig"), "delegation Anthropic child defers temp MCP config creation to runtime prep");
+  assert(!Object.prototype.hasOwnProperty.call(anthropicChild.providerOptions ?? {}, "openai"), "delegation Anthropic child does not receive OpenAI options");
+  assert(!Object.prototype.hasOwnProperty.call(anthropicChild.providerOptions ?? {}, "cursor"), "delegation Anthropic child does not receive Cursor options");
   assertNoUndefinedOwnValues(anthropicChild as unknown as Record<string, unknown>, "anthropicChild");
 
   return { name: "delegation child provider turn fixtures", ok: true };
@@ -996,12 +1264,13 @@ export function verifyDelegationWorkflowFixtures(): VerificationResult {
       name: "terminal-64-StartDelegation",
       input: {
         context: "shared context",
-        tasks: [{ description: "task one" }, { description: "task two" }],
+        tasks: [{ agentName: "Builder", description: "task one" }, { description: "task two" }],
       },
     }],
   });
   assert(parsedTool, "StartDelegation tool call parses into a delegation plan");
   assertEqual(parsedTool.tasks.length, 2, "StartDelegation parser keeps task objects");
+  assertEqual(parsedTool.tasks[0]?.agentName, "Builder", "StartDelegation parser keeps optional agent names");
 
   const parsedFallback = parseDelegationStartFromMessage({
     content: `<T64_START_DELEGATION>{"context":"fallback context","tasks":["task one","task two"]}</T64_START_DELEGATION>`,
@@ -1017,12 +1286,16 @@ export function verifyDelegationWorkflowFixtures(): VerificationResult {
   const childSpawn = buildDelegationChildSpawnPlan({
     sharedContext: "shared",
     taskDescription: "write tests",
+    agentName: "Verifier",
     taskIndex: 1,
     taskCount: 3,
     teamChatEnabled: true,
   });
-  assertEqual(childSpawn.agentLabel, "Agent 2", "child spawn helper builds deterministic agent label");
+  assertEqual(childSpawn.agentLabel, "Verifier", "child spawn helper uses provided agent names");
   assert(childSpawn.initialPrompt.includes("read_team"), "child spawn prompt includes team chat instructions when available");
+  assert(childSpawn.initialPrompt.includes("ReadTeam"), "child spawn prompt names provider-displayed ReadTeam tool");
+  assert(childSpawn.initialPrompt.includes("SendToTeam"), "child spawn prompt names provider-displayed SendToTeam tool");
+  assert(childSpawn.initialPrompt.includes("ReportDone"), "child spawn prompt names provider-displayed ReportDone tool");
 
   assertNoUndefinedOwnValues(openAiPlan as unknown as Record<string, unknown>, "openAiPlan");
   assertNoUndefinedOwnValues(cursorPlan as unknown as Record<string, unknown>, "cursorPlan");
@@ -1133,6 +1406,7 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
     providerLocked: false,
     selectedModel: null,
     selectedEffort: null,
+    selectedControls: {},
     seedTranscript: null,
     providerMetadata: {},
     providerPermissions: {},
@@ -1144,6 +1418,12 @@ export function verifyFutureProviderStubFixtures(): VerificationResult {
     providerLocked: false,
     selectedModel: "stub-model",
     selectedEffort: "stub-effort",
+    selectedControls: {
+      opencode: {
+        model: "stub-model",
+        profile: "stub",
+      },
+    },
     seedTranscript: null,
     providerMetadata: {
       opencode: {
@@ -1190,6 +1470,68 @@ export function verifyCodexPermissionFixtures(): VerificationResult {
   assertEqual(decodeCodexPermission("yolo").yolo, true, "yolo maps to bypass flag");
   assertEqual(decodeCodexPermission("unknown").sandbox_mode, "workspace-write", "unknown preset falls back to workspace");
   return { name: "Codex permission request params", ok: true };
+}
+
+export function verifyProviderAvailabilityFixtures(): VerificationResult {
+  assert(typeof localStorage !== "undefined", "provider availability fixture requires browser localStorage");
+
+  const previousStorage = localStorage.getItem(STORAGE_KEY);
+  const previousSessions = useProviderSessionStore.getState().sessions;
+  const previousAvailability = useSettingsStore.getState().providerAvailability;
+  const store = useProviderSessionStore.getState();
+
+  try {
+    const openAiDisabled = {
+      ...previousAvailability,
+      anthropic: true,
+      openai: false,
+      cursor: false,
+    };
+    useSettingsStore.setState({ providerAvailability: openAiDisabled });
+
+    const enabledProviders = listAvailableProviderIds(openAiDisabled);
+    assertEqual(enabledProviders.includes("openai"), false, "disabled OpenAI is excluded from provider picker options");
+    assertEqual(getDefaultAvailableProvider(openAiDisabled), "anthropic", "provider availability falls back to enabled Claude");
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      "availability-legacy-openai": {
+        sessionId: "availability-legacy-openai",
+        name: "Disabled Legacy OpenAI",
+        cwd: "",
+        draftPrompt: "",
+        lastSeenAt: 1,
+        schemaVersion: 4,
+        provider: "openai",
+        providerLocked: true,
+        codexThreadId: "thread-disabled-legacy",
+        selectedModel: "gpt-5.4",
+        selectedEffort: "high",
+        selectedCodexPermission: "workspace",
+      },
+    }));
+    useProviderSessionStore.setState({ sessions: {} });
+
+    store.createSession("availability-legacy-openai");
+    const legacy = useProviderSessionStore.getState().sessions["availability-legacy-openai"];
+    assert(legacy, "disabled provider legacy session still loads");
+    assertEqual(legacy.providerState.provider, "openai", "disabled provider does not rewrite legacy session provider");
+    assertEqual(legacy.providerState.providerLocked, true, "disabled provider legacy session stays provider-locked");
+    assertEqual(
+      getProviderPermissionId(legacy.providerState, "openai"),
+      "workspace",
+      "disabled provider legacy permission still migrates",
+    );
+
+    return { name: "provider availability fixtures", ok: true };
+  } finally {
+    useProviderSessionStore.setState({ sessions: previousSessions });
+    useSettingsStore.setState({ providerAvailability: previousAvailability });
+    if (previousStorage === null) {
+      localStorage.removeItem(STORAGE_KEY);
+    } else {
+      localStorage.setItem(STORAGE_KEY, previousStorage);
+    }
+  }
 }
 
 export function verifyProviderEventNormalizationFixtures(): VerificationResult {
@@ -1301,6 +1643,7 @@ export function runProviderModularityVerification(): VerificationResult[] {
     verifyProviderRuntimeFixtures(),
     verifyProviderLifecycleAndHistorySurfaceFixtures(),
     verifyProviderPermissionHelperFixtures(),
+    verifyProviderPromptSpawnFixtures(),
     verifyProviderMetadataHelperFixtures(),
     verifyDelegationChildSpawnFixtures(),
     verifyDelegationWorkflowFixtures(),
@@ -1310,5 +1653,6 @@ export function runProviderModularityVerification(): VerificationResult[] {
     verifyProviderEventNormalizationFixtures(),
     verifyProviderStateMigrationFixture(),
     verifyProviderPickerLockFixtures(),
+    verifyProviderAvailabilityFixtures(),
   ];
 }

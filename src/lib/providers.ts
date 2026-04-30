@@ -1,6 +1,6 @@
 // Provider registry for UI manifests + session defaults.
 //
-// Each provider owns its model, effort, permission, and capability surface.
+// Each provider owns its controls, permissions, and capability surface.
 // UI components should read from this registry instead of branching on provider
 // ids for labels or feature availability.
 
@@ -17,33 +17,38 @@ export type ProviderFeature =
   | "nativeSlashCommands"
   | "compact";
 
-export interface ModelOption {
+export interface ProviderControlOption {
   id: string;
   label: string;
 }
-export interface EffortOption {
-  id: string;
-  label: string;
-}
+export type ModelOption = ProviderControlOption;
+export type EffortOption = ProviderControlOption;
 // Note: PermissionMode is the Claude-shaped union ("default" | "plan" | …);
 // for Codex we use string ids that are translated at the IPC boundary.
-export interface PermissionOption {
-  id: string;
-  label: string;
+export interface PermissionOption extends ProviderControlOption {
   color: string;
   desc: string;
   inputLabel?: string;
 }
 
-export type ProviderControlId = "model" | "effort" | "permission";
+export type ProviderControlId = string;
+export type ProviderControlPlacement = "topbar" | "input-permission";
+export type ProviderLegacyControlSlot = "model" | "effort" | "permission";
 
 export interface ProviderControlMetadata {
   id: ProviderControlId;
   label: string;
+  options: readonly ProviderControlOption[];
+  defaultValue: string;
+  placement: ProviderControlPlacement;
   inputSuffix?: string;
+  /** @deprecated Compatibility bridge for legacy selectedModel/selectedEffort fields. */
+  legacySlot?: ProviderLegacyControlSlot;
+  /** Legacy persisted field names that can seed this provider-owned control. */
+  migrationAliases?: readonly string[];
 }
 
-export type ProviderControlsMetadata = Partial<Record<ProviderControlId, ProviderControlMetadata>>;
+export type ProviderControlsMetadata = readonly ProviderControlMetadata[];
 
 export type ProviderPermissionPersistence = "provider-state";
 
@@ -100,29 +105,41 @@ export interface ProviderUiMetadata {
   brandTitle: string;
   emptyStateLabel: string;
   defaultSessionName: string;
-  /** @deprecated Use controls.model.label. */
+  /** @deprecated Use getProviderLegacyControl(provider, "model")?.label. */
   modelMenuLabel: string;
-  /** @deprecated Use controls.effort.label. */
+  /** @deprecated Use getProviderLegacyControl(provider, "effort")?.label. */
   effortMenuLabel: string;
-  /** @deprecated Use controls.permission.inputSuffix. */
+  /** @deprecated Use getProviderInputPermissionControl(provider)?.inputSuffix. */
   inputPermissionSuffix: string;
 }
 
-export interface ProviderManifest {
-  id: ProviderId;
+export interface ProviderManifestDefinition<TProvider extends string = ProviderId> {
+  id: TProvider;
   ui: ProviderUiMetadata;
   capabilities: ProviderCapabilities;
   delegation: ProviderDelegationPolicy;
   permissionControl: ProviderPermissionControlPolicy;
   history: ProviderHistoryPolicy;
   controls: ProviderControlsMetadata;
-  models: ModelOption[];
-  efforts: EffortOption[];
-  permissions: PermissionOption[];
+}
+
+export interface ProviderManifestCompatibilityFields {
+  /** @deprecated Compatibility mirror derived from the canonical model control. Use getProviderModelOptions(). */
+  models: readonly ModelOption[];
+  /** @deprecated Compatibility mirror derived from the canonical effort/mode control. Use getProviderEffortOptions(). */
+  efforts: readonly EffortOption[];
+  /** @deprecated Compatibility mirror derived from the canonical input-permission control. Use getProviderPermissionOptions(). */
+  permissions: readonly PermissionOption[];
+  /** @deprecated Compatibility mirror derived from the canonical model control default. Use getProviderDefaultModel(). */
   defaultModel: string;
+  /** @deprecated Compatibility mirror derived from the canonical effort/mode control default. Use getProviderDefaultEffort(). */
   defaultEffort: string;
+  /** @deprecated Compatibility mirror derived from the canonical input-permission control default. Use getProviderDefaultPermission(). */
   defaultPermission: string;
 }
+
+export interface ProviderManifest<TProvider extends string = ProviderId>
+  extends ProviderManifestDefinition<TProvider>, ProviderManifestCompatibilityFields {}
 
 const ANTHROPIC_MODELS: ModelOption[] = [
   { id: "sonnet", label: "Sonnet" },
@@ -183,7 +200,7 @@ const OPENAI_EFFORTS: EffortOption[] = [
 // Codex's permission surface is two enums: `--sandbox` (the filesystem
 // sandbox) and `-c approval_policy=…` (when to ask the human). We collapse
 // the common pairs into preset "modes" the user picks, then expand them at
-// the IPC boundary inside ClaudeChat → createCodexSession.
+// the provider runtime IPC boundary.
 //
 // id matches the preset name; sandbox/policy/full_auto/yolo are encoded in
 // `decodeCodexPermission()` below.
@@ -236,7 +253,70 @@ const CURSOR_PERMISSIONS: PermissionOption[] = [
   { id: "bypass_all", label: "Force", color: "#f38ba8", desc: "Pass --force so Cursor can apply changes", inputLabel: "force" },
 ];
 
-export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
+function getCompatibilityControlFromDefinition(
+  manifest: ProviderManifestDefinition<string>,
+  legacySlot: "model" | "effort",
+): ProviderControlMetadata | undefined {
+  return (
+    manifest.controls.find((control) => control.legacySlot === legacySlot)
+    ?? manifest.controls.find((control) => control.migrationAliases?.includes(legacySlot))
+  );
+}
+
+function requireCompatibilityControlFromDefinition(
+  manifest: ProviderManifestDefinition<string>,
+  legacySlot: "model" | "effort",
+): ProviderControlMetadata {
+  const control = getCompatibilityControlFromDefinition(manifest, legacySlot);
+  if (!control) {
+    throw new Error(`Provider ${manifest.id} is missing a ${legacySlot} compatibility control`);
+  }
+  return control;
+}
+
+function requirePermissionControlFromDefinition(
+  manifest: ProviderManifestDefinition<string>,
+): ProviderControlMetadata {
+  const control = manifest.controls.find((candidate) => candidate.placement === "input-permission");
+  if (!control) {
+    throw new Error(`Provider ${manifest.id} is missing an input permission control`);
+  }
+  return control;
+}
+
+function isPermissionOption(option: ProviderControlOption): option is PermissionOption {
+  const candidate = option as Partial<PermissionOption>;
+  return typeof candidate.color === "string" && typeof candidate.desc === "string";
+}
+
+function getPermissionOptionsFromControl(
+  manifest: ProviderManifestDefinition<string>,
+  control: ProviderControlMetadata,
+): readonly PermissionOption[] {
+  if (!control.options.every(isPermissionOption)) {
+    throw new Error(`Provider ${manifest.id} permission control options must include permission metadata`);
+  }
+  return control.options;
+}
+
+export function defineProviderManifest<TProvider extends string>(
+  definition: ProviderManifestDefinition<TProvider>,
+): ProviderManifest<TProvider> {
+  const modelControl = requireCompatibilityControlFromDefinition(definition, "model");
+  const effortControl = requireCompatibilityControlFromDefinition(definition, "effort");
+  const permissionControl = requirePermissionControlFromDefinition(definition);
+  return {
+    ...definition,
+    models: modelControl.options,
+    efforts: effortControl.options,
+    permissions: getPermissionOptionsFromControl(definition, permissionControl),
+    defaultModel: modelControl.defaultValue,
+    defaultEffort: effortControl.defaultValue,
+    defaultPermission: permissionControl.defaultValue,
+  };
+}
+
+const PROVIDER_MANIFEST_DEFINITIONS = {
   anthropic: {
     id: "anthropic",
     ui: {
@@ -279,17 +359,33 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       source: "claude-jsonl",
       hydrateFailureLabel: "Claude JSONL",
     },
-    controls: {
-      model: { id: "model", label: "Model" },
-      effort: { id: "effort", label: "Effort" },
-      permission: { id: "permission", label: "Permissions", inputSuffix: "on" },
-    },
-    models: ANTHROPIC_MODELS,
-    efforts: ANTHROPIC_EFFORTS,
-    permissions: ANTHROPIC_PERMISSIONS,
-    defaultModel: "sonnet",
-    defaultEffort: "high",
-    defaultPermission: "default",
+    controls: [
+      {
+        id: "model",
+        label: "Model",
+        options: ANTHROPIC_MODELS,
+        defaultValue: "sonnet",
+        placement: "topbar",
+        legacySlot: "model",
+      },
+      {
+        id: "effort",
+        label: "Effort",
+        options: ANTHROPIC_EFFORTS,
+        defaultValue: "high",
+        placement: "topbar",
+        legacySlot: "effort",
+      },
+      {
+        id: "tool-permission",
+        label: "Permissions",
+        options: ANTHROPIC_PERMISSIONS,
+        defaultValue: "default",
+        placement: "input-permission",
+        inputSuffix: "on",
+        legacySlot: "permission",
+      },
+    ],
   },
   openai: {
     id: "openai",
@@ -332,17 +428,33 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       source: "codex-rollout",
       hydrateFailureLabel: "Codex",
     },
-    controls: {
-      model: { id: "model", label: "Model" },
-      effort: { id: "effort", label: "Effort" },
-      permission: { id: "permission", label: "Sandbox", inputSuffix: "sandbox" },
-    },
-    models: OPENAI_MODELS,
-    efforts: OPENAI_EFFORTS,
-    permissions: OPENAI_PERMISSIONS,
-    defaultModel: "gpt-5.5",
-    defaultEffort: "medium",
-    defaultPermission: "workspace",
+    controls: [
+      {
+        id: "model",
+        label: "Model",
+        options: OPENAI_MODELS,
+        defaultValue: "gpt-5.5",
+        placement: "topbar",
+        legacySlot: "model",
+      },
+      {
+        id: "effort",
+        label: "Effort",
+        options: OPENAI_EFFORTS,
+        defaultValue: "medium",
+        placement: "topbar",
+        legacySlot: "effort",
+      },
+      {
+        id: "sandbox",
+        label: "Sandbox",
+        options: OPENAI_PERMISSIONS,
+        defaultValue: "workspace",
+        placement: "input-permission",
+        inputSuffix: "sandbox",
+        legacySlot: "permission",
+      },
+    ],
   },
   cursor: {
     id: "cursor",
@@ -386,18 +498,40 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
       source: "local-transcript",
       hydrateFailureLabel: "Cursor local transcript",
     },
-    controls: {
-      model: { id: "model", label: "Model" },
-      effort: { id: "effort", label: "Mode" },
-      permission: { id: "permission", label: "Mode", inputSuffix: "mode" },
-    },
-    models: CURSOR_MODELS,
-    efforts: CURSOR_EFFORTS,
-    permissions: CURSOR_PERMISSIONS,
-    defaultModel: "composer-2-fast",
-    defaultEffort: "default",
-    defaultPermission: "default",
+    controls: [
+      {
+        id: "model",
+        label: "Model",
+        options: CURSOR_MODELS,
+        defaultValue: "composer-2-fast",
+        placement: "topbar",
+        legacySlot: "model",
+      },
+      {
+        id: "mode",
+        label: "Mode",
+        options: CURSOR_EFFORTS,
+        defaultValue: "default",
+        placement: "topbar",
+        migrationAliases: ["effort"],
+      },
+      {
+        id: "apply-mode",
+        label: "Mode",
+        options: CURSOR_PERMISSIONS,
+        defaultValue: "default",
+        placement: "input-permission",
+        inputSuffix: "mode",
+        legacySlot: "permission",
+      },
+    ],
   },
+} satisfies Record<ProviderId, ProviderManifestDefinition>;
+
+export const PROVIDER_REGISTRY: Record<ProviderId, ProviderManifest> = {
+  anthropic: defineProviderManifest(PROVIDER_MANIFEST_DEFINITIONS.anthropic),
+  openai: defineProviderManifest(PROVIDER_MANIFEST_DEFINITIONS.openai),
+  cursor: defineProviderManifest(PROVIDER_MANIFEST_DEFINITIONS.cursor),
 };
 
 export const PROVIDER_CONFIG = PROVIDER_REGISTRY;
@@ -408,6 +542,42 @@ export function getProviderManifest(provider: ProviderId): ProviderManifest {
   return PROVIDER_REGISTRY[provider];
 }
 
+function requireProviderCompatibilityControl(
+  provider: ProviderId,
+  legacySlot: "model" | "effort",
+): ProviderControlMetadata {
+  return requireCompatibilityControlFromDefinition(PROVIDER_REGISTRY[provider], legacySlot);
+}
+
+export function getProviderModelOptions(provider: ProviderId): readonly ModelOption[] {
+  return requireProviderCompatibilityControl(provider, "model").options;
+}
+
+export function getProviderEffortOptions(provider: ProviderId): readonly EffortOption[] {
+  return requireProviderCompatibilityControl(provider, "effort").options;
+}
+
+export function getProviderPermissionOptions(provider: ProviderId): readonly PermissionOption[] {
+  const control = requirePermissionControlFromDefinition(PROVIDER_REGISTRY[provider]);
+  return getPermissionOptionsFromControl(PROVIDER_REGISTRY[provider], control);
+}
+
+export function getProviderDefaultModel(provider: ProviderId): string {
+  return requireProviderCompatibilityControl(provider, "model").defaultValue;
+}
+
+export function getProviderDefaultEffort(provider: ProviderId): string {
+  return requireProviderCompatibilityControl(provider, "effort").defaultValue;
+}
+
+export function getProviderDefaultPermission(provider: ProviderId): string {
+  return requirePermissionControlFromDefinition(PROVIDER_REGISTRY[provider]).defaultValue;
+}
+
+export function isProviderPermissionValue(provider: ProviderId, id: unknown): id is string {
+  return typeof id === "string" && getProviderPermissionOptions(provider).some((permission) => permission.id === id);
+}
+
 export function getProviderDelegationPolicy(provider: ProviderId): ProviderDelegationPolicy {
   return PROVIDER_REGISTRY[provider].delegation;
 }
@@ -416,12 +586,56 @@ export function getProviderPermissionControlPolicy(provider: ProviderId): Provid
   return PROVIDER_REGISTRY[provider].permissionControl;
 }
 
-export function getProviderControl(provider: ProviderId, control: ProviderControlId): ProviderControlMetadata | undefined {
-  return PROVIDER_REGISTRY[provider].controls[control];
+export function listProviderControls(
+  provider: ProviderId,
+  placement?: ProviderControlPlacement,
+): ProviderControlMetadata[] {
+  const controls = PROVIDER_REGISTRY[provider].controls;
+  return placement ? controls.filter((control) => control.placement === placement) : [...controls];
 }
 
-export function providerHasControl(provider: ProviderId, control: ProviderControlId): boolean {
-  return !!getProviderControl(provider, control);
+export function getProviderControl(provider: ProviderId, controlId: ProviderControlId): ProviderControlMetadata | undefined {
+  return PROVIDER_REGISTRY[provider].controls.find((control) => control.id === controlId);
+}
+
+export function providerHasControl(provider: ProviderId, controlId: ProviderControlId): boolean {
+  return !!getProviderControl(provider, controlId);
+}
+
+export function getProviderLegacyControl(
+  provider: ProviderId,
+  legacySlot: ProviderLegacyControlSlot,
+): ProviderControlMetadata | undefined {
+  return PROVIDER_REGISTRY[provider].controls.find((control) => control.legacySlot === legacySlot);
+}
+
+export function getProviderInputPermissionControl(provider: ProviderId): ProviderControlMetadata | undefined {
+  return PROVIDER_REGISTRY[provider].controls.find((control) => control.placement === "input-permission");
+}
+
+export function isProviderControlValue(
+  provider: ProviderId,
+  controlId: ProviderControlId,
+  value: unknown,
+): value is string {
+  const control = getProviderControl(provider, controlId);
+  return typeof value === "string" && !!control?.options.some((option) => option.id === value);
+}
+
+export function getProviderControlDefaultValue(
+  provider: ProviderId,
+  controlId: ProviderControlId,
+): string | null {
+  return getProviderControl(provider, controlId)?.defaultValue ?? null;
+}
+
+export function coerceProviderControlValue(
+  provider: ProviderId,
+  controlId: ProviderControlId,
+  value: string | null | undefined,
+): string | null {
+  if (isProviderControlValue(provider, controlId, value)) return value;
+  return getProviderControlDefaultValue(provider, controlId);
 }
 
 export function getProviderHistoryPolicy(provider: ProviderId): ProviderHistoryPolicy {
@@ -445,10 +659,10 @@ export function providerSupports(provider: ProviderId, feature: ProviderFeature)
 }
 
 export function isCodexPermissionId(id: string): boolean {
-  return PROVIDER_REGISTRY.openai.permissions.some((p) => p.id === id);
+  return isProviderPermissionValue("openai", id);
 }
 export function isClaudePermissionId(id: string): id is PermissionMode {
-  return PROVIDER_REGISTRY.anthropic.permissions.some((p) => p.id === id);
+  return isProviderPermissionValue("anthropic", id);
 }
 
 /**

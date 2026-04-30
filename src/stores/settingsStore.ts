@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
+import { PROVIDER_IDS, type ProviderId } from "../lib/providers";
 import { DEFAULT_WIDGET_HOST_PROTECTION_MODE, isWidgetHostProtectionMode, type WidgetHostProtectionMode } from "../lib/widgetHostProtection";
 
 export interface QuickPaste {
@@ -11,6 +12,7 @@ export interface QuickPaste {
 export type WidgetRenderMode = "iframe" | "native-webview" | "auto";
 
 export const WIDGET_RENDER_MODES: readonly WidgetRenderMode[] = ["iframe", "native-webview", "auto"];
+export type ProviderAvailability = Record<ProviderId, boolean>;
 
 export interface WidgetRenderModeResolution {
   requestedMode: WidgetRenderMode;
@@ -18,7 +20,41 @@ export interface WidgetRenderModeResolution {
   fallbackReason: string | null;
 }
 
+export type ProviderControlDefaults = Record<string, Record<string, string | null>>;
+
 const WIDGET_NATIVE_WEBVIEW_READY: boolean = true;
+const DEFAULT_PROVIDER_AVAILABILITY = PROVIDER_IDS.reduce((availability, provider) => {
+  availability[provider] = true;
+  return availability;
+}, {} as ProviderAvailability);
+
+export function normalizeProviderAvailability(value: unknown): ProviderAvailability {
+  const availability: ProviderAvailability = { ...DEFAULT_PROVIDER_AVAILABILITY };
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const rawAvailability = value as Record<string, unknown>;
+    for (const provider of PROVIDER_IDS) {
+      const rawValue = rawAvailability[provider];
+      if (typeof rawValue === "boolean") availability[provider] = rawValue;
+    }
+  }
+  if (!PROVIDER_IDS.some((provider) => availability[provider])) {
+    availability[PROVIDER_IDS[0] ?? "anthropic"] = true;
+  }
+  return availability;
+}
+
+export function isProviderAvailable(provider: ProviderId, availability: ProviderAvailability): boolean {
+  return availability[provider] ?? true;
+}
+
+export function listAvailableProviderIds(availability: ProviderAvailability): ProviderId[] {
+  const providers = PROVIDER_IDS.filter((provider) => isProviderAvailable(provider, availability));
+  return providers.length > 0 ? providers : [PROVIDER_IDS[0] ?? "anthropic"];
+}
+
+export function getDefaultAvailableProvider(availability: ProviderAvailability): ProviderId {
+  return listAvailableProviderIds(availability)[0] ?? "anthropic";
+}
 
 export function normalizeWidgetRenderMode(value: unknown): WidgetRenderMode {
   return WIDGET_RENDER_MODES.includes(value as WidgetRenderMode)
@@ -34,6 +70,22 @@ function normalizeWidgetRenderModesById(value: unknown): Record<string, WidgetRe
     if (trimmedWidgetId) modes[trimmedWidgetId] = normalizeWidgetRenderMode(mode);
   }
   return modes;
+}
+
+function normalizeProviderControlDefaults(value: unknown): ProviderControlDefaults {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const defaults: ProviderControlDefaults = {};
+  for (const [provider, rawControls] of Object.entries(value)) {
+    if (!rawControls || typeof rawControls !== "object" || Array.isArray(rawControls)) continue;
+    const controls: Record<string, string | null> = {};
+    for (const [controlId, rawValue] of Object.entries(rawControls)) {
+      if (typeof rawValue === "string" || rawValue === null) {
+        controls[controlId] = rawValue;
+      }
+    }
+    if (Object.keys(controls).length > 0) defaults[provider] = controls;
+  }
+  return defaults;
 }
 
 export function resolveWidgetRenderMode(requestedMode: WidgetRenderMode): WidgetRenderModeResolution {
@@ -65,6 +117,8 @@ export function resolveWidgetRenderMode(requestedMode: WidgetRenderMode): Widget
 interface Settings {
   claudeModel: string;
   claudeEffort: string;
+  providerAvailability: ProviderAvailability;
+  providerControlDefaults: ProviderControlDefaults;
   claudePermMode: string;
   claudeDefaultPermMode: string;
   claudeFont: string;
@@ -104,6 +158,8 @@ const STORAGE_KEY = "terminal64-settings";
 const defaultSettings: Settings = {
   claudeModel: "sonnet",
   claudeEffort: "high",
+  providerAvailability: DEFAULT_PROVIDER_AVAILABILITY,
+  providerControlDefaults: {},
   claudePermMode: "",
   claudeDefaultPermMode: "",
   claudeFont: "system",
@@ -146,6 +202,8 @@ function loadSettings(): Settings {
       return {
         ...defaultSettings,
         ...parsed,
+        providerAvailability: normalizeProviderAvailability(parsed.providerAvailability),
+        providerControlDefaults: normalizeProviderControlDefaults(parsed.providerControlDefaults),
         pausedWidgetIds: Array.isArray(parsed.pausedWidgetIds)
           ? parsed.pausedWidgetIds.filter((id): id is string => typeof id === "string")
           : defaultSettings.pausedWidgetIds,

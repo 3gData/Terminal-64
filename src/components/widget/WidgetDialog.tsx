@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listWidgetFolders, createWidgetFolder, deleteWidgetFolder, installWidgetZip, installBundledWidget, writeWidgetInstructionFiles, readWidgetManifest, readWidgetApproval, writeWidgetApproval } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { useClaudeStore } from "../../stores/claudeStore";
+import { useProviderSessionStore } from "../../stores/providerSessionStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { pushToast } from "../../lib/notifications";
 import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
@@ -127,7 +127,7 @@ export default function WidgetDialog({ isOpen, onClose }: WidgetDialogProps) {
       const panels = useCanvasStore.getState().terminals;
       const chatPanel = panels[panels.length - 1];
       if (chatPanel?.panelType === "claude") {
-        useClaudeStore.getState().createSession(
+        useProviderSessionStore.getState().createSession(
           chatPanel.terminalId,
           sessionName,
           false,

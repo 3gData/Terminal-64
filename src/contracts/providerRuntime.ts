@@ -1,30 +1,52 @@
 import type { ChatMessage, PermissionMode } from "../lib/types";
 import type { ProviderHistorySource, ProviderId } from "../lib/providers";
 
-export interface ProviderTurnInput {
-  provider: ProviderId;
+export type ProviderCollaborationMode = "plan" | "default";
+
+export interface AnthropicTurnOptions {
+  disallowedTools?: string | undefined;
+  mcpConfig?: string | undefined;
+  mcpEnv?: Record<string, string> | undefined;
+  noSessionPersistence?: boolean | undefined;
+}
+
+export interface OpenAiTurnOptions {
+  collaborationMode?: ProviderCollaborationMode | undefined;
+  mcpEnv?: Record<string, string> | undefined;
+  skipGitRepoCheck?: boolean | undefined;
+}
+
+export interface CursorTurnOptions {
+  mcpEnv?: Record<string, string> | undefined;
+}
+
+export interface ProviderTurnOptionsByProvider {
+  anthropic?: AnthropicTurnOptions | undefined;
+  openai?: OpenAiTurnOptions | undefined;
+  cursor?: CursorTurnOptions | undefined;
+}
+
+export type ProviderTurnOptionsFor<TProvider extends ProviderId = ProviderId> =
+  Pick<ProviderTurnOptionsByProvider, TProvider>;
+
+export interface ProviderTurnInput<TProvider extends ProviderId = ProviderId> {
+  provider: TProvider;
   sessionId: string;
   cwd: string;
   prompt: string;
   started: boolean;
   threadId?: string | null;
+  selectedControls?: Record<string, string | null> | undefined;
   selectedModel?: string | null | undefined;
   selectedEffort?: string | null | undefined;
   providerPermissionId?: string | null | undefined;
-  /** @deprecated Use providerPermissionId. */
-  selectedCodexPermission?: string | null | undefined;
   permissionMode?: PermissionMode | undefined;
   permissionOverride?: PermissionMode | undefined;
   skipOpenwolf?: boolean | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
   resumeAtUuid?: string | null | undefined;
   forkParentSessionId?: string | null | undefined;
-  codexCollaborationMode?: "plan" | "default" | undefined;
-  disallowedTools?: string | undefined;
-  mcpConfig?: string | undefined;
-  mcpEnv?: Record<string, string> | undefined;
-  noSessionPersistence?: boolean | undefined;
-  skipGitRepoCheck?: boolean | undefined;
+  providerOptions?: ProviderTurnOptionsFor<TProvider> | undefined;
 }
 
 export interface ProviderTurnResult {
@@ -55,7 +77,6 @@ export interface ProviderHistoryTruncateInput {
   cwd: string;
   keepMessages: number;
   preMessages: ChatMessage[];
-  codexThreadId?: string | null | undefined;
 }
 
 export interface ProviderHistoryTruncateResult extends ProviderHistoryOperationResult {
@@ -69,11 +90,9 @@ export interface ProviderForkInput {
   cwd: string;
   keepMessages: number;
   preMessages: ChatMessage[];
-  codexThreadId?: string | null | undefined;
 }
 
 export interface ProviderForkResult extends ProviderHistoryOperationResult {
-  codexThreadId?: string | null;
   seedTranscript?: boolean;
 }
 
@@ -87,7 +106,6 @@ export interface ProviderHydrateInput {
   provider: ProviderId;
   sessionId: string;
   cwd: string;
-  codexThreadId?: string | null | undefined;
   resumeAtUuid?: string | null | undefined;
   cacheEntry?: ProviderHydrationCacheEntry | null | undefined;
 }
@@ -96,7 +114,6 @@ export interface ProviderHistoryDeleteInput {
   provider: ProviderId;
   sessionId: string;
   cwd: string;
-  codexThreadId?: string | null | undefined;
 }
 
 export interface ProviderHistoryDeleteResult extends ProviderHistoryOperationResult {
@@ -130,11 +147,11 @@ export interface ProviderHistoryRuntime {
   deleteHistory?: (input: ProviderHistoryDeleteInput) => Promise<ProviderHistoryDeleteResult>;
 }
 
-export interface ProviderRuntime {
-  provider: ProviderId;
-  prepareTurn?: (input: ProviderTurnInput) => Promise<ProviderTurnInput> | ProviderTurnInput;
-  create: (input: ProviderTurnInput) => Promise<ProviderTurnResult>;
-  send: (input: ProviderTurnInput) => Promise<ProviderTurnResult>;
+export interface ProviderRuntime<TProvider extends ProviderId = ProviderId> {
+  provider: TProvider;
+  prepareTurn?: (input: ProviderTurnInput<TProvider>) => Promise<ProviderTurnInput<TProvider>> | ProviderTurnInput<TProvider>;
+  create: (input: ProviderTurnInput<TProvider>) => Promise<ProviderTurnResult>;
+  send: (input: ProviderTurnInput<TProvider>) => Promise<ProviderTurnResult>;
   cancel: (sessionId: string) => Promise<void>;
   close: (sessionId: string) => Promise<void>;
   history: ProviderHistoryRuntime;

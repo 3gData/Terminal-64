@@ -32,9 +32,9 @@ use tauri::{AppHandle, Emitter};
 
 use crate::providers::emit_provider_event;
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError,
+    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandLifecycle,
     ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
-    ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
+    ProviderHistoryResponse, ProviderKind, ProviderPreparedCommand, ProviderSendPromptRequest,
     ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
@@ -1766,6 +1766,26 @@ fn resolve_session_id(provided: &str) -> String {
     }
 }
 
+fn payload_cwd(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cwd| !cwd.trim().is_empty())
+}
+
+fn prepare_codex_command(
+    lifecycle: &ProviderCommandLifecycle<'_>,
+    req: ProviderCreateSessionRequest,
+    command_label: &str,
+) -> ProviderPreparedCommand {
+    if let Some(cwd) = payload_cwd(&req.payload) {
+        if let Err(e) = crate::ensure_codex_mcp_impl(lifecycle.app_handle, cwd) {
+            safe_eprintln!("[codex:mcp] setup failed before {}: {}", command_label, e);
+        }
+    }
+    ProviderPreparedCommand::new(req)
+}
+
 // ── CodexAdapter ──────────────────────────────────────────
 
 pub struct CodexAdapter {
@@ -1817,9 +1837,6 @@ impl CodexAdapter {
         app_handle: &AppHandle,
         req: CreateCodexRequest,
     ) -> Result<String, String> {
-        if let Err(e) = crate::ensure_codex_mcp_impl(app_handle, &req.cwd) {
-            safe_eprintln!("[codex:mcp] setup failed before create: {}", e);
-        }
         let resolved_id = resolve_session_id(&req.session_id);
         safe_eprintln!(
             "[codex] Creating session id={} cwd={} model={:?} sandbox={:?}",
@@ -1873,9 +1890,6 @@ impl CodexAdapter {
         app_handle: &AppHandle,
         req: SendCodexPromptRequest,
     ) -> Result<(), String> {
-        if let Err(e) = crate::ensure_codex_mcp_impl(app_handle, &req.cwd) {
-            safe_eprintln!("[codex:mcp] setup failed before send: {}", e);
-        }
         if req.session_id.trim().is_empty() {
             return Err("send_prompt: session_id is required".to_string());
         }
@@ -2051,6 +2065,22 @@ impl Default for CodexAdapter {
 }
 
 impl ProviderAdapter for CodexAdapter {
+    fn prepare_create_session(
+        &self,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        Ok(prepare_codex_command(lifecycle, req, "create"))
+    }
+
+    fn prepare_send_prompt(
+        &self,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderSendPromptRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        Ok(prepare_codex_command(lifecycle, req, "send"))
+    }
+
     fn create_session(
         &self,
         app_handle: &AppHandle,

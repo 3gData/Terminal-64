@@ -1,8 +1,21 @@
-import type { ProviderTurnInput } from "../contracts/providerRuntime";
-import type { ProviderSessionState } from "../stores/claudeStore";
-import { getProviderPermissionId, resolveSessionProviderState } from "../stores/claudeStore";
-import type { ChatMessage, DelegationChildRuntimeMetadata } from "./types";
-import { getProviderDelegationPolicy, getProviderManifest, type ProviderId } from "./providers";
+import type { ProviderTurnInput, ProviderTurnOptionsByProvider } from "../contracts/providerRuntime";
+import type {
+  ProviderControlValueMap,
+  ProviderSelectedControlsMap,
+  ProviderSessionState,
+} from "../stores/providerSessionStore";
+import {
+  getProviderPermissionId,
+  getProviderSelectedControlValues,
+  resolveSessionProviderState,
+} from "../stores/providerSessionStore";
+import type { ChatMessage, DelegationChildRuntimeMetadata, PermissionMode } from "./types";
+import {
+  getProviderDefaultPermission,
+  getProviderDelegationPolicy,
+  getProviderPermissionOptions,
+  type ProviderId,
+} from "./providers";
 import type { DelegationMcpTransport } from "./providers";
 
 export type { DelegationMcpTransport } from "./providers";
@@ -12,6 +25,7 @@ interface DelegationParentSessionSource {
   provider?: ProviderId | undefined;
   codexThreadId?: string | null | undefined;
   seedTranscript?: ChatMessage[] | null | undefined;
+  selectedControls?: ProviderSelectedControlsMap | undefined;
   selectedModel?: string | null | undefined;
   selectedEffort?: string | null | undefined;
   skipOpenwolf?: boolean | undefined;
@@ -19,6 +33,7 @@ interface DelegationParentSessionSource {
 
 export interface DelegationChildRuntimeSettings {
   provider: ProviderId;
+  selectedControls: ProviderControlValueMap;
   selectedModel: string;
   selectedEffort: string;
   selectedProviderPermissionId: string;
@@ -28,6 +43,7 @@ export interface DelegationChildRuntimeSettings {
 export interface ResolveDelegationChildRuntimeSettingsOptions {
   parentSession?: DelegationParentSessionSource | undefined;
   selectedProvider: ProviderId;
+  selectedControls?: ProviderControlValueMap | undefined;
   selectedModel: string;
   selectedEffort: string;
   selectedProviderPermissionId: string;
@@ -55,27 +71,61 @@ export interface PrepareDelegationChildTurnOptions extends DelegationChildRuntim
   mcp: DelegationMcpConnection;
 }
 
+interface DelegationChildRuntimePermission {
+  providerPermissionId: string;
+  permissionOverride?: PermissionMode | undefined;
+}
+
 export function getDelegationMcpTransport(provider: ProviderId): DelegationMcpTransport {
   return getProviderDelegationPolicy(provider).mcpTransport;
+}
+
+function getDelegationBypassProviderPermissionId(provider: ProviderId): string {
+  const permissions = getProviderPermissionOptions(provider);
+  return permissions.find((permission) => permission.id === "bypass_all")?.id
+    ?? permissions.find((permission) => permission.id === "yolo")?.id
+    ?? getProviderDefaultPermission(provider);
+}
+
+export function resolveDelegationChildRuntimePermission(
+  provider: ProviderId,
+  selectedProviderPermissionId: string,
+): DelegationChildRuntimePermission {
+  const policy = getProviderDelegationPolicy(provider);
+  if (policy.childRuntime.permissionPreset === "bypass_all") {
+    return {
+      providerPermissionId: getDelegationBypassProviderPermissionId(provider),
+      permissionOverride: "bypass_all",
+    };
+  }
+
+  return {
+    providerPermissionId: selectedProviderPermissionId,
+  };
 }
 
 export function resolveDelegationChildRuntimeSettings({
   parentSession,
   selectedProvider,
+  selectedControls,
   selectedModel,
   selectedEffort,
   selectedProviderPermissionId,
 }: ResolveDelegationChildRuntimeSettingsOptions): DelegationChildRuntimeSettings {
   const parentProviderState = resolveSessionProviderState(parentSession);
   const provider = parentSession ? parentProviderState.provider : selectedProvider;
+  const inheritedControls = parentSession
+    ? getProviderSelectedControlValues(parentProviderState, provider)
+    : selectedControls ?? {};
 
   return {
     provider,
+    selectedControls: inheritedControls,
     selectedModel: parentProviderState.selectedModel ?? selectedModel,
     selectedEffort: parentProviderState.selectedEffort ?? selectedEffort,
     selectedProviderPermissionId: parentSession
       ? getProviderPermissionId(parentProviderState, provider)
-      : selectedProviderPermissionId ?? getProviderManifest(provider).defaultPermission,
+      : selectedProviderPermissionId ?? getProviderDefaultPermission(provider),
     inheritSkipOpenwolf: !!parentSession?.skipOpenwolf,
   };
 }
@@ -102,27 +152,47 @@ export function buildDelegationChildProviderTurnInput({
   prompt,
   selectedModel,
   selectedEffort,
+  selectedControls,
   selectedProviderPermissionId,
   inheritSkipOpenwolf,
   mcpConfigPath,
   mcpEnv,
 }: DelegationChildTurnOptions): ProviderTurnInput {
   const policy = getProviderDelegationPolicy(provider);
+  const permission = resolveDelegationChildRuntimePermission(provider, selectedProviderPermissionId);
+  const providerOptions: ProviderTurnOptionsByProvider = {};
+  if (provider === "anthropic") {
+    const anthropicOptions = {
+      ...(policy.mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
+      ...((policy.mcpTransport === "env" || policy.mcpTransport === "temp-config") && mcpEnv ? { mcpEnv } : {}),
+      ...(policy.noSessionPersistence ? { noSessionPersistence: true } : {}),
+    };
+    if (Object.keys(anthropicOptions).length > 0) providerOptions.anthropic = anthropicOptions;
+  } else if (provider === "openai") {
+    const openAiOptions = {
+      ...(policy.mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
+      ...(policy.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
+    };
+    if (Object.keys(openAiOptions).length > 0) providerOptions.openai = openAiOptions;
+  } else if (provider === "cursor") {
+    const cursorOptions = {
+      ...(policy.mcpTransport === "env" && mcpEnv ? { mcpEnv } : {}),
+    };
+    if (Object.keys(cursorOptions).length > 0) providerOptions.cursor = cursorOptions;
+  }
   return {
     provider,
     sessionId,
     cwd,
     prompt,
     started: false,
+    selectedControls,
     selectedModel,
     selectedEffort,
-    providerPermissionId: selectedProviderPermissionId,
-    permissionOverride: "bypass_all",
+    providerPermissionId: permission.providerPermissionId,
+    ...(permission.permissionOverride ? { permissionOverride: permission.permissionOverride } : {}),
     skipOpenwolf: policy.skipOpenwolf === "always" ? true : inheritSkipOpenwolf,
-    ...(policy.mcpTransport === "temp-config" && mcpConfigPath ? { mcpConfig: mcpConfigPath } : {}),
-    ...((policy.mcpTransport === "env" || policy.mcpTransport === "temp-config") && mcpEnv ? { mcpEnv } : {}),
-    ...(policy.noSessionPersistence ? { noSessionPersistence: true } : {}),
-    ...(policy.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
+    ...(Object.keys(providerOptions).length > 0 ? { providerOptions } : {}),
   };
 }
 
@@ -130,14 +200,15 @@ export function buildDelegationChildRuntimeMetadata(
   settings: DelegationChildRuntimeSettings,
   cwd: string,
 ): DelegationChildRuntimeMetadata {
-  const policy = getProviderDelegationPolicy(settings.provider);
+  const permission = resolveDelegationChildRuntimePermission(
+    settings.provider,
+    settings.selectedProviderPermissionId,
+  );
   return {
     providerId: settings.provider,
     model: settings.selectedModel,
     effort: settings.selectedEffort,
-    permissionPreset: policy.childRuntime.permissionPreset === "selected"
-      ? settings.selectedProviderPermissionId
-      : "bypass_all",
+    providerPermissionId: permission.providerPermissionId,
     cwd,
     cleanupState: "active",
   };

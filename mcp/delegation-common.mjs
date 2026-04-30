@@ -25,6 +25,10 @@ export const START_DELEGATION_TOOLS = [
                 type: "string",
                 description: "Specific, independently completable task for one agent.",
               },
+              agentName: {
+                type: "string",
+                description: "Optional display name for the delegated agent, used in Terminal 64 team chat and logs.",
+              },
             },
             required: ["description"],
           },

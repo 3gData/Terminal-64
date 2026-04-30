@@ -3,12 +3,17 @@ import {
   getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
   resolveSessionProviderState,
-  useClaudeStore,
+  useProviderSessionStore,
   type ClaudeSession,
-} from "../stores/claudeStore";
+} from "../stores/providerSessionStore";
 import { useDelegationStore } from "../stores/delegationStore";
 import { useCanvasStore } from "../stores/canvasStore";
-import { cleanupDelegationGroup, clearT64DelegationEnv } from "../lib/tauriApi";
+import {
+  cleanupDelegationGroup,
+  clearT64DelegationEnv,
+  getDelegationMessages,
+  writeFile,
+} from "../lib/tauriApi";
 import { cancelProviderSession, closeProviderSession, deleteProviderHistory, runProviderTurn } from "../lib/providerRuntime";
 import {
   describeDelegationToolAction,
@@ -17,7 +22,8 @@ import {
 } from "../lib/delegationCompletion";
 import { isProviderId, type ProviderId } from "../lib/providers";
 import { getDelegationMcpTransport } from "../lib/delegationChildRuntime";
-import type { PermissionMode } from "../lib/types";
+import { joinPath } from "../lib/platform";
+import type { DelegationGroup, DelegationMsg, PermissionMode } from "../lib/types";
 import type { ProviderTurnInput, ProviderTurnResult } from "../contracts/providerRuntime";
 
 const MAX_SUMMARY_LENGTH = 800;
@@ -53,6 +59,67 @@ function shouldClearDelegationEnv(provider: ProviderId): boolean {
   return getDelegationMcpTransport(provider) === "temp-config";
 }
 
+function formatLogTimestamp(timestamp: number): string {
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+}
+
+function markdownCell(value: string): string {
+  return value
+    .replace(/\r?\n/g, "<br>")
+    .replace(/\|/g, "\\|")
+    .trim();
+}
+
+function delegationLogFilename(group: DelegationGroup): string {
+  const created = new Date(group.createdAt).toISOString().replace(/[:.]/g, "-");
+  return `terminal64-delegation-${created}-${group.id.slice(0, 8)}.md`;
+}
+
+function renderDelegationChatLog(group: DelegationGroup, messages: DelegationMsg[]): string {
+  const lines = [
+    "# Terminal 64 Delegation Team Chat",
+    "",
+    `- Group: ${group.id}`,
+    `- Parent session: ${group.parentSessionId}`,
+    `- Created: ${formatLogTimestamp(group.createdAt)}`,
+    "",
+    "## Agents",
+    "",
+    ...group.tasks.map((task, index) => {
+      const name = task.agentName || `Agent ${index + 1}`;
+      return `- ${name}: ${task.description}`;
+    }),
+    "",
+    "## Messages",
+    "",
+  ];
+
+  if (messages.length === 0) {
+    lines.push("_No team chat messages were recorded._");
+    return `${lines.join("\n")}\n`;
+  }
+
+  lines.push("| Timestamp | AgentName | Type | Message |");
+  lines.push("| --- | --- | --- | --- |");
+  for (const message of messages) {
+    lines.push(
+      `| ${markdownCell(formatLogTimestamp(message.timestamp))} | ${markdownCell(message.agent)} | ${markdownCell(message.msg_type)} | ${markdownCell(message.message)} |`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+async function exportDelegationChatLog(group: DelegationGroup, cwd: string): Promise<{ path: string; markdown: string } | null> {
+  if (!cwd || cwd === ".") return null;
+  const messages = await getDelegationMessages(group.id);
+  const markdown = renderDelegationChatLog(group, messages);
+  const path = joinPath(cwd, delegationLogFilename(group));
+  await writeFile(path, markdown);
+  useDelegationStore.getState().setGroupTeamChatLogPath(group.id, path);
+  return { path, markdown };
+}
+
 function providerTurnForSession({
   sessionId,
   session,
@@ -75,8 +142,9 @@ function providerTurnForSession({
     sessionId,
     cwd: session.cwd || ".",
     prompt,
-    started: session.hasBeenStarted,
+      started: session.hasBeenStarted,
       threadId: openaiMetadata?.codexThreadId ?? null,
+      selectedControls: providerState.selectedControls[providerState.provider] ?? {},
       selectedModel: providerState.selectedModel,
       selectedEffort: providerState.selectedEffort,
       providerPermissionId: providerState.providerPermissions[providerState.provider]
@@ -95,7 +163,7 @@ function providerTurnForSession({
 }
 
 function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
-  const store = useClaudeStore.getState();
+  const store = useProviderSessionStore.getState();
   if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
   if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
   if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
@@ -112,8 +180,8 @@ function purgeDelegationChildren(groupId: string) {
   const group = delStore.groups[groupId];
   if (!group) return;
 
-  const claudeStore = useClaudeStore.getState();
-  const parentSession = claudeStore.sessions[group.parentSessionId];
+  const providerSessionStore = useProviderSessionStore.getState();
+  const parentSession = providerSessionStore.sessions[group.parentSessionId];
   const parentCwd = parentSession?.cwd || "";
 
   for (const task of group.tasks) {
@@ -121,9 +189,8 @@ function purgeDelegationChildren(groupId: string) {
     if (!childId) continue;
     clearIdleTimer(childId);
     // Kill the CLI subprocess if still alive
-    const childSession = claudeStore.sessions[childId];
+    const childSession = providerSessionStore.sessions[childId];
     const childProviderState = childSession ? resolveSessionProviderState(childSession) : null;
-    const childOpenAiMetadata = getOpenAiProviderSessionMetadata(childProviderState);
     const fallbackProviderState = resolveSessionProviderState(parentSession);
     const childProvider = childProviderState?.provider
       ?? providerIdFromRuntimeMetadata(task.childRuntime?.providerId)
@@ -138,7 +205,6 @@ function purgeDelegationChildren(groupId: string) {
         provider: childProvider,
         sessionId: childId,
         cwd: cleanupCwd,
-        codexThreadId: childOpenAiMetadata?.codexThreadId ?? null,
       })
         .finally(() => delStore.setTaskCleanupState(groupId, task.id, "purged"))
         .catch(() => {});
@@ -147,7 +213,7 @@ function purgeDelegationChildren(groupId: string) {
     }
     // Drop from the store (ephemeral sessions are already skipped by
     // saveToStorage — this just frees memory and removes the canvas-less entry)
-    claudeStore.removeSession(childId);
+    providerSessionStore.removeSession(childId);
   }
 }
 
@@ -156,7 +222,7 @@ export function useDelegationOrchestrator() {
     let cancelled = false;
     const lifecycleUnlistens: (() => void)[] = [];
 
-    const unsub = useClaudeStore.subscribe((state, prev) => {
+    const unsub = useProviderSessionStore.subscribe((state, prev) => {
       for (const [sid, session] of Object.entries(state.sessions)) {
         const prevSession = prev.sessions[sid];
         const was = prevSession?.isStreaming ?? false;
@@ -193,7 +259,7 @@ export function useDelegationOrchestrator() {
           return Boolean(group && group.status === "active");
         },
         isSessionQuiescent: (sessionId) => {
-          const session = useClaudeStore.getState().sessions[sessionId];
+          const session = useProviderSessionStore.getState().sessions[sessionId];
           return Boolean(session && !session.isStreaming && session.subagentIds.length === 0);
         },
         onCompletionHint: handleTurnComplete,
@@ -219,7 +285,7 @@ function handleTurnComplete(sessionId: string) {
   const group = delStore.getGroupForSession(sessionId);
   if (!group || group.status !== "active") return;
 
-  const claudeState = useClaudeStore.getState();
+  const claudeState = useProviderSessionStore.getState();
   const session = claudeState.sessions[sessionId];
   // Session may have been removed by rewind/cancel — bail out
   if (!session) return;
@@ -274,7 +340,7 @@ function scheduleIdleCompletion(sessionId: string, groupId: string, taskId: stri
     if (!task || task.status !== "running") return;
 
     // Check if agent restarted streaming or has active subagents
-    const session = useClaudeStore.getState().sessions[sessionId];
+    const session = useProviderSessionStore.getState().sessions[sessionId];
     if (session?.isStreaming) return; // Still working — don't interrupt
     if (session?.subagentIds.length) return; // Has active subagents — wait for them
 
@@ -308,23 +374,34 @@ export async function performMerge(groupId: string) {
 
   delStore.setGroupStatus(groupId, "merging");
 
-  const sections = group.tasks.map((t) => {
-    const statusLabel = t.status === "completed" ? "Completed" : t.status === "failed" ? "Failed" : "Cancelled";
-    const result = t.result || "(no result captured)";
-    return `## ${t.description} [${statusLabel}]\n${result}`;
-  });
-
-  const mergePrompt = `All delegated tasks have finished. Here are the results:\n\n${sections.join("\n\n---\n\n")}\n\nPlease review these results, summarize what was accomplished, and continue if needed.`;
-
-  const parentSession = useClaudeStore.getState().sessions[group.parentSessionId];
+  const parentSession = useProviderSessionStore.getState().sessions[group.parentSessionId];
   if (!parentSession) {
     delStore.setGroupStatus(groupId, "active");
     return;
   }
 
+  let chatLog: { path: string; markdown: string } | null = null;
+  try {
+    chatLog = await exportDelegationChatLog(group, parentSession.cwd || "");
+  } catch (err) {
+    console.warn("[delegation] Failed to export team chat log:", err);
+  }
+
+  const sections = group.tasks.map((t) => {
+    const statusLabel = t.status === "completed" ? "Completed" : t.status === "failed" ? "Failed" : "Cancelled";
+    const result = t.result || "(no result captured)";
+    const agentName = t.agentName ? `${t.agentName} - ` : "";
+    return `## ${agentName}${t.description} [${statusLabel}]\n${result}`;
+  });
+
+  const chatLogSection = chatLog
+    ? `\n\n---\n\n## Team Chat Log\nSaved to: ${chatLog.path}\n\n${chatLog.markdown}`
+    : "";
+  const mergePrompt = `All delegated tasks have finished. Here are the results:\n\n${sections.join("\n\n---\n\n")}${chatLogSection}\n\nPlease review these results, summarize what was accomplished, and continue if needed.`;
+
   let mergeSucceeded = false;
   if (parentSession.isStreaming) {
-    useClaudeStore.getState().enqueuePrompt(group.parentSessionId, {
+    useProviderSessionStore.getState().enqueuePrompt(group.parentSessionId, {
       displayText: mergePrompt,
       providerPrompt: mergePrompt,
       permissionOverride: group.parentPermissionMode || "auto",
@@ -332,7 +409,7 @@ export async function performMerge(groupId: string) {
     });
     mergeSucceeded = true; // queued — will send when streaming finishes
   } else {
-    useClaudeStore.getState().addUserMessage(group.parentSessionId, mergePrompt);
+    useProviderSessionStore.getState().addUserMessage(group.parentSessionId, mergePrompt);
     try {
       const result = await runProviderTurn(providerTurnForSession({
         sessionId: group.parentSessionId,
@@ -385,8 +462,10 @@ export function endDelegation(groupId: string, forceCancel = false) {
   } else {
     delStore.setGroupStatus(groupId, "cancelled");
     closeSharedChatPanel(groupId);
-    cleanupDelegationGroup(groupId).catch(() => {});
-    const parentSession = useClaudeStore.getState().sessions[group.parentSessionId];
+    const parentSession = useProviderSessionStore.getState().sessions[group.parentSessionId];
+    exportDelegationChatLog(group, parentSession?.cwd || "")
+      .catch((err) => console.warn("[delegation] Failed to export team chat log:", err))
+      .finally(() => cleanupDelegationGroup(groupId).catch(() => {}));
     if (parentSession?.cwd && shouldClearDelegationEnv(resolveSessionProviderState(parentSession).provider)) {
       clearT64DelegationEnv(parentSession.cwd);
     }

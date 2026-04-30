@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listSkills, createSkillFolder, deleteSkill, getSkillCreatorPath, ensureSkillsPlugin, readSkillContent, spawnProviderSessionWithPrompt, syncClaudeSkills, generateSkillMetadata } from "../../lib/tauriApi";
 import { useCanvasStore } from "../../stores/canvasStore";
-import { resolveSessionProviderState, useClaudeStore } from "../../stores/claudeStore";
+import { resolveSessionProviderState, useProviderSessionStore } from "../../stores/providerSessionStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { formatRelativeTime, openSystemFolder } from "../../lib/constants";
 import type { SkillInfo } from "../../lib/types";
@@ -200,11 +200,11 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
       const prompt = buildSkillPrompt(skillFolderPath, skillCreatorPath);
       const activeId = useCanvasStore.getState().activeTerminalId;
       const activeProvider = activeId
-        ? resolveSessionProviderState(useClaudeStore.getState().sessions[activeId]).provider
+        ? resolveSessionProviderState(useProviderSessionStore.getState().sessions[activeId]).provider
         : undefined;
       spawnProviderSessionWithPrompt(projectDir, `Skill: ${skillName}`, prompt, () => ({
         canvasStore: useCanvasStore,
-        claudeStore: useClaudeStore,
+        providerSessionStore: useProviderSessionStore,
         settingsStore: useSettingsStore,
       }), { skipOpenwolf: true, provider: activeProvider ?? "anthropic" });
       onClose();
@@ -237,7 +237,7 @@ export default function SkillDialog({ isOpen, onClose }: SkillDialogProps) {
     const activeTerm = terminals.find((t) => t.terminalId === activeId && t.panelType === "claude");
     if (activeTerm) {
       const sid = activeTerm.terminalId;
-      useClaudeStore.getState().setDraftPrompt(sid, `/${skill.name} `);
+      useProviderSessionStore.getState().setDraftPrompt(sid, `/${skill.name} `);
     }
     onClose();
   };

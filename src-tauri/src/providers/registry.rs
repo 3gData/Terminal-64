@@ -17,8 +17,9 @@ use tauri::AppHandle;
 
 use crate::providers::traits::{
     provider_history_unsupported_response, ProviderAdapter, ProviderAdapterError,
-    ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderHistoryRequest,
-    ProviderHistoryResponse, ProviderKind, ProviderSendPromptRequest,
+    ProviderCommandLifecycle, ProviderCreateSessionRequest, ProviderHistoryCapabilities,
+    ProviderHistoryRequest, ProviderHistoryResponse, ProviderKind, ProviderPreparedCommand,
+    ProviderSendPromptRequest,
 };
 
 pub struct ProviderRegistry {
@@ -61,6 +62,15 @@ impl ProviderRegistry {
 
     /// Dispatch today's create-session IPC command through the registered
     /// provider adapter without changing the public Tauri command contract.
+    pub fn prepare_create_session(
+        &self,
+        kind: ProviderKind,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        self.require(kind)?.prepare_create_session(lifecycle, req)
+    }
+
     pub fn create_session(
         &self,
         kind: ProviderKind,
@@ -72,6 +82,15 @@ impl ProviderRegistry {
 
     /// Dispatch today's send-prompt IPC command through the registered
     /// provider adapter without changing the public Tauri command contract.
+    pub fn prepare_send_prompt(
+        &self,
+        kind: ProviderKind,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderSendPromptRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        self.require(kind)?.prepare_send_prompt(lifecycle, req)
+    }
+
     pub fn send_prompt(
         &self,
         kind: ProviderKind,

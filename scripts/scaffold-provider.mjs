@@ -229,18 +229,19 @@ declare module "../../contracts/providerIpc" {
   }
 }
 
-function build${symbol}Request(input: ProviderTurnInput): ${createRequestName} {
+function build${symbol}Request(input: ProviderTurnInput<"${providerId}">): ${createRequestName} {
   return {
     session_id: input.sessionId,
     cwd: input.cwd,
     prompt: input.prompt,
     ...(input.selectedModel ? { model: input.selectedModel } : {}),
     ...(input.selectedEffort ? { effort: input.selectedEffort } : {}),
+    ...(input.providerPermissionId ? { permission_profile: input.providerPermissionId } : {}),
   };
 }
 
 function build${symbol}SendRequest(
-  input: ProviderTurnInput,
+  input: ProviderTurnInput<"${providerId}">,
   createReq: ${createRequestName},
 ): ${sendRequestName} {
   return {
@@ -249,20 +250,20 @@ function build${symbol}SendRequest(
   };
 }
 
-async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function create(input: ProviderTurnInput<"${providerId}">): Promise<ProviderTurnResult> {
   const req = build${symbol}Request(input);
   await providerCreate({ provider: "${providerId}", req }, input.skipOpenwolf);
   return {};
 }
 
-async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function send(input: ProviderTurnInput<"${providerId}">): Promise<ProviderTurnResult> {
   const createReq = build${symbol}Request(input);
   const req = build${symbol}SendRequest(input, createReq);
   await providerSend({ provider: "${providerId}", req }, input.skipOpenwolf);
   return {};
 }
 
-export const ${runtimeExport}: ProviderRuntime = {
+export const ${runtimeExport}: ProviderRuntime<"${providerId}"> = {
   provider: "${providerId}",
   create,
   send,

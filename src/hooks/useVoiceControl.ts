@@ -20,7 +20,7 @@ import {
   type VoiceIntent,
 } from "../stores/voiceStore";
 import { matchSession } from "../lib/sessionFuzzyMatch";
-import { getSessionsForVoiceMatch } from "../stores/claudeStore";
+import { getSessionsForVoiceMatch } from "../stores/providerSessionStore";
 
 /**
  * Top-level voice-control hook. Mount once in App. Listens to `voice-*` Tauri

@@ -21,6 +21,7 @@ import type {
   ProviderTurnResult,
 } from "../../contracts/providerRuntime";
 import { decodeCodexPermission } from "../providers";
+import { getOpenAiThreadIdForSession, setOpenAiThreadIdForSession } from "./openaiSessionMetadata";
 
 declare module "../../contracts/providerIpc" {
   interface ProviderCreateRequestMap {
@@ -168,31 +169,37 @@ export function promptWithCodexSeed(prompt: string, seedTranscript: ChatMessage[
   return clipMiddle(fullPrompt, CODEX_MAX_TURN_PROMPT_CHARS, "fork prompt");
 }
 
-async function ensureCodexRuntime(input: ProviderTurnInput) {
+async function ensureCodexRuntime(input: ProviderTurnInput<"openai">) {
   await ensureCodexSkills().catch(() => {});
   return input;
 }
 
-export function buildCodexCreateRequest(input: ProviderTurnInput): CreateCodexRequest {
+export function buildCodexCreateRequest(input: ProviderTurnInput<"openai">): CreateCodexRequest {
+  const options = input.providerOptions?.openai;
+  const selectedModel = input.selectedControls?.model ?? input.selectedModel;
+  const selectedEffort = input.selectedControls?.effort ?? input.selectedEffort;
   const prompt = promptWithCodexSeed(input.prompt, input.seedTranscript);
   const codexPerm = codexPermissionForOverride(
-    input.providerPermissionId ?? input.selectedCodexPermission ?? "workspace",
+    input.providerPermissionId ?? "workspace",
     input.permissionOverride,
   );
   return {
     session_id: input.sessionId,
     cwd: input.cwd,
     prompt,
-    ...(input.selectedModel ? { model: input.selectedModel } : {}),
-    ...(input.selectedEffort ? { effort: input.selectedEffort } : {}),
-    ...(input.codexCollaborationMode ? { collaboration_mode: input.codexCollaborationMode } : {}),
-    ...(input.skipGitRepoCheck ? { skip_git_repo_check: true } : {}),
-    ...(input.mcpEnv ? { mcp_env: input.mcpEnv } : {}),
+    ...(selectedModel ? { model: selectedModel } : {}),
+    ...(selectedEffort ? { effort: selectedEffort } : {}),
+    ...(options?.collaborationMode ? { collaboration_mode: options.collaborationMode } : {}),
+    ...(options?.skipGitRepoCheck ? { skip_git_repo_check: true } : {}),
+    ...(options?.mcpEnv ? { mcp_env: options.mcpEnv } : {}),
     ...codexPerm,
   };
 }
 
-export function buildCodexSendRequest(input: ProviderTurnInput, createReq: CreateCodexRequest): SendCodexPromptRequest {
+export function buildCodexSendRequest(
+  input: ProviderTurnInput<"openai">,
+  createReq: CreateCodexRequest,
+): SendCodexPromptRequest {
   return {
     ...createReq,
     ...(input.threadId ? { thread_id: input.threadId } : {}),
@@ -205,7 +212,7 @@ export function codexDropTurnsForKeepMessages(preMessages: ChatMessage[], keepMe
   return Math.max(0, totalTurns - keepTurns);
 }
 
-function seedResult(input: ProviderTurnInput): ProviderTurnResult {
+function seedResult(input: ProviderTurnInput<"openai">): ProviderTurnResult {
   return { clearSeedTranscript: !!input.seedTranscript?.length };
 }
 
@@ -213,7 +220,7 @@ function operationStatus(status: "applied" | "skipped" | "unsupported" | undefin
   return status ?? "applied";
 }
 
-async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function create(input: ProviderTurnInput<"openai">): Promise<ProviderTurnResult> {
   const createReq = buildCodexCreateRequest(input);
   const sendReq = buildCodexSendRequest(input, createReq);
   try {
@@ -230,7 +237,7 @@ async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
   return seedResult(input);
 }
 
-async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function send(input: ProviderTurnInput<"openai">): Promise<ProviderTurnResult> {
   const createReq = buildCodexCreateRequest(input);
   const sendReq = buildCodexSendRequest(input, createReq);
   if (!input.threadId) {
@@ -252,7 +259,7 @@ async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
   return seedResult(input);
 }
 
-export const openaiRuntime: ProviderRuntime = {
+export const openaiRuntime: ProviderRuntime<"openai"> = {
   provider: "openai",
 
   prepareTurn: ensureCodexRuntime,
@@ -279,7 +286,8 @@ export const openaiRuntime: ProviderRuntime = {
     },
 
     async rewind(input): Promise<ProviderHistoryTruncateResult> {
-      if (!input.codexThreadId) {
+      const threadId = getOpenAiThreadIdForSession(input.sessionId);
+      if (!threadId) {
         return {
           status: "unsupported",
           reason: "codex_thread_id_missing",
@@ -289,7 +297,7 @@ export const openaiRuntime: ProviderRuntime = {
       const result = await providerHistoryTruncate({
         provider: "openai",
         req: {
-          thread_id: input.codexThreadId,
+          thread_id: threadId,
           cwd: input.cwd,
           num_turns: dropTurns,
         },
@@ -308,7 +316,8 @@ export const openaiRuntime: ProviderRuntime = {
       if (input.keepMessages <= 0) {
         return { status: "skipped", reason: "no_messages_to_fork" };
       }
-      if (!input.codexThreadId) {
+      const threadId = getOpenAiThreadIdForSession(input.parentSessionId);
+      if (!threadId) {
         return {
           status: "skipped",
           reason: "codex_thread_id_missing",
@@ -321,7 +330,7 @@ export const openaiRuntime: ProviderRuntime = {
         const result = await providerHistoryFork({
           provider: "openai",
           req: {
-            thread_id: input.codexThreadId,
+            thread_id: threadId,
             cwd: input.cwd,
             drop_turns: dropTurns,
           },
@@ -335,9 +344,9 @@ export const openaiRuntime: ProviderRuntime = {
         if (!result.codex_thread_id) {
           throw new Error("OpenAI history fork did not return a thread id");
         }
+        setOpenAiThreadIdForSession(input.newSessionId, result.codex_thread_id);
         return {
           status: operationStatus(result.status),
-          codexThreadId: result.codex_thread_id,
         };
       } catch (err) {
         console.warn("[fork] Codex app-server fork failed; falling back to seeded transcript:", err);
@@ -350,12 +359,13 @@ export const openaiRuntime: ProviderRuntime = {
     },
 
     async hydrate(input): Promise<ProviderHydrateResult> {
-      if (!input.codexThreadId) {
+      const threadId = getOpenAiThreadIdForSession(input.sessionId);
+      if (!threadId) {
         return { status: "skipped", reason: "codex_thread_id_missing" };
       }
       const result = await providerHistoryHydrate({
         provider: "openai",
-        req: { thread_id: input.codexThreadId },
+        req: { thread_id: threadId },
       });
       if (result.status === "skipped" || result.status === "unsupported") {
         return {
@@ -371,9 +381,10 @@ export const openaiRuntime: ProviderRuntime = {
     },
 
     async deleteHistory(input): Promise<ProviderHistoryDeleteResult> {
+      const threadId = getOpenAiThreadIdForSession(input.sessionId);
       const result = await providerHistoryDelete({
         provider: "openai",
-        req: input.codexThreadId ? { thread_id: input.codexThreadId } : {},
+        req: threadId ? { thread_id: threadId } : {},
       });
       return {
         status: operationStatus(result.status),

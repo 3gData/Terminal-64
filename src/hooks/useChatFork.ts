@@ -1,11 +1,10 @@
 import { useCallback } from "react";
 import { useCanvasStore } from "../stores/canvasStore";
 import {
-  getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
   resolveSessionProviderState,
-  useClaudeStore,
-} from "../stores/claudeStore";
+  useProviderSessionStore,
+} from "../stores/providerSessionStore";
 import { prepareProviderFork, providerHistorySupports } from "../lib/providerRuntime";
 import type { ProviderForkInput, ProviderForkResult } from "../contracts/providerRuntime";
 
@@ -16,13 +15,11 @@ interface UseChatForkOptions {
 
 export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
   return useCallback(async (messageId: string) => {
-    const store = useClaudeStore.getState();
+    const store = useProviderSessionStore.getState();
     const sess = store.sessions[sessionId];
     if (!sess) return;
     const providerState = resolveSessionProviderState(sess);
-    const openaiMetadata = getOpenAiProviderSessionMetadata(providerState);
     const provider = providerState.provider;
-    const codexThreadId = openaiMetadata?.codexThreadId ?? null;
 
     if (!providerHistorySupports(provider, "fork")) {
       console.warn("[fork] provider does not support history fork:", provider);
@@ -45,9 +42,12 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
     );
 
     // Seed the child store row before any async fork work. The new panel mounts
-    // immediately after addClaudeTerminalAt; if ClaudeChat wins that race it will
+    // immediately after addClaudeTerminalAt; if ProviderChat wins that race it will
     // create the session with the default Anthropic provider.
     store.createSession(newPanel.terminalId, undefined, false, undefined, effectiveCwd, provider, true);
+    for (const [controlId, value] of Object.entries(providerState.selectedControls[provider] ?? {})) {
+      store.setProviderControl(newPanel.terminalId, provider, controlId, value);
+    }
     store.setSelectedModel(newPanel.terminalId, providerState.selectedModel);
     store.setSelectedEffort(newPanel.terminalId, providerState.selectedEffort);
     store.setProviderPermission(newPanel.terminalId, provider, getProviderPermissionId(providerState, provider));
@@ -62,9 +62,6 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
         keepMessages: msgIdx,
         preMessages: sess.messages,
       };
-      if (codexThreadId !== undefined) {
-        forkInput.codexThreadId = codexThreadId;
-      }
       try {
         forkResult = await prepareProviderFork(forkInput);
       } catch (err) {
@@ -79,9 +76,6 @@ export function useChatFork({ sessionId, effectiveCwd }: UseChatForkOptions) {
       }
     }
 
-    if (forkResult.codexThreadId) {
-      store.setCodexThreadId(newPanel.terminalId, forkResult.codexThreadId);
-    }
     if (forkedMessages.length > 0) {
       store.loadFromDisk(newPanel.terminalId, forkedMessages);
       if (provider === "openai" && forkResult.seedTranscript) {

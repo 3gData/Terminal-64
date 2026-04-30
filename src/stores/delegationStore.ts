@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
 import type {
+  DelegateTask,
   DelegateTaskStatus,
   DelegationChildCleanupState,
   DelegationChildRuntimeMetadata,
   DelegationGroup,
   DelegationStatus,
+  PermissionMode,
 } from "../lib/types";
 
 const STORAGE_KEY = "terminal64-delegations";
@@ -22,11 +24,12 @@ interface DelegationState {
 
   createGroup: (
     parentSessionId: string,
-    tasks: { description: string }[],
+    tasks: { description: string; agentName?: string }[],
     mergeStrategy: "auto" | "manual",
     sharedContext?: string,
-    parentPermissionMode?: string,
+    parentPermissionMode?: PermissionMode,
   ) => DelegationGroup;
+  setGroupTeamChatLogPath: (groupId: string, path: string) => void;
   setTaskSessionId: (
     groupId: string,
     taskId: string,
@@ -82,6 +85,92 @@ function cancelIdle(handle: number) {
 function truncateForStorage(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n\n[truncated for Terminal 64 metadata persistence; full task history remains in session logs]`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringOr(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function numberOrNow(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : Date.now();
+}
+
+function statusOrActive(value: unknown): DelegationStatus {
+  return value === "active" || value === "merging" || value === "merged" || value === "cancelled"
+    ? value
+    : "active";
+}
+
+function taskStatusOrPending(value: unknown): DelegateTaskStatus {
+  return value === "pending" || value === "running" || value === "completed" || value === "failed" || value === "cancelled"
+    ? value
+    : "pending";
+}
+
+function permissionModeOrNull(value: unknown): PermissionMode | null {
+  return value === "default" || value === "accept_edits" || value === "bypass_all" || value === "plan" || value === "auto"
+    ? value
+    : null;
+}
+
+function normalizePersistedTask(value: unknown): DelegateTask | null {
+  if (!isRecord(value)) return null;
+  const id = stringOr(value.id);
+  const description = stringOr(value.description);
+  if (!id || !description) return null;
+  const task: DelegateTask = {
+    id,
+    description,
+    sessionId: stringOr(value.sessionId),
+    status: taskStatusOrPending(value.status),
+  };
+  if (typeof value.agentName === "string") task.agentName = value.agentName;
+  if (isRecord(value.childRuntime)) task.childRuntime = value.childRuntime as unknown as DelegationChildRuntimeMetadata;
+  if (typeof value.result === "string") task.result = value.result;
+  if (typeof value.startedAt === "number") task.startedAt = value.startedAt;
+  if (typeof value.completedAt === "number") task.completedAt = value.completedAt;
+  if (typeof value.lastForwardedMessageId === "string") task.lastForwardedMessageId = value.lastForwardedMessageId;
+  if (typeof value.lastAction === "string") task.lastAction = value.lastAction;
+  if (typeof value.lastActionAt === "number") task.lastActionAt = value.lastActionAt;
+  return task;
+}
+
+function normalizePersistedGroup(id: string, value: unknown): DelegationGroup | null {
+  if (!isRecord(value)) return null;
+  const parentSessionId = stringOr(value.parentSessionId);
+  if (!parentSessionId) return null;
+  const rawTasks = Array.isArray(value.tasks) ? value.tasks : [];
+  const tasks = rawTasks
+    .map((task) => normalizePersistedTask(task))
+    .filter((task): task is DelegateTask => task != null);
+  const group: DelegationGroup = {
+    id: stringOr(value.id, id),
+    parentSessionId,
+    tasks,
+    mergeStrategy: value.mergeStrategy === "manual" ? "manual" : "auto",
+    status: statusOrActive(value.status),
+    createdAt: numberOrNow(value.createdAt),
+    collaborationEnabled: value.collaborationEnabled !== false,
+  };
+  if (typeof value.sharedContext === "string") group.sharedContext = value.sharedContext;
+  if (typeof value.teamChatLogPath === "string") group.teamChatLogPath = value.teamChatLogPath;
+  const parentPermissionMode = permissionModeOrNull(value.parentPermissionMode);
+  if (parentPermissionMode) group.parentPermissionMode = parentPermissionMode;
+  return group;
+}
+
+function normalizePersistedGroups(value: unknown): Record<string, DelegationGroup> {
+  if (!isRecord(value)) return {};
+  const groups: Record<string, DelegationGroup> = {};
+  for (const [id, groupValue] of Object.entries(value)) {
+    const group = normalizePersistedGroup(id, groupValue);
+    if (group) groups[group.id] = group;
+  }
+  return groups;
 }
 
 function groupLastActivity(group: DelegationGroup): number {
@@ -172,7 +261,7 @@ function loadFromStorage(): Record<string, DelegationGroup> {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       lastSavedGroupsJson = raw;
-      return pruneGroups(JSON.parse(raw) as Record<string, DelegationGroup>);
+      return pruneGroups(normalizePersistedGroups(JSON.parse(raw)));
     }
   } catch (e) {
     console.warn("[delegation] Failed to load from localStorage:", e);
@@ -213,6 +302,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       tasks: tasks.map((t) => ({
         id: uuidv4(),
         description: t.description,
+        ...(t.agentName ? { agentName: t.agentName } : {}),
         sessionId: "",
         status: "pending" as DelegateTaskStatus,
       })),
@@ -221,7 +311,7 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       createdAt: Date.now(),
       ...(sharedContext !== undefined && { sharedContext }),
       collaborationEnabled: true,
-      parentPermissionMode: (parentPermissionMode as DelegationGroup["parentPermissionMode"]) || "auto",
+      parentPermissionMode: permissionModeOrNull(parentPermissionMode) ?? "auto",
     };
     set((s) => {
       const groups = { ...s.groups, [group.id]: group };
@@ -340,6 +430,16 @@ export const useDelegationStore = create<DelegationState>((set, get) => ({
       const group = s.groups[groupId];
       if (!group) return s;
       const groups = { ...s.groups, [groupId]: { ...group, status } };
+      debouncedSave();
+      return { groups };
+    });
+  },
+
+  setGroupTeamChatLogPath: (groupId, path) => {
+    set((s) => {
+      const group = s.groups[groupId];
+      if (!group || group.teamChatLogPath === path) return s;
+      const groups = { ...s.groups, [groupId]: { ...group, teamChatLogPath: path } };
       debouncedSave();
       return { groups };
     });

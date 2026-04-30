@@ -1,7 +1,10 @@
 import {
-  getProviderControl,
+  getProviderDefaultPermission,
+  getProviderInputPermissionControl,
   getProviderManifest,
+  getProviderPermissionOptions,
   isClaudePermissionId,
+  isProviderPermissionValue,
   type PermissionOption,
   type ProviderId,
 } from "./providers";
@@ -14,26 +17,25 @@ export interface ProviderPermissionInputPresentation {
 }
 
 export function getDefaultProviderPermissionId(provider: ProviderId): string {
-  const manifest = getProviderManifest(provider);
-  return manifest.defaultPermission || manifest.permissions[0]?.id || "default";
+  return getProviderDefaultPermission(provider) || getProviderPermissionOptions(provider)[0]?.id || "default";
 }
 
 export function isProviderPermissionId(provider: ProviderId, id: string): boolean {
-  return getProviderManifest(provider).permissions.some((permission) => permission.id === id);
+  return isProviderPermissionValue(provider, id);
 }
 
 export function getProviderPermissionOption(provider: ProviderId, id: string | null | undefined): PermissionOption {
-  const manifest = getProviderManifest(provider);
+  const permissions = getProviderPermissionOptions(provider);
   const defaultId = getDefaultProviderPermissionId(provider);
   return (
-    manifest.permissions.find((permission) => permission.id === id) ??
-    manifest.permissions.find((permission) => permission.id === defaultId) ??
-    manifest.permissions[0]!
+    permissions.find((permission) => permission.id === id) ??
+    permissions.find((permission) => permission.id === defaultId) ??
+    permissions[0]!
   );
 }
 
 export function getNextProviderPermissionId(provider: ProviderId, currentId: string): string {
-  const permissions = getProviderManifest(provider).permissions;
+  const permissions = getProviderPermissionOptions(provider);
   const currentIndex = permissions.findIndex((permission) => permission.id === currentId);
   return permissions[(currentIndex + 1) % permissions.length]?.id ?? getDefaultProviderPermissionId(provider);
 }
@@ -43,7 +45,7 @@ export function getProviderPermissionInputPresentation(
   permissionId: string | null | undefined,
 ): ProviderPermissionInputPresentation {
   const manifest = getProviderManifest(provider);
-  const permissionControl = getProviderControl(provider, "permission");
+  const permissionControl = getProviderInputPermissionControl(provider);
   const option = getProviderPermissionOption(provider, permissionId);
   const label = option.inputLabel ?? option.label.toLowerCase();
   return {

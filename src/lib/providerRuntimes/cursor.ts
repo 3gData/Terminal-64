@@ -27,15 +27,18 @@ function cursorForceForPermission(permissionId: string | null | undefined, overr
   return selected === "bypass_all" || selected === "accept_edits" || selected === "auto";
 }
 
-function cursorModeForInput(input: ProviderTurnInput): "ask" | "plan" | undefined {
+function cursorModeForInput(input: ProviderTurnInput<"cursor">): "ask" | "plan" | undefined {
   if (input.permissionOverride === "plan" || input.permissionMode === "plan") return "plan";
-  if (input.selectedEffort === "ask" || input.selectedEffort === "plan") return input.selectedEffort;
+  const selectedMode = input.selectedControls?.mode ?? input.selectedEffort;
+  if (selectedMode === "ask" || selectedMode === "plan") return selectedMode;
   return undefined;
 }
 
-export function buildCursorRequest(input: ProviderTurnInput): CreateCursorRequest {
+export function buildCursorRequest(input: ProviderTurnInput<"cursor">): CreateCursorRequest {
+  const options = input.providerOptions?.cursor;
+  const selectedModel = input.selectedControls?.model ?? input.selectedModel;
   const force = cursorForceForPermission(
-    input.providerPermissionId ?? input.selectedCodexPermission,
+    input.providerPermissionId,
     input.permissionOverride ?? input.permissionMode,
   );
   const mode = cursorModeForInput(input);
@@ -45,30 +48,30 @@ export function buildCursorRequest(input: ProviderTurnInput): CreateCursorReques
     prompt: input.prompt,
     permission_mode: input.permissionOverride ?? input.permissionMode ?? "default",
     ...(input.threadId ? { thread_id: input.threadId } : {}),
-    ...(input.selectedModel && input.selectedModel !== "auto" ? { model: input.selectedModel } : {}),
+    ...(selectedModel && selectedModel !== "auto" ? { model: selectedModel } : {}),
     ...(mode ? { mode } : {}),
     ...(force ? { force: true } : {}),
-    ...(input.mcpEnv ? { mcp_env: input.mcpEnv } : {}),
+    ...(options?.mcpEnv ? { mcp_env: options.mcpEnv } : {}),
   };
 }
 
-function seedResult(input: ProviderTurnInput): ProviderTurnResult {
+function seedResult(input: ProviderTurnInput<"cursor">): ProviderTurnResult {
   return { clearSeedTranscript: !!input.seedTranscript?.length };
 }
 
-async function create(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function create(input: ProviderTurnInput<"cursor">): Promise<ProviderTurnResult> {
   const req = buildCursorRequest(input);
   await providerCreate({ provider: "cursor", req }, input.skipOpenwolf);
   return seedResult(input);
 }
 
-async function send(input: ProviderTurnInput): Promise<ProviderTurnResult> {
+async function send(input: ProviderTurnInput<"cursor">): Promise<ProviderTurnResult> {
   const req: SendCursorPromptRequest = buildCursorRequest(input);
   await providerSend({ provider: "cursor", req }, input.skipOpenwolf);
   return seedResult(input);
 }
 
-export const cursorRuntime: ProviderRuntime = {
+export const cursorRuntime: ProviderRuntime<"cursor"> = {
   provider: "cursor",
 
   create,

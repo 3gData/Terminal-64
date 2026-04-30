@@ -33,9 +33,9 @@ import {
   getOpenAiProviderSessionMetadata,
   getProviderPermissionId,
   resolveSessionProviderState,
-  useClaudeStore,
+  useProviderSessionStore,
   type ClaudeSession,
-} from "../../stores/claudeStore";
+} from "../../stores/providerSessionStore";
 import { useCanvasStore } from "../../stores/canvasStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { useVoiceStore } from "../../stores/voiceStore";
@@ -115,7 +115,7 @@ function stringifyError(err: unknown) {
  * and in response to t64:request-state.
  */
 export function buildWidgetBridgeStateSnapshot() {
-  const claude = useClaudeStore.getState();
+  const claude = useProviderSessionStore.getState();
   const theme = useThemeStore.getState();
   const canvas = useCanvasStore.getState();
 
@@ -182,6 +182,7 @@ function providerTurnForSession(
     prompt,
     started: opts?.started ?? session.hasBeenStarted,
     threadId: openaiMetadata?.codexThreadId ?? null,
+    selectedControls: providerState.selectedControls[providerState.provider] ?? {},
     selectedModel: providerState.selectedModel,
     selectedEffort: providerState.selectedEffort,
     providerPermissionId: providerState.providerPermissions[providerState.provider]
@@ -196,7 +197,7 @@ function providerTurnForSession(
 }
 
 function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) {
-  const store = useClaudeStore.getState();
+  const store = useProviderSessionStore.getState();
   if (result.clearSeedTranscript) store.clearSeedTranscript(sessionId);
   if (result.clearResumeAtUuid) store.setResumeAtUuid(sessionId, null);
   if (result.clearForkParentSessionId) store.setForkParentSessionId(sessionId, null);
@@ -205,7 +206,7 @@ function applyProviderTurnResult(sessionId: string, result: ProviderTurnResult) 
 function resolveActiveProviderForWidgetBridge(): ProviderId | null {
   const activeId = useCanvasStore.getState().activeTerminalId;
   if (!activeId) return null;
-  const activeSession = useClaudeStore.getState().sessions[activeId];
+  const activeSession = useProviderSessionStore.getState().sessions[activeId];
   return activeSession ? resolveSessionProviderState(activeSession).provider : null;
 }
 
@@ -315,7 +316,7 @@ export function useWidgetBridgeHost({
       streamingTextFlushTimer = setTimeout(flushStreamingText, 250);
     };
 
-    const unsub = useClaudeStore.subscribe((state, prev) => {
+    const unsub = useProviderSessionStore.subscribe((state, prev) => {
       if (sessionEventSubscriptionsRef.current.size === 0) return;
       for (const [sid, session] of Object.entries(state.sessions)) {
         const prevSession = prev.sessions[sid] as ClaudeSession | undefined;
@@ -727,7 +728,7 @@ export function useWidgetBridgeHost({
       case "t64:send-prompt": {
         const { sessionId, prompt, id: spId } = msg.payload || {};
         if (!sessionId || !prompt) return;
-        const sess = useClaudeStore.getState().sessions[sessionId];
+        const sess = useProviderSessionStore.getState().sessions[sessionId];
         if (!sess) { post({ type: "t64:prompt-sent", payload: { id: spId, error: "Session not found" } }); return; }
         runProviderTurn(providerTurnForSession(sessionId, sess, prompt, { defaultCodexPermission: "full-auto" }))
           .then((result) => {
@@ -746,7 +747,7 @@ export function useWidgetBridgeHost({
           sessCwd || ".", false, sessName || "Widget Session"
         );
         const sid = panel.terminalId;
-        useClaudeStore.getState().createSession(
+        useProviderSessionStore.getState().createSession(
           sid,
           sessName || "Widget Session",
           false,
@@ -757,7 +758,7 @@ export function useWidgetBridgeHost({
         );
         if (hasPrompt) {
           setTimeout(() => {
-            const store = useClaudeStore.getState();
+            const store = useProviderSessionStore.getState();
             const createdSession = store.sessions[sid];
             if (!createdSession) return;
             store.addUserMessage(sid, sessPrompt);
@@ -768,7 +769,7 @@ export function useWidgetBridgeHost({
             })).then((result) => {
               applyProviderTurnResult(sid, result);
             }).catch((err) => {
-              useClaudeStore.getState().setError(sid, `Failed to start session: ${err}`);
+              useProviderSessionStore.getState().setError(sid, `Failed to start session: ${err}`);
             });
           }, 300);
         }
@@ -955,7 +956,7 @@ export function useWidgetBridgeHost({
 
     if (msg.type === "t64:request-messages") {
       const sid = msg.payload?.sessionId;
-      const session = useClaudeStore.getState().sessions[sid];
+      const session = useProviderSessionStore.getState().sessions[sid];
       if (session) {
         post({
           type: "t64:messages",

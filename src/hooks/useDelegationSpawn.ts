@@ -14,7 +14,8 @@ import {
   resolveDelegationChildCwd,
 } from "../lib/delegationWorkflow";
 import { useCanvasStore } from "../stores/canvasStore";
-import { useClaudeStore } from "../stores/claudeStore";
+import { useProviderSessionStore } from "../stores/providerSessionStore";
+import type { ProviderControlValueMap } from "../stores/providerSessionStore";
 import { useDelegationStore } from "../stores/delegationStore";
 
 interface UseDelegationSpawnOptions {
@@ -22,6 +23,7 @@ interface UseDelegationSpawnOptions {
   effectiveCwd: string;
   selectedProvider: ProviderId;
   permissionMode: PermissionMode;
+  selectedControls: ProviderControlValueMap;
   selectedModel: string;
   selectedEffort: string;
   selectedProviderPermissionId: string;
@@ -33,13 +35,14 @@ export function useDelegationSpawn({
   effectiveCwd,
   selectedProvider,
   permissionMode,
+  selectedControls,
   selectedModel,
   selectedEffort,
   selectedProviderPermissionId,
   addUserMessage,
 }: UseDelegationSpawnOptions) {
   return useCallback(
-    async (tasks: { description: string }[], sharedContext: string) => {
+    async (tasks: { description: string; agentName?: string }[], sharedContext: string) => {
       const delStore = useDelegationStore.getState();
       const group = delStore.createGroup(sessionId, tasks, "auto", sharedContext || undefined, permissionMode);
 
@@ -64,7 +67,7 @@ export function useDelegationSpawn({
         console.warn("[delegation] Failed to get port/secret:", err);
       }
 
-      const parentSess = useClaudeStore.getState().sessions[sessionId];
+      const parentSess = useProviderSessionStore.getState().sessions[sessionId];
       const appDir = resolveDelegationChildCwd({
         effectiveCwd,
         sessionCwd: parentSess?.cwd,
@@ -72,6 +75,7 @@ export function useDelegationSpawn({
       const childRuntime = resolveDelegationChildRuntimeSettings({
         parentSession: parentSess,
         selectedProvider,
+        selectedControls,
         selectedModel,
         selectedEffort,
         selectedProviderPermissionId,
@@ -82,6 +86,7 @@ export function useDelegationSpawn({
         const childSpawn = buildDelegationChildSpawnPlan({
           sharedContext,
           taskDescription: task.description,
+          agentName: task.agentName,
           taskIndex: i,
           taskCount: tasks.length,
           teamChatEnabled: delegationPort > 0,
@@ -95,7 +100,7 @@ export function useDelegationSpawn({
         );
         delStore.updateTaskStatus(group.id, task.id, "running");
 
-        useClaudeStore.getState().createSession(
+        useProviderSessionStore.getState().createSession(
           childSessionId,
           childSpawn.childName,
           true,
@@ -104,9 +109,17 @@ export function useDelegationSpawn({
           childRuntime.provider,
           true,
         );
-        useClaudeStore.getState().setSelectedModel(childSessionId, childRuntime.selectedModel);
-        useClaudeStore.getState().setSelectedEffort(childSessionId, childRuntime.selectedEffort);
-        useClaudeStore.getState().setProviderPermission(
+        for (const [controlId, value] of Object.entries(childRuntime.selectedControls)) {
+          useProviderSessionStore.getState().setProviderControl(
+            childSessionId,
+            childRuntime.provider,
+            controlId,
+            value,
+          );
+        }
+        useProviderSessionStore.getState().setSelectedModel(childSessionId, childRuntime.selectedModel);
+        useProviderSessionStore.getState().setSelectedEffort(childSessionId, childRuntime.selectedEffort);
+        useProviderSessionStore.getState().setProviderPermission(
           childSessionId,
           childRuntime.provider,
           childRuntime.selectedProviderPermissionId,
@@ -142,6 +155,7 @@ export function useDelegationSpawn({
       effectiveCwd,
       selectedProvider,
       permissionMode,
+      selectedControls,
       selectedModel,
       selectedEffort,
       selectedProviderPermissionId,

@@ -14,9 +14,9 @@ use tauri::AppHandle;
 
 use crate::providers::emit_provider_event;
 use crate::providers::traits::{
-    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError,
+    ProviderAdapter, ProviderAdapterCapabilities, ProviderAdapterError, ProviderCommandLifecycle,
     ProviderCreateSessionRequest, ProviderHistoryCapabilities, ProviderKind,
-    ProviderSendPromptRequest, ProviderSessionModelSwitchMode,
+    ProviderPreparedCommand, ProviderSendPromptRequest, ProviderSessionModelSwitchMode,
 };
 use crate::providers::util::{cap_event_size, expanded_tool_path, shim_command};
 
@@ -125,11 +125,46 @@ fn resolve_session_id(provided: &str) -> String {
     }
 }
 
+fn payload_cwd(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cwd| !cwd.trim().is_empty())
+}
+
+fn payload_mcp_env(payload: &serde_json::Value) -> Option<HashMap<String, String>> {
+    serde_json::from_value(payload.get("mcp_env")?.clone()).ok()
+}
+
+fn prepare_cursor_command(
+    lifecycle: &ProviderCommandLifecycle<'_>,
+    req: ProviderCreateSessionRequest,
+    command_label: &str,
+) -> ProviderPreparedCommand {
+    let mcp_env = payload_mcp_env(&req.payload);
+    if let Some(cwd) = payload_cwd(&req.payload) {
+        if let Err(e) =
+            crate::ensure_cursor_mcp_impl_with_env(lifecycle.app_handle, cwd, mcp_env.as_ref())
+        {
+            safe_eprintln!("[cursor:mcp] setup failed before {}: {}", command_label, e);
+        }
+    }
+    ProviderPreparedCommand::new(req)
+}
+
 fn permission_forces_write(permission_mode: Option<&str>) -> bool {
     matches!(
         permission_mode,
         Some("bypass_all") | Some("accept_edits") | Some("auto") | Some("yolo") | Some("full-auto")
     )
+}
+
+fn apply_mcp_env(cmd: &mut Command, mcp_env: Option<&HashMap<String, String>>) {
+    if let Some(env) = mcp_env {
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+    }
 }
 
 fn build_command(req: &CursorRequest, resume_thread_id: Option<&str>) -> Command {
@@ -174,16 +209,12 @@ fn build_command(req: &CursorRequest, resume_thread_id: Option<&str>) -> Command
         .stdin(Stdio::piped())
         .env("PATH", expanded_tool_path());
 
-    if let Some(env) = &req.mcp_env {
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
-    }
+    apply_mcp_env(&mut cmd, req.mcp_env.as_ref());
 
     cmd
 }
 
-fn approve_cursor_mcp(cwd: &str) -> Result<(), String> {
+fn approve_cursor_mcp(cwd: &str, mcp_env: Option<&HashMap<String, String>>) -> Result<(), String> {
     let cursor_bin = resolve_cursor_agent_path();
     let mut cmd = shim_command(&cursor_bin);
     cmd.arg("mcp")
@@ -193,6 +224,7 @@ fn approve_cursor_mcp(cwd: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("PATH", expanded_tool_path());
+    apply_mcp_env(&mut cmd, mcp_env);
     if !cwd.is_empty() && cwd != "." {
         cmd.current_dir(cwd);
     }
@@ -481,10 +513,7 @@ impl CursorAdapter {
     ) -> Result<String, String> {
         let resolved_id = resolve_session_id(&req.session_id);
         req.session_id = resolved_id.clone();
-        if let Err(e) = crate::ensure_cursor_mcp_impl(app_handle, &req.cwd) {
-            safe_eprintln!("[cursor:mcp] setup failed before create: {}", e);
-        }
-        let mcp_approval = approve_cursor_mcp(&req.cwd);
+        let mcp_approval = approve_cursor_mcp(&req.cwd, req.mcp_env.as_ref());
         emit_cursor_mcp_status(
             app_handle,
             &resolved_id,
@@ -505,9 +534,6 @@ impl CursorAdapter {
 
     fn send_prompt(&self, app_handle: &AppHandle, req: CursorRequest) -> Result<(), String> {
         let local_session_id = resolve_session_id(&req.session_id);
-        if let Err(e) = crate::ensure_cursor_mcp_impl(app_handle, &req.cwd) {
-            safe_eprintln!("[cursor:mcp] setup failed before send: {}", e);
-        }
         let mapped_thread_id = self
             .cursor_sessions
             .lock()
@@ -515,7 +541,7 @@ impl CursorAdapter {
             .get(&local_session_id)
             .cloned();
         let resume_thread_id = req.thread_id.as_deref().or(mapped_thread_id.as_deref());
-        let mcp_approval = approve_cursor_mcp(&req.cwd);
+        let mcp_approval = approve_cursor_mcp(&req.cwd, req.mcp_env.as_ref());
         emit_cursor_mcp_status(
             app_handle,
             &local_session_id,
@@ -568,6 +594,22 @@ impl Default for CursorAdapter {
 }
 
 impl ProviderAdapter for CursorAdapter {
+    fn prepare_create_session(
+        &self,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderCreateSessionRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        Ok(prepare_cursor_command(lifecycle, req, "create"))
+    }
+
+    fn prepare_send_prompt(
+        &self,
+        lifecycle: &ProviderCommandLifecycle<'_>,
+        req: ProviderSendPromptRequest,
+    ) -> Result<ProviderPreparedCommand, ProviderAdapterError> {
+        Ok(prepare_cursor_command(lifecycle, req, "send"))
+    }
+
     fn create_session(
         &self,
         app_handle: &AppHandle,

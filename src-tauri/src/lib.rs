@@ -100,8 +100,9 @@ use mic_manager::MicManager;
 use permission_server::PermissionServer;
 use plugin_manifest_store::{read_widget_approval, read_widget_manifest, write_widget_approval};
 use providers::{
-    ClaudeAdapter, CodexAdapter, CursorAdapter, ProviderCommandContext, ProviderCommandRequest,
-    ProviderKind, ProviderRegistry,
+    ClaudeAdapter, CodexAdapter, CursorAdapter, ProviderCommandContext, ProviderCommandLifecycle,
+    ProviderCommandRequest, ProviderKind, ProviderOpenWolfOptions, ProviderPreparedCommand,
+    ProviderRegistry,
 };
 use pty_manager::PtyManager;
 use std::sync::{Arc, Mutex};
@@ -311,49 +312,6 @@ fn close_terminal(state: tauri::State<'_, AppState>, id: String) -> Result<(), S
     state.pty_manager.close(&id)
 }
 
-/// If OpenWolf is enabled, ensure .wolf/ exists and merge its hooks into the settings file.
-/// Hard safety net: never init OpenWolf inside T64's own managed directories
-/// (widgets, skills). Guards against stale session state or frontend bugs where
-/// skipOpenwolf wasn't propagated.
-fn is_t64_managed_dir(cwd: &str) -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    let t64 = home.join(".terminal64");
-    std::path::Path::new(cwd).starts_with(&t64)
-}
-
-fn maybe_apply_openwolf(
-    settings_path: &Option<String>,
-    cwd: &str,
-    enabled: bool,
-    auto_init: bool,
-    design_qc: bool,
-) {
-    if !enabled || is_t64_managed_dir(cwd) {
-        return;
-    }
-    claude_manager::ensure_openwolf(cwd, auto_init);
-    if let Some(ref sp) = settings_path {
-        if let Err(e) = claude_manager::merge_openwolf_hooks(sp, cwd, design_qc) {
-            safe_eprintln!("[openwolf] Failed to merge hooks: {}", e);
-        }
-    }
-}
-
-/// Map frontend permission_mode strings to the CLI's internal names. Anything
-/// else (default/auto/plan/acceptEdits) we pass through as-is — the MCP
-/// approver only short-circuits on the exact `bypassPermissions` string.
-fn cli_permission_mode(mode: &str) -> &str {
-    match mode {
-        "bypass_all" => "bypassPermissions",
-        "accept_edits" => "acceptEdits",
-        "plan" => "plan",
-        "auto" => "auto",
-        _ => "default",
-    }
-}
-
 fn provider_kind_from_frontend_id(provider: &str) -> Result<ProviderKind, String> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "anthropic" | "claude" | "claude_agent" | "claudeagent" => Ok(ProviderKind::ClaudeAgent),
@@ -364,81 +322,16 @@ fn provider_kind_from_frontend_id(provider: &str) -> Result<ProviderKind, String
     }
 }
 
-fn provider_payload_string_field<'a>(
-    payload: &'a serde_json::Value,
-    field: &str,
-) -> Option<&'a str> {
-    payload.get(field).and_then(serde_json::Value::as_str)
-}
-
-fn provider_payload_cwd(payload: &serde_json::Value) -> Option<&str> {
-    provider_payload_string_field(payload, "cwd").filter(|cwd| !cwd.trim().is_empty())
-}
-
-fn write_provider_payload_string_field(
-    payload: &mut serde_json::Value,
-    field: &str,
-    value: String,
-) -> Result<(), String> {
-    let Some(object) = payload.as_object_mut() else {
-        return Err("provider request payload must be a JSON object".to_string());
-    };
-    object.insert(field.to_string(), serde_json::Value::String(value));
-    Ok(())
-}
-
-fn prepare_provider_command_context(
-    state: &AppState,
-    kind: ProviderKind,
-    payload: &mut serde_json::Value,
-    generate_empty_session_id: bool,
-    command_label: &str,
-) -> Result<(ProviderCommandContext, Option<String>), String> {
-    if kind != ProviderKind::ClaudeAgent {
-        return Ok((ProviderCommandContext::default(), None));
+fn provider_openwolf_options(
+    enabled: Option<bool>,
+    auto_init: Option<bool>,
+    design_qc: Option<bool>,
+) -> ProviderOpenWolfOptions {
+    ProviderOpenWolfOptions {
+        enabled: enabled.unwrap_or(false),
+        auto_init: auto_init.unwrap_or(true),
+        design_qc: design_qc.unwrap_or(false),
     }
-
-    let mut session_id = provider_payload_string_field(payload, "session_id")
-        .ok_or_else(|| {
-            format!(
-                "Invalid Anthropic {} request: missing required field 'session_id'",
-                command_label
-            )
-        })?
-        .to_string();
-
-    if generate_empty_session_id && session_id.trim().is_empty() {
-        session_id = uuid::Uuid::new_v4().to_string();
-        write_provider_payload_string_field(payload, "session_id", session_id.clone())?;
-    }
-
-    let permission_mode =
-        provider_payload_string_field(payload, "permission_mode").ok_or_else(|| {
-            format!(
-                "Invalid Anthropic {} request: missing required field 'permission_mode'",
-                command_label
-            )
-        })?;
-    let cli_mode = cli_permission_mode(permission_mode);
-    let registration = state
-        .permission_server
-        .register_session(&session_id, cli_mode)
-        .ok();
-    let settings_path = registration
-        .as_ref()
-        .map(|(_, s, _)| s.to_string_lossy().to_string());
-    let approver_path = registration
-        .as_ref()
-        .map(|(_, _, m)| m.to_string_lossy().to_string());
-    let cleanup_token = registration.map(|(token, _, _)| token);
-
-    Ok((
-        ProviderCommandContext {
-            settings_path,
-            approver_mcp_config: approver_path,
-        },
-        cleanup_token,
-    ))
 }
 
 fn provider_create_impl(
@@ -451,33 +344,27 @@ fn provider_create_impl(
     openwolf_design_qc: Option<bool>,
 ) -> Result<String, String> {
     let kind = provider_kind_from_frontend_id(provider)?;
-    if state.providers.get(kind).is_none() {
-        return state.providers.create_session(
-            kind,
-            app_handle,
-            ProviderCommandRequest::new(req, ProviderCommandContext::default()),
-        );
-    }
-
-    let mut payload = req;
-    let (context, cleanup_token) =
-        prepare_provider_command_context(state, kind, &mut payload, true, "create")?;
-    if let Some(cwd) = provider_payload_cwd(&payload) {
-        maybe_apply_openwolf(
-            &context.settings_path,
-            cwd,
-            openwolf_enabled.unwrap_or(false),
-            openwolf_auto_init.unwrap_or(true),
-            openwolf_design_qc.unwrap_or(false),
-        );
-    }
-    let result = state.providers.create_session(
-        kind,
+    let lifecycle = ProviderCommandLifecycle {
         app_handle,
-        ProviderCommandRequest::new(payload, context),
-    );
+        permission_server: &state.permission_server,
+        openwolf: provider_openwolf_options(
+            openwolf_enabled,
+            openwolf_auto_init,
+            openwolf_design_qc,
+        ),
+    };
+    let prepared = state.providers.prepare_create_session(
+        kind,
+        &lifecycle,
+        ProviderCommandRequest::new(req, ProviderCommandContext::default()),
+    )?;
+    let ProviderPreparedCommand {
+        request,
+        cleanup_tokens,
+    } = prepared;
+    let result = state.providers.create_session(kind, app_handle, request);
     if result.is_err() {
-        if let Some(token) = cleanup_token {
+        for token in cleanup_tokens {
             state.permission_server.unregister_session(&token);
         }
     }
@@ -494,33 +381,27 @@ fn provider_send_impl(
     openwolf_design_qc: Option<bool>,
 ) -> Result<(), String> {
     let kind = provider_kind_from_frontend_id(provider)?;
-    if state.providers.get(kind).is_none() {
-        return state.providers.send_prompt(
-            kind,
-            app_handle,
-            ProviderCommandRequest::new(req, ProviderCommandContext::default()),
-        );
-    }
-
-    let mut payload = req;
-    let (context, cleanup_token) =
-        prepare_provider_command_context(state, kind, &mut payload, false, "send")?;
-    if let Some(cwd) = provider_payload_cwd(&payload) {
-        maybe_apply_openwolf(
-            &context.settings_path,
-            cwd,
-            openwolf_enabled.unwrap_or(false),
-            openwolf_auto_init.unwrap_or(true),
-            openwolf_design_qc.unwrap_or(false),
-        );
-    }
-    let result = state.providers.send_prompt(
-        kind,
+    let lifecycle = ProviderCommandLifecycle {
         app_handle,
-        ProviderCommandRequest::new(payload, context),
-    );
+        permission_server: &state.permission_server,
+        openwolf: provider_openwolf_options(
+            openwolf_enabled,
+            openwolf_auto_init,
+            openwolf_design_qc,
+        ),
+    };
+    let prepared = state.providers.prepare_send_prompt(
+        kind,
+        &lifecycle,
+        ProviderCommandRequest::new(req, ProviderCommandContext::default()),
+    )?;
+    let ProviderPreparedCommand {
+        request,
+        cleanup_tokens,
+    } = prepared;
+    let result = state.providers.send_prompt(kind, app_handle, request);
     if result.is_err() {
-        if let Some(token) = cleanup_token {
+        for token in cleanup_tokens {
             state.permission_server.unregister_session(&token);
         }
     }
@@ -3566,12 +3447,11 @@ fn get_node_path() -> String {
     resolve_node_path().to_string()
 }
 
-#[tauri::command]
-fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
-    let app_dir = get_app_dir(app_handle)?;
+pub(crate) fn ensure_t64_mcp_impl(app_handle: &tauri::AppHandle, cwd: &str) -> Result<(), String> {
+    let app_dir = get_app_dir(app_handle.clone())?;
     let script_path = t64_mcp_script_path(&app_dir);
     let node_path = resolve_node_path();
-    let mcp_path = std::path::Path::new(&cwd).join(".mcp.json");
+    let mcp_path = std::path::Path::new(cwd).join(".mcp.json");
 
     let mut config: serde_json::Value = std::fs::read_to_string(&mcp_path)
         .ok()
@@ -3611,9 +3491,75 @@ fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), Strin
     Ok(())
 }
 
+#[tauri::command]
+fn ensure_t64_mcp(app_handle: tauri::AppHandle, cwd: String) -> Result<(), String> {
+    ensure_t64_mcp_impl(&app_handle, &cwd)
+}
+
+fn cursor_mcp_env_value<'a>(
+    mcp_env: Option<&'a std::collections::HashMap<String, String>>,
+    key: &str,
+) -> Option<&'a str> {
+    mcp_env?
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn cursor_mcp_delegation_env_active(
+    mcp_env: Option<&std::collections::HashMap<String, String>>,
+) -> bool {
+    let port = cursor_mcp_env_value(mcp_env, "T64_DELEGATION_PORT").unwrap_or("");
+    let secret = cursor_mcp_env_value(mcp_env, "T64_DELEGATION_SECRET").unwrap_or("");
+    let group_id = cursor_mcp_env_value(mcp_env, "T64_GROUP_ID").unwrap_or("");
+    !port.is_empty() && port != "0" && !secret.is_empty() && !group_id.is_empty()
+}
+
+fn cursor_mcp_server_config(
+    node_path: &str,
+    script_path: &str,
+    mcp_env: Option<&std::collections::HashMap<String, String>>,
+) -> serde_json::Value {
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "T64_MCP_OUTPUT_FRAMING".to_string(),
+        serde_json::json!("newline"),
+    );
+
+    if cursor_mcp_delegation_env_active(mcp_env) {
+        for key in [
+            "T64_DELEGATION_PORT",
+            "T64_DELEGATION_SECRET",
+            "T64_GROUP_ID",
+        ] {
+            if let Some(value) = cursor_mcp_env_value(mcp_env, key) {
+                env.insert(key.to_string(), serde_json::json!(value));
+            }
+        }
+        env.insert(
+            "T64_AGENT_LABEL".to_string(),
+            serde_json::json!(cursor_mcp_env_value(mcp_env, "T64_AGENT_LABEL").unwrap_or("Agent")),
+        );
+    }
+
+    serde_json::json!({
+        "command": node_path,
+        "args": [script_path],
+        "env": serde_json::Value::Object(env),
+    })
+}
+
 pub(crate) fn ensure_cursor_mcp_impl(
     app_handle: &tauri::AppHandle,
     cwd: &str,
+) -> Result<(), String> {
+    ensure_cursor_mcp_impl_with_env(app_handle, cwd, None)
+}
+
+pub(crate) fn ensure_cursor_mcp_impl_with_env(
+    app_handle: &tauri::AppHandle,
+    cwd: &str,
+    mcp_env: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), String> {
     let app_dir = get_app_dir(app_handle.clone())?;
     let script_path = t64_mcp_script_path(&app_dir);
@@ -3639,37 +3585,16 @@ pub(crate) fn ensure_cursor_mcp_impl(
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}));
 
-    if let Some(existing) = servers.get("terminal-64") {
-        if existing.get("command").and_then(|v| v.as_str()) == Some(node_path)
-            && existing
-                .get("args")
-                .and_then(|v| v.get(0))
-                .and_then(|v| v.as_str())
-                == Some(script_path.as_str())
-            && existing
-                .get("env")
-                .and_then(|v| v.get("T64_MCP_OUTPUT_FRAMING"))
-                .and_then(|v| v.as_str())
-                == Some("newline")
-        {
-            return Ok(());
-        }
+    let desired_server = cursor_mcp_server_config(node_path, &script_path, mcp_env);
+
+    if servers.get("terminal-64") == Some(&desired_server) {
+        return Ok(());
     }
 
-    servers.as_object_mut().ok_or("Invalid mcpServers")?.insert(
-        "terminal-64".to_string(),
-        serde_json::json!({
-            "command": node_path,
-            "args": [script_path],
-            "env": {
-                "T64_MCP_OUTPUT_FRAMING": "newline",
-                "T64_DELEGATION_PORT": "${env:T64_DELEGATION_PORT}",
-                "T64_DELEGATION_SECRET": "${env:T64_DELEGATION_SECRET}",
-                "T64_GROUP_ID": "${env:T64_GROUP_ID}",
-                "T64_AGENT_LABEL": "${env:T64_AGENT_LABEL}"
-            }
-        }),
-    );
+    servers
+        .as_object_mut()
+        .ok_or("Invalid mcpServers")?
+        .insert("terminal-64".to_string(), desired_server);
 
     std::fs::write(
         &mcp_path,
@@ -3819,6 +3744,7 @@ fn get_delegation_messages(
         .iter()
         .map(|m| {
             serde_json::json!({
+                "group_id": m.group_id,
                 "agent": m.agent,
                 "message": m.message,
                 "timestamp": m.timestamp,
@@ -6360,5 +6286,57 @@ mod stability_tests {
                 .collect::<Vec<_>>(),
             vec!["first", "first done", "second", "second done"]
         );
+    }
+
+    #[test]
+    fn cursor_mcp_config_uses_actual_delegation_env_for_child_tools() {
+        let mut mcp_env = std::collections::HashMap::new();
+        mcp_env.insert("T64_DELEGATION_PORT".to_string(), "53023".to_string());
+        mcp_env.insert("T64_DELEGATION_SECRET".to_string(), "secret".to_string());
+        mcp_env.insert("T64_GROUP_ID".to_string(), "group-1".to_string());
+        mcp_env.insert("T64_AGENT_LABEL".to_string(), "Builder".to_string());
+
+        let server = cursor_mcp_server_config("node", "t64-server.mjs", Some(&mcp_env));
+        let env = server.get("env").unwrap();
+
+        assert_eq!(
+            env.get("T64_MCP_OUTPUT_FRAMING").and_then(|v| v.as_str()),
+            Some("newline")
+        );
+        assert_eq!(
+            env.get("T64_DELEGATION_PORT").and_then(|v| v.as_str()),
+            Some("53023")
+        );
+        assert_eq!(
+            env.get("T64_DELEGATION_SECRET").and_then(|v| v.as_str()),
+            Some("secret")
+        );
+        assert_eq!(
+            env.get("T64_GROUP_ID").and_then(|v| v.as_str()),
+            Some("group-1")
+        );
+        assert_eq!(
+            env.get("T64_AGENT_LABEL").and_then(|v| v.as_str()),
+            Some("Builder")
+        );
+        assert!(
+            !serde_json::to_string(&server).unwrap().contains("${env:"),
+            "Cursor CLI does not expand .cursor/mcp.json env placeholders in headless MCP listing"
+        );
+    }
+
+    #[test]
+    fn cursor_mcp_config_without_delegation_env_exposes_standalone_tools() {
+        let server = cursor_mcp_server_config("node", "t64-server.mjs", None);
+        let env = server.get("env").unwrap();
+
+        assert_eq!(
+            env.get("T64_MCP_OUTPUT_FRAMING").and_then(|v| v.as_str()),
+            Some("newline")
+        );
+        assert!(env.get("T64_DELEGATION_PORT").is_none());
+        assert!(env.get("T64_DELEGATION_SECRET").is_none());
+        assert!(env.get("T64_GROUP_ID").is_none());
+        assert!(env.get("T64_AGENT_LABEL").is_none());
     }
 }
